@@ -31,19 +31,17 @@ import java.util.logging.Logger;
 public class EntryPointStorage {
   private static final Logger LOGGER = Logger.getLogger(EntryPointStorage.class.getName());
 
-  private final DirectorySubspace subspace;
   private final VectorIndexKeys keys;
   private final InstantSource instantSource;
 
   /**
    * Creates a new EntryPointStorage instance.
    *
-   * @param subspace the FDB directory subspace for this collection
+   * @param subspace       the FDB directory subspace for this collection
    * @param collectionName the name of the collection
-   * @param instantSource source for timestamps
+   * @param instantSource  source for timestamps
    */
   public EntryPointStorage(DirectorySubspace subspace, String collectionName, InstantSource instantSource) {
-    this.subspace = subspace;
     this.keys = new VectorIndexKeys(subspace, collectionName);
     this.instantSource = instantSource;
   }
@@ -51,15 +49,14 @@ public class EntryPointStorage {
   /**
    * Stores or updates the entry list for search initialization.
    *
-   * @param tx the transaction to use
-   * @param primaryEntries primary entry point node IDs (can be empty)
-   * @param randomEntries random sample entry node IDs (can be empty)
+   * @param tx                the transaction to use
+   * @param primaryEntries    primary entry point node IDs (can be empty)
+   * @param randomEntries     random sample entry node IDs (can be empty)
    * @param highDegreeEntries high-degree entry node IDs (can be empty)
    * @return future that completes when the entry list is stored
    */
   public CompletableFuture<Void> storeEntryList(
       Transaction tx, List<Long> primaryEntries, List<Long> randomEntries, List<Long> highDegreeEntries) {
-
     byte[] key = keys.entryListKey();
 
     return readProto(tx, key, EntryList.parser()).thenApply(existing -> {
@@ -85,7 +82,7 @@ public class EntryPointStorage {
       builder.setVersion(existing != null ? existing.getVersion() + 1 : 1);
 
       // Calculate statistics if primary entries exist
-      if (!primaryEntries.isEmpty()) {
+      if (primaryEntries != null && !primaryEntries.isEmpty()) {
         // These would be calculated by the caller based on graph analysis
         // For now, we just store what we're given
       }
@@ -116,7 +113,7 @@ public class EntryPointStorage {
    * Gets all entry points from the entry list, combining all strategies.
    * Returns entries in priority order: primary, random, then high-degree.
    *
-   * @param tx the transaction to use
+   * @param tx         the transaction to use
    * @param maxEntries maximum number of entries to return (0 = all)
    * @return future containing list of entry node IDs
    */
@@ -146,7 +143,7 @@ public class EntryPointStorage {
    * Gets entry points using a hierarchical strategy.
    * Fills up to beamSize entries using primary entries first, then random, then high-degree.
    *
-   * @param tx the transaction to use
+   * @param tx       the transaction to use
    * @param beamSize target number of entries to return
    * @return future containing list of entry node IDs
    */

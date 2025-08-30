@@ -12,8 +12,6 @@ import org.junit.jupiter.api.Test;
 
 class ProductQuantizerTest {
 
-  private static final float EPSILON = 1e-4f;
-
   @Test
   void testConstructorValidation() {
     // Valid construction
@@ -299,7 +297,7 @@ class ProductQuantizerTest {
     List<float[]> emptySet = new ArrayList<>();
 
     CompletableFuture<Void> future = pq.train(emptySet);
-    assertThatThrownBy(() -> future.get())
+    assertThatThrownBy(future::get)
         .isInstanceOf(ExecutionException.class)
         .hasRootCauseInstanceOf(IllegalArgumentException.class)
         .hasRootCauseMessage("Training set cannot be empty");

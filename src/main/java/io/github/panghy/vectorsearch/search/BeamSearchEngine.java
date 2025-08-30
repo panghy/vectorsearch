@@ -1,5 +1,7 @@
 package io.github.panghy.vectorsearch.search;
 
+import static java.util.concurrent.CompletableFuture.completedFuture;
+
 import com.apple.foundationdb.ReadTransaction;
 import com.apple.foundationdb.Transaction;
 import io.github.panghy.vectorsearch.pq.ProductQuantizer;
@@ -42,10 +44,10 @@ public class BeamSearchEngine {
   /**
    * Creates a new BeamSearchEngine.
    *
-   * @param adjacencyStorage storage for graph adjacency lists
-   * @param pqBlockStorage storage for PQ codes
+   * @param adjacencyStorage  storage for graph adjacency lists
+   * @param pqBlockStorage    storage for PQ codes
    * @param entryPointStorage storage for entry points
-   * @param pq the product quantizer for distance computation
+   * @param pq                the product quantizer for distance computation
    */
   public BeamSearchEngine(
       NodeAdjacencyStorage adjacencyStorage,
@@ -61,16 +63,16 @@ public class BeamSearchEngine {
   /**
    * Performs beam search to find approximate nearest neighbors.
    *
-   * @param tx the read transaction (should be snapshot for consistency)
-   * @param queryVector the query vector
-   * @param topK number of results to return
-   * @param searchListSize beam size (defaults to max(16, topK) if 0)
-   * @param maxVisits maximum nodes to visit (safety limit)
+   * @param tx              the read transaction (should be snapshot for consistency)
+   * @param queryVector     the query vector
+   * @param topK            number of results to return
+   * @param searchListSize  beam size (defaults to max(16, topK) if 0)
+   * @param maxVisits       maximum nodes to visit (safety limit)
    * @param codebookVersion the PQ codebook version to use
    * @return future containing top-k search results
    */
   public CompletableFuture<List<SearchResult>> search(
-      ReadTransaction tx, float[] queryVector, int topK, int searchListSize, int maxVisits, int codebookVersion) {
+      Transaction tx, float[] queryVector, int topK, int searchListSize, int maxVisits, int codebookVersion) {
 
     // Apply Milvus behavior: search_list = max(default, topK)
     int beamSize = searchListSize > 0 ? Math.max(searchListSize, topK) : Math.max(16, topK);
@@ -81,22 +83,19 @@ public class BeamSearchEngine {
     float[][] lookupTable = pq.buildLookupTable(queryVector);
 
     // Get entry points using hierarchical strategy
-    return entryPointStorage
-        .getHierarchicalEntryPoints((Transaction) tx, beamSize)
-        .thenCompose(entryPoints -> {
-          if (entryPoints.isEmpty()) {
-            LOGGER.warning("No entry points found, returning empty results");
-            return CompletableFuture.completedFuture(Collections.emptyList());
-          }
+    return entryPointStorage.getHierarchicalEntryPoints(tx, beamSize).thenCompose(entryPoints -> {
+      if (entryPoints.isEmpty()) {
+        LOGGER.warning("No entry points found, returning empty results");
+        return completedFuture(Collections.emptyList());
+      }
 
-          // Score and seed initial candidates
-          return scoreNodes(tx, entryPoints, lookupTable, codebookVersion)
-              .thenCompose(initialCandidates -> {
-                // Execute beam search
-                return executeBeamSearch(
-                    tx, initialCandidates, lookupTable, codebookVersion, beamSize, topK, maxVisits);
-              });
-        });
+      // Score and seed initial candidates
+      return scoreNodes(entryPoints, lookupTable, codebookVersion).thenCompose(initialCandidates -> {
+        // Execute beam search
+        return executeBeamSearch(
+            tx, initialCandidates, lookupTable, codebookVersion, beamSize, topK, maxVisits);
+      });
+    });
   }
 
   /**
@@ -162,7 +161,7 @@ public class BeamSearchEngine {
 
       LOGGER.fine(String.format("Search complete: visited=%d, results=%d", visitCount, finalResults.size()));
 
-      return CompletableFuture.completedFuture(finalResults);
+      return completedFuture(finalResults);
     }
 
     // Get best unvisited candidate
@@ -182,7 +181,7 @@ public class BeamSearchEngine {
       if (finalResults.size() > topK) {
         finalResults = finalResults.subList(0, topK);
       }
-      return CompletableFuture.completedFuture(finalResults);
+      return completedFuture(finalResults);
     }
 
     // Mark as visited
@@ -249,7 +248,7 @@ public class BeamSearchEngine {
           }
 
           // Score new neighbors
-          return scoreNodes(tx, newNeighbors, lookupTable, codebookVersion)
+          return scoreNodes(newNeighbors, lookupTable, codebookVersion)
               .thenCompose(scoredNeighbors -> {
                 // Add scored neighbors to beam
                 beam.addAll(scoredNeighbors);
@@ -284,40 +283,26 @@ public class BeamSearchEngine {
    * Scores a batch of nodes using PQ distance computation.
    */
   private CompletableFuture<List<SearchCandidate>> scoreNodes(
-      ReadTransaction tx, List<Long> nodeIds, float[][] lookupTable, int codebookVersion) {
+      List<Long> nodeIds, float[][] lookupTable, int codebookVersion) {
 
     if (nodeIds.isEmpty()) {
-      return CompletableFuture.completedFuture(Collections.emptyList());
+      return completedFuture(Collections.emptyList());
     }
 
-    // Load PQ codes for all nodes
-    List<CompletableFuture<SearchCandidate>> futures = new ArrayList<>();
-
-    for (long nodeId : nodeIds) {
-      CompletableFuture<SearchCandidate> future = pqBlockStorage
-          .loadPqCode(nodeId, codebookVersion)
-          .thenApply(pqCode -> {
-            if (pqCode == null) {
-              // Node has no PQ code, assign max distance
-              return SearchCandidate.unvisited(nodeId, Float.MAX_VALUE);
-            }
-
-            // Compute distance using lookup table
-            float distance = pq.computeDistance(pqCode, lookupTable);
-            return SearchCandidate.unvisited(nodeId, distance);
-          });
-
-      futures.add(future);
-    }
-
-    // Wait for all scores and collect results
-    return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-        .thenApply(v -> {
-          List<SearchCandidate> candidates = new ArrayList<>();
-          for (CompletableFuture<SearchCandidate> future : futures) {
-            candidates.add(future.join());
-          }
-          return candidates;
-        });
+    CompletableFuture<List<byte[]>> listCompletableFuture =
+        pqBlockStorage.batchLoadPqCodes(nodeIds, codebookVersion);
+    return listCompletableFuture.thenApply(pqCodes -> {
+      List<SearchCandidate> candidates = new ArrayList<>(pqCodes.size());
+      for (int i = 0; i < nodeIds.size(); i++) {
+        byte[] pqCode = pqCodes.get(i);
+        if (pqCode == null) {
+          candidates.add(SearchCandidate.unvisited(nodeIds.get(i), Float.MAX_VALUE));
+        } else {
+          float distance = pq.computeDistance(pqCode, lookupTable);
+          candidates.add(SearchCandidate.unvisited(nodeIds.get(i), distance));
+        }
+      }
+      return candidates;
+    });
   }
 }
