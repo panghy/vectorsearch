@@ -7,6 +7,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ThreadLocalRandom;
 import lombok.Getter;
+import lombok.Setter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,6 +37,7 @@ public class ProductQuantizer {
 
   // Codebooks: [subvector_index][centroid_index][dimension]
   @Getter
+  @Setter
   private float[][][] codebooks;
 
   /**
