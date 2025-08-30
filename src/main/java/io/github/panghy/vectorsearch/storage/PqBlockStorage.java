@@ -1,6 +1,7 @@
 package io.github.panghy.vectorsearch.storage;
 
 import static io.github.panghy.vectorsearch.storage.StorageTransactionUtils.readProto;
+import static io.github.panghy.vectorsearch.storage.StorageTransactionUtils.readProtoRange;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
@@ -12,6 +13,8 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import io.github.panghy.vectorsearch.proto.PqCodesBlock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +34,7 @@ public class PqBlockStorage {
   private final VectorIndexKeys keys;
   private final int codesPerBlock;
   private final int pqSubvectors;
+  private final InstantSource instantSource;
 
   // Cache for frequently accessed blocks using Caffeine
   private final AsyncLoadingCache<BlockCacheKey, PqCodesBlock> blockCache;
@@ -40,12 +44,14 @@ public class PqBlockStorage {
       VectorIndexKeys keys,
       int codesPerBlock,
       int pqSubvectors,
+      InstantSource instantSource,
       int maxCacheSize,
       Duration cacheTtl) {
     this.db = db;
     this.keys = keys;
     this.codesPerBlock = codesPerBlock;
     this.pqSubvectors = pqSubvectors;
+    this.instantSource = instantSource;
     this.blockCache = Caffeine.newBuilder()
         .maximumSize(maxCacheSize)
         .expireAfterWrite(cacheTtl)
@@ -295,37 +301,34 @@ public class PqBlockStorage {
     return db.runAsync(tx -> {
           byte[] prefix = keys.pqBlockPrefixForVersion(fromVersion);
           Range range = Range.startsWith(prefix);
+          return readProtoRange(tx, range, PqCodesBlock.parser()).thenAccept(blocks -> {
+            for (PqCodesBlock block : blocks) {
+              byte[] oldCodes = block.getCodes().toByteArray();
+              byte[] newCodes = new byte[oldCodes.length];
 
-          return StorageTransactionUtils.readProtoRange(tx, range, PqCodesBlock.parser())
-              .thenAccept(blocks -> {
-                for (PqCodesBlock block : blocks) {
-                  byte[] oldCodes = block.getCodes().toByteArray();
-                  byte[] newCodes = new byte[oldCodes.length];
+              // Re-encode each code in the block
+              for (int i = 0; i < block.getCodesInBlock(); i++) {
+                byte[] oldCode = new byte[pqSubvectors];
+                System.arraycopy(oldCodes, i * pqSubvectors, oldCode, 0, pqSubvectors);
 
-                  // Re-encode each code in the block
-                  for (int i = 0; i < block.getCodesInBlock(); i++) {
-                    byte[] oldCode = new byte[pqSubvectors];
-                    System.arraycopy(oldCodes, i * pqSubvectors, oldCode, 0, pqSubvectors);
+                byte[] newCode = reencoder.reencode(block.getBlockFirstNid() + i, oldCode);
 
-                    byte[] newCode = reencoder.reencode(block.getBlockFirstNid() + i, oldCode);
+                System.arraycopy(newCode, 0, newCodes, i * pqSubvectors, pqSubvectors);
+              }
 
-                    System.arraycopy(newCode, 0, newCodes, i * pqSubvectors, pqSubvectors);
-                  }
+              // Write new block
+              PqCodesBlock newBlock = block.toBuilder()
+                  .setCodes(ByteString.copyFrom(newCodes))
+                  .setCodebookVersion(toVersion)
+                  .setBlockVersion(1)
+                  .setUpdatedAt(currentTimestamp())
+                  .build();
 
-                  // Write new block
-                  PqCodesBlock newBlock = block.toBuilder()
-                      .setCodes(ByteString.copyFrom(newCodes))
-                      .setCodebookVersion(toVersion)
-                      .setBlockVersion(1)
-                      .setUpdatedAt(currentTimestamp())
-                      .build();
+              byte[] newKey = keys.pqBlockKey(toVersion, block.getBlockFirstNid() / codesPerBlock);
 
-                  byte[] newKey =
-                      keys.pqBlockKey(toVersion, block.getBlockFirstNid() / codesPerBlock);
-
-                  tx.set(newKey, newBlock.toByteArray());
-                }
-              });
+              tx.set(newKey, newBlock.toByteArray());
+            }
+          });
         })
         .thenRun(() -> LOGGER.info("Migrated PQ codes from version {} to {}", fromVersion, toVersion));
   }
@@ -414,10 +417,10 @@ public class PqBlockStorage {
   }
 
   private Timestamp currentTimestamp() {
-    long millis = System.currentTimeMillis();
+    Instant now = instantSource.instant();
     return Timestamp.newBuilder()
-        .setSeconds(millis / 1000)
-        .setNanos((int) ((millis % 1000) * 1_000_000))
+        .setSeconds(now.getEpochSecond())
+        .setNanos(now.getNano())
         .build();
   }
 
