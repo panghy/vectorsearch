@@ -4,6 +4,7 @@ import static io.github.panghy.vectorsearch.storage.StorageTransactionUtils.read
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
+import com.apple.foundationdb.Transaction;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.protobuf.Timestamp;
@@ -13,7 +14,14 @@ import io.github.panghy.vectorsearch.proto.NodeAdjacency;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -23,6 +31,10 @@ import org.slf4j.LoggerFactory;
  * Storage handler for graph adjacency lists in FoundationDB.
  * Manages per-node neighbor lists with degree bounds and bidirectional consistency.
  * Implements DiskANN-style robust pruning for diverse neighbor selection.
+ * <p>
+ * All methods that interact with the database return CompletableFuture to support
+ * non-blocking async operations. Callers should compose these futures within
+ * FDB transactions.
  */
 public class NodeAdjacencyStorage {
   private static final Logger LOGGER = LoggerFactory.getLogger(NodeAdjacencyStorage.class);
@@ -58,265 +70,238 @@ public class NodeAdjacencyStorage {
   /**
    * Stores or updates the adjacency list for a node.
    *
-   * @param nodeId the node ID
+   * @param tx        the transaction to use
+   * @param nodeId    the node ID
    * @param neighbors list of neighbor node IDs (will be sorted and deduplicated)
    * @return future completing when stored
    */
-  public CompletableFuture<Void> storeAdjacency(long nodeId, List<Long> neighbors) {
+  public CompletableFuture<Void> storeAdjacency(Transaction tx, long nodeId, List<Long> neighbors) {
     // Sort and deduplicate neighbors
     List<Long> sortedNeighbors =
         neighbors.stream().distinct().sorted().limit(graphDegree).collect(Collectors.toList());
 
-    return db.runAsync(tx -> {
-      byte[] key = keys.nodeAdjacencyKey(nodeId);
+    byte[] key = keys.nodeAdjacencyKey(nodeId);
 
-      // Read existing for version increment
-      return readProto(tx, key, NodeAdjacency.parser()).thenApply(existing -> {
-        NodeAdjacency.Builder builder = NodeAdjacency.newBuilder()
-            .setNodeId(nodeId)
-            .addAllNeighbors(sortedNeighbors)
-            .setVersion(existing != null ? existing.getVersion() + 1 : 1)
-            .setUpdatedAt(currentTimestamp());
+    // Read existing for version increment
+    return readProto(tx, key, NodeAdjacency.parser()).thenApply(existing -> {
+      NodeAdjacency.Builder builder = NodeAdjacency.newBuilder()
+          .setNodeId(nodeId)
+          .addAllNeighbors(sortedNeighbors)
+          .setVersion(existing != null ? existing.getVersion() + 1 : 1)
+          .setUpdatedAt(currentTimestamp());
 
-        // Preserve last accessed time if it exists (future enhancement)
-
-        NodeAdjacency updated = builder.build();
-        tx.set(key, updated.toByteArray());
-
-        // Update cache
-        adjacencyCache.put(nodeId, completedFuture(updated));
-
-        return null;
-      });
+      NodeAdjacency updated = builder.build();
+      tx.set(key, updated.toByteArray());
+      return null;
     });
   }
 
   /**
-   * Loads the adjacency list for a node.
+   * Loads the adjacency list for a node from the transaction.
+   *
+   * @param tx     the transaction to use
+   * @param nodeId the node ID
+   * @return future with adjacency or null if not found
+   */
+  public CompletableFuture<NodeAdjacency> loadAdjacency(Transaction tx, long nodeId) {
+    byte[] key = keys.nodeAdjacencyKey(nodeId);
+    return readProto(tx, key, NodeAdjacency.parser()).thenApply(adjacency -> {
+      // Update cache if found
+      if (adjacency != null) {
+        adjacencyCache.put(nodeId, completedFuture(adjacency));
+      }
+      return adjacency;
+    });
+  }
+
+  /**
+   * Loads the adjacency list for a node from cache or database.
+   * This method doesn't require a transaction and uses the cache.
    *
    * @param nodeId the node ID
    * @return future with adjacency or null if not found
    */
-  public CompletableFuture<NodeAdjacency> loadAdjacency(long nodeId) {
+  public CompletableFuture<NodeAdjacency> loadAdjacencyAsync(long nodeId) {
     return adjacencyCache.get(nodeId);
   }
 
   /**
    * Batch loads adjacency lists for multiple nodes.
    *
+   * @param tx      the transaction to use
    * @param nodeIds list of node IDs
    * @return future with map of nodeId to adjacency
    */
-  public CompletableFuture<Map<Long, NodeAdjacency>> batchLoadAdjacency(List<Long> nodeIds) {
-    Map<Long, CompletableFuture<NodeAdjacency>> futures = new HashMap<>();
-    for (long nodeId : nodeIds) {
-      futures.put(nodeId, adjacencyCache.get(nodeId));
+  public CompletableFuture<Map<Long, NodeAdjacency>> batchLoadAdjacency(Transaction tx, List<Long> nodeIds) {
+    if (nodeIds.isEmpty()) {
+      return completedFuture(Collections.emptyMap());
     }
+    CompletableFuture<Map<Long, NodeAdjacency>> resultFuture = completedFuture(new HashMap<>(nodeIds.size()));
 
-    return CompletableFuture.allOf(futures.values().toArray(new CompletableFuture[0]))
-        .thenApply(v -> {
-          Map<Long, NodeAdjacency> result = new HashMap<>();
-          futures.forEach((nodeId, future) -> {
-            NodeAdjacency adj = future.join();
-            if (adj != null) {
-              result.put(nodeId, adj);
-            }
-          });
-          return result;
-        });
+    for (long nodeId : nodeIds) {
+      resultFuture = resultFuture.thenCombine(loadAdjacency(tx, nodeId), (result, adj) -> {
+        if (adj != null) {
+          result.put(nodeId, adj);
+        }
+        return result;
+      });
+    }
+    return resultFuture;
   }
 
   /**
    * Adds a neighbor to a node's adjacency list.
    * Maintains sorted order and degree bound.
    *
-   * @param nodeId the node ID
+   * @param tx         the transaction to use
+   * @param nodeId     the node ID
    * @param neighborId the neighbor to add
    * @return future completing when added
    */
-  public CompletableFuture<Void> addNeighbor(long nodeId, long neighborId) {
-    return db.runAsync(tx -> {
-      byte[] key = keys.nodeAdjacencyKey(nodeId);
+  public CompletableFuture<Void> addNeighbor(Transaction tx, long nodeId, long neighborId) {
+    byte[] key = keys.nodeAdjacencyKey(nodeId);
+    return readProto(tx, key, NodeAdjacency.parser()).thenAccept(existing -> {
+      List<Long> neighbors;
+      if (existing == null) {
+        neighbors = new ArrayList<>();
+      } else {
+        neighbors = new ArrayList<>(existing.getNeighborsList());
+      }
 
-      return readProto(tx, key, NodeAdjacency.parser()).thenApply(existing -> {
-        List<Long> neighbors;
-        if (existing == null) {
-          neighbors = new ArrayList<>();
-        } else {
-          neighbors = new ArrayList<>(existing.getNeighborsList());
-        }
+      // Add if not present and under degree limit
+      if (!neighbors.contains(neighborId) && neighbors.size() < graphDegree) {
+        neighbors.add(neighborId);
+        Collections.sort(neighbors);
+      }
 
-        // Add if not present and under degree limit
-        if (!neighbors.contains(neighborId) && neighbors.size() < graphDegree) {
-          neighbors.add(neighborId);
-          Collections.sort(neighbors);
-        }
+      NodeAdjacency updated = NodeAdjacency.newBuilder()
+          .setNodeId(nodeId)
+          .addAllNeighbors(neighbors)
+          .setVersion(existing != null ? existing.getVersion() + 1 : 1)
+          .setUpdatedAt(currentTimestamp())
+          .build();
 
-        NodeAdjacency updated = NodeAdjacency.newBuilder()
-            .setNodeId(nodeId)
-            .addAllNeighbors(neighbors)
-            .setVersion(existing != null ? existing.getVersion() + 1 : 1)
-            .setUpdatedAt(currentTimestamp())
-            .build();
-
-        tx.set(key, updated.toByteArray());
-        adjacencyCache.put(nodeId, completedFuture(updated));
-
-        return null;
-      });
+      tx.set(key, updated.toByteArray());
     });
   }
 
   /**
    * Removes a neighbor from a node's adjacency list.
    *
-   * @param nodeId the node ID
+   * @param tx         the transaction to use
+   * @param nodeId     the node ID
    * @param neighborId the neighbor to remove
    * @return future completing when removed
    */
-  public CompletableFuture<Void> removeNeighbor(long nodeId, long neighborId) {
-    return db.runAsync(tx -> {
-      byte[] key = keys.nodeAdjacencyKey(nodeId);
+  public CompletableFuture<Void> removeNeighbor(Transaction tx, long nodeId, long neighborId) {
+    byte[] key = keys.nodeAdjacencyKey(nodeId);
+    return readProto(tx, key, NodeAdjacency.parser()).thenAccept(existing -> {
+      if (existing == null) {
+        return;
+      }
 
-      return readProto(tx, key, NodeAdjacency.parser()).thenApply(existing -> {
-        if (existing == null) {
-          return null;
-        }
+      List<Long> neighbors = existing.getNeighborsList().stream()
+          .filter(n -> n != neighborId)
+          .collect(Collectors.toList());
 
-        List<Long> neighbors = existing.getNeighborsList().stream()
-            .filter(n -> n != neighborId)
-            .collect(Collectors.toList());
+      NodeAdjacency updated = NodeAdjacency.newBuilder()
+          .setNodeId(nodeId)
+          .addAllNeighbors(neighbors)
+          .setVersion(existing.getVersion() + 1)
+          .setUpdatedAt(currentTimestamp())
+          .build();
 
-        NodeAdjacency updated = NodeAdjacency.newBuilder()
-            .setNodeId(nodeId)
-            .addAllNeighbors(neighbors)
-            .setVersion(existing.getVersion() + 1)
-            .setUpdatedAt(currentTimestamp())
-            .build();
-
-        tx.set(key, updated.toByteArray());
-        adjacencyCache.put(nodeId, completedFuture(updated));
-
-        return null;
-      });
+      tx.set(key, updated.toByteArray());
     });
   }
 
   /**
    * Adds bidirectional edges between a node and its neighbors.
-   * Updates are done in small batches to avoid large transactions.
+   * All updates happen in the provided transaction.
    *
-   * @param nodeId the central node
+   * @param tx        the transaction to use
+   * @param nodeId    the central node
    * @param neighbors the neighbors to link bidirectionally
-   * @param batchSize number of neighbors to update per transaction
    * @return future completing when all links are added
    */
-  public CompletableFuture<Void> batchAddBackLinks(long nodeId, List<Long> neighbors, int batchSize) {
-    List<CompletableFuture<Void>> futures = new ArrayList<>();
-
-    // Process neighbors in batches
-    for (int i = 0; i < neighbors.size(); i += batchSize) {
-      List<Long> batch = neighbors.subList(i, Math.min(i + batchSize, neighbors.size()));
-
-      CompletableFuture<Void> batchFuture = db.runAsync(tx -> {
-        List<CompletableFuture<Void>> updates = new ArrayList<>();
-
-        for (long neighborId : batch) {
-          byte[] key = keys.nodeAdjacencyKey(neighborId);
-
-          CompletableFuture<Void> update = readProto(tx, key, NodeAdjacency.parser())
-              .thenApply(existing -> {
-                List<Long> neighborList;
-                if (existing == null) {
-                  neighborList = new ArrayList<>();
-                } else {
-                  neighborList = new ArrayList<>(existing.getNeighborsList());
-                }
-
-                // Add nodeId as back-link if not present and under degree
-                if (!neighborList.contains(nodeId) && neighborList.size() < graphDegree) {
-                  neighborList.add(nodeId);
-                  Collections.sort(neighborList);
-
-                  NodeAdjacency updated = NodeAdjacency.newBuilder()
-                      .setNodeId(neighborId)
-                      .addAllNeighbors(neighborList)
-                      .setVersion(existing != null ? existing.getVersion() + 1 : 1)
-                      .setUpdatedAt(currentTimestamp())
-                      .build();
-
-                  tx.set(key, updated.toByteArray());
-                  adjacencyCache.put(neighborId, completedFuture(updated));
-                }
-
-                return null;
-              });
-
-          updates.add(update);
-        }
-
-        return CompletableFuture.allOf(updates.toArray(new CompletableFuture[0]));
-      });
-
-      futures.add(batchFuture);
+  public CompletableFuture<Void> addBackLinks(Transaction tx, long nodeId, List<Long> neighbors) {
+    if (neighbors.isEmpty()) {
+      return completedFuture(null);
     }
+    CompletableFuture<Void> resultFuture = completedFuture(null);
 
-    return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+    for (long neighborId : neighbors) {
+      byte[] key = keys.nodeAdjacencyKey(neighborId);
+      CompletableFuture<Void> future = readProto(tx, key, NodeAdjacency.parser())
+          .thenApply(existing -> {
+            List<Long> neighborList;
+            if (existing == null) {
+              neighborList = new ArrayList<>();
+            } else {
+              neighborList = new ArrayList<>(existing.getNeighborsList());
+            }
+
+            // Add nodeId as back-link if not present and under degree
+            if (!neighborList.contains(nodeId) && neighborList.size() < graphDegree) {
+              neighborList.add(nodeId);
+              Collections.sort(neighborList);
+
+              NodeAdjacency updated = NodeAdjacency.newBuilder()
+                  .setNodeId(neighborId)
+                  .addAllNeighbors(neighborList)
+                  .setVersion(existing != null ? existing.getVersion() + 1 : 1)
+                  .setUpdatedAt(currentTimestamp())
+                  .build();
+
+              tx.set(key, updated.toByteArray());
+            }
+
+            return null;
+          });
+      resultFuture = resultFuture.thenCompose($ -> future);
+    }
+    return resultFuture;
   }
 
   /**
    * Removes bidirectional edges between a node and its neighbors.
+   * All updates happen in the provided transaction.
    *
-   * @param nodeId the central node
+   * @param tx        the transaction to use
+   * @param nodeId    the central node
    * @param neighbors the neighbors to unlink
-   * @param batchSize number of neighbors to update per transaction
    * @return future completing when all links are removed
    */
-  public CompletableFuture<Void> batchRemoveBackLinks(long nodeId, List<Long> neighbors, int batchSize) {
-    List<CompletableFuture<Void>> futures = new ArrayList<>();
-
-    for (int i = 0; i < neighbors.size(); i += batchSize) {
-      List<Long> batch = neighbors.subList(i, Math.min(i + batchSize, neighbors.size()));
-
-      CompletableFuture<Void> batchFuture = db.runAsync(tx -> {
-        List<CompletableFuture<Void>> updates = new ArrayList<>();
-
-        for (long neighborId : batch) {
-          byte[] key = keys.nodeAdjacencyKey(neighborId);
-
-          CompletableFuture<Void> update = readProto(tx, key, NodeAdjacency.parser())
-              .thenApply(existing -> {
-                if (existing == null) {
-                  return null;
-                }
-
-                List<Long> neighborList = existing.getNeighborsList().stream()
-                    .filter(n -> n != nodeId)
-                    .collect(Collectors.toList());
-
-                NodeAdjacency updated = NodeAdjacency.newBuilder()
-                    .setNodeId(neighborId)
-                    .addAllNeighbors(neighborList)
-                    .setVersion(existing.getVersion() + 1)
-                    .setUpdatedAt(currentTimestamp())
-                    .build();
-
-                tx.set(key, updated.toByteArray());
-                adjacencyCache.put(neighborId, completedFuture(updated));
-
-                return null;
-              });
-
-          updates.add(update);
-        }
-
-        return CompletableFuture.allOf(updates.toArray(new CompletableFuture[0]));
-      });
-
-      futures.add(batchFuture);
+  public CompletableFuture<Void> removeBackLinks(Transaction tx, long nodeId, List<Long> neighbors) {
+    if (neighbors.isEmpty()) {
+      return completedFuture(null);
     }
+    CompletableFuture<Void> resultFuture = completedFuture(null);
 
-    return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+    for (long neighborId : neighbors) {
+      byte[] key = keys.nodeAdjacencyKey(neighborId);
+      CompletableFuture<Void> future = readProto(tx, key, NodeAdjacency.parser())
+          .thenAccept(existing -> {
+            if (existing == null) {
+              return;
+            }
+
+            List<Long> neighborList = existing.getNeighborsList().stream()
+                .filter(n -> n != nodeId)
+                .collect(Collectors.toList());
+
+            NodeAdjacency updated = NodeAdjacency.newBuilder()
+                .setNodeId(neighborId)
+                .addAllNeighbors(neighborList)
+                .setVersion(existing.getVersion() + 1)
+                .setUpdatedAt(currentTimestamp())
+                .build();
+
+            tx.set(key, updated.toByteArray());
+          });
+      resultFuture = resultFuture.thenCompose($ -> future);
+    }
+    return resultFuture;
   }
 
   /**
@@ -324,13 +309,13 @@ public class NodeAdjacencyStorage {
    * Keeps neighbors that are both close and diverse.
    *
    * @param candidates sorted list of candidates with distances
-   * @param maxDegree maximum neighbors to keep
-   * @param alpha diversity vs proximity trade-off (higher = more diverse)
+   * @param maxDegree  maximum neighbors to keep
+   * @param alpha      diversity vs proximity trade-off (higher = more diverse)
    * @return pruned list of node IDs
    */
   public List<Long> robustPrune(List<ScoredNode> candidates, int maxDegree, double alpha) {
     if (candidates.isEmpty()) {
-      return new ArrayList<>();
+      return Collections.emptyList();
     }
 
     List<Long> pruned = new ArrayList<>();
@@ -385,7 +370,7 @@ public class NodeAdjacencyStorage {
   /**
    * Merges new neighbors with existing ones and prunes to degree limit.
    *
-   * @param current current neighbors
+   * @param current   current neighbors
    * @param additions new neighbors to add
    * @param maxDegree maximum total neighbors
    * @return merged and pruned list
@@ -409,62 +394,55 @@ public class NodeAdjacencyStorage {
   /**
    * Stores the entry list for search initialization.
    *
+   * @param tx        the transaction to use
    * @param entryList the entry points
-   * @return future completing when stored
    */
-  public CompletableFuture<Void> storeEntryList(EntryList entryList) {
-    return db.runAsync(tx -> {
-      byte[] key = keys.entryListKey();
-      tx.set(key, entryList.toByteArray());
-      return completedFuture(null);
-    });
+  public void storeEntryList(Transaction tx, EntryList entryList) {
+    byte[] key = keys.entryListKey();
+    tx.set(key, entryList.toByteArray());
   }
 
   /**
    * Loads the entry list for search initialization.
    *
+   * @param tx the transaction to use
    * @return future with entry list or null if not found
    */
-  public CompletableFuture<EntryList> loadEntryList() {
-    return db.runAsync(tx -> readProto(tx, keys.entryListKey(), EntryList.parser()));
+  public CompletableFuture<EntryList> loadEntryList(Transaction tx) {
+    return readProto(tx, keys.entryListKey(), EntryList.parser());
   }
 
   /**
    * Stores graph metadata and statistics.
    *
+   * @param tx        the transaction to use
    * @param graphMeta the metadata to store
-   * @return future completing when stored
    */
-  public CompletableFuture<Void> storeGraphMeta(GraphMeta graphMeta) {
-    return db.runAsync(tx -> {
-      byte[] key = keys.graphConnectivityKey();
-      tx.set(key, graphMeta.toByteArray());
-      return completedFuture(null);
-    });
+  public void storeGraphMeta(Transaction tx, GraphMeta graphMeta) {
+    byte[] key = keys.graphConnectivityKey();
+    tx.set(key, graphMeta.toByteArray());
   }
 
   /**
    * Loads graph metadata and statistics.
    *
+   * @param tx the transaction to use
    * @return future with graph metadata or null if not found
    */
-  public CompletableFuture<GraphMeta> loadGraphMeta() {
-    return db.runAsync(tx -> readProto(tx, keys.graphConnectivityKey(), GraphMeta.parser()));
+  public CompletableFuture<GraphMeta> loadGraphMeta(Transaction tx) {
+    return readProto(tx, keys.graphConnectivityKey(), GraphMeta.parser());
   }
 
   /**
    * Deletes a node's adjacency list.
    *
+   * @param tx     the transaction to use
    * @param nodeId the node to delete
-   * @return future completing when deleted
    */
-  public CompletableFuture<Void> deleteNode(long nodeId) {
-    return db.runAsync(tx -> {
-      byte[] key = keys.nodeAdjacencyKey(nodeId);
-      tx.clear(key);
-      adjacencyCache.synchronous().invalidate(nodeId);
-      return completedFuture(null);
-    });
+  public void deleteNode(Transaction tx, long nodeId) {
+    byte[] key = keys.nodeAdjacencyKey(nodeId);
+    tx.clear(key);
+    adjacencyCache.synchronous().invalidate(nodeId);
   }
 
   /**
@@ -493,13 +471,5 @@ public class NodeAdjacencyStorage {
   /**
    * Node with distance score for pruning operations.
    */
-  public static class ScoredNode {
-    public final long nodeId;
-    public final double distance;
-
-    public ScoredNode(long nodeId, double distance) {
-      this.nodeId = nodeId;
-      this.distance = distance;
-    }
-  }
+  public record ScoredNode(long nodeId, double distance) {}
 }

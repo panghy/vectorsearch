@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch.storage;
 
+import static java.util.concurrent.CompletableFuture.completedFuture;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.apple.foundationdb.Database;
@@ -15,8 +16,8 @@ import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -64,37 +65,54 @@ class NodeAdjacencyStorageTest {
   }
 
   @Test
-  void testStoreAndLoadAdjacency() throws ExecutionException, InterruptedException {
+  void testStoreAndLoadAdjacency() {
     long nodeId = 42L;
     List<Long> neighbors = Arrays.asList(1L, 5L, 3L, 9L, 2L);
 
-    storage.storeAdjacency(nodeId, neighbors).get();
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-
-    assertThat(loaded).isNotNull();
-    assertThat(loaded.getNodeId()).isEqualTo(nodeId);
-    assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L, 3L, 5L, 9L); // Sorted
-    assertThat(loaded.getVersion()).isEqualTo(1);
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, neighbors)
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded).isNotNull();
+                assertThat(loaded.getNodeId()).isEqualTo(nodeId);
+                assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L, 3L, 5L, 9L); // Sorted
+                assertThat(loaded.getVersion()).isEqualTo(1);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testUpdateAdjacency() throws ExecutionException, InterruptedException {
+  void testUpdateAdjacency() {
     long nodeId = 42L;
     List<Long> neighbors1 = Arrays.asList(1L, 2L, 3L);
     List<Long> neighbors2 = Arrays.asList(4L, 5L, 6L);
 
-    storage.storeAdjacency(nodeId, neighbors1).get();
-    NodeAdjacency loaded1 = storage.loadAdjacency(nodeId).get();
-    assertThat(loaded1.getVersion()).isEqualTo(1);
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, neighbors1)
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded1 -> {
+                assertThat(loaded1.getVersion()).isEqualTo(1);
+                return null;
+              });
+        })
+        .join();
 
-    storage.storeAdjacency(nodeId, neighbors2).get();
-    NodeAdjacency loaded2 = storage.loadAdjacency(nodeId).get();
-    assertThat(loaded2.getVersion()).isEqualTo(2);
-    assertThat(loaded2.getNeighborsList()).containsExactly(4L, 5L, 6L);
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, neighbors2)
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded2 -> {
+                assertThat(loaded2.getVersion()).isEqualTo(2);
+                assertThat(loaded2.getNeighborsList()).containsExactly(4L, 5L, 6L);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testDegreeBound() throws ExecutionException, InterruptedException {
+  void testDegreeBound() {
     long nodeId = 100L;
     // Create more neighbors than degree allows
     List<Long> tooManyNeighbors = new ArrayList<>();
@@ -102,165 +120,242 @@ class NodeAdjacencyStorageTest {
       tooManyNeighbors.add(i);
     }
 
-    storage.storeAdjacency(nodeId, tooManyNeighbors).get();
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-
-    assertThat(loaded.getNeighborsCount()).isEqualTo(GRAPH_DEGREE);
-    // Should keep first GRAPH_DEGREE after sorting
-    for (int i = 0; i < GRAPH_DEGREE; i++) {
-      assertThat(loaded.getNeighbors(i)).isEqualTo((long) i);
-    }
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, tooManyNeighbors)
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded.getNeighborsCount()).isEqualTo(GRAPH_DEGREE);
+                // Should keep first GRAPH_DEGREE after sorting
+                for (int i = 0; i < GRAPH_DEGREE; i++) {
+                  assertThat(loaded.getNeighbors(i)).isEqualTo((long) i);
+                }
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testDuplicateNeighbors() throws ExecutionException, InterruptedException {
+  void testDuplicateNeighbors() {
     long nodeId = 50L;
     List<Long> neighborsWithDuplicates = Arrays.asList(1L, 2L, 3L, 2L, 1L, 4L);
 
-    storage.storeAdjacency(nodeId, neighborsWithDuplicates).get();
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-
-    assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L, 3L, 4L);
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, neighborsWithDuplicates)
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L, 3L, 4L);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testBatchLoadAdjacency() throws ExecutionException, InterruptedException {
+  void testBatchLoadAdjacency() {
     // Store adjacencies for multiple nodes
     List<Long> nodeIds = Arrays.asList(10L, 20L, 30L);
-    for (long nodeId : nodeIds) {
-      List<Long> neighbors = Arrays.asList(nodeId + 1, nodeId + 2, nodeId + 3);
-      storage.storeAdjacency(nodeId, neighbors).get();
-    }
 
-    Map<Long, NodeAdjacency> loaded = storage.batchLoadAdjacency(nodeIds).get();
+    db.runAsync(tr -> {
+          List<CompletableFuture<Void>> futures = new ArrayList<>();
+          for (long nodeId : nodeIds) {
+            List<Long> neighbors = Arrays.asList(nodeId + 1, nodeId + 2, nodeId + 3);
+            futures.add(storage.storeAdjacency(tr, nodeId, neighbors));
+          }
+          return CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
+        })
+        .join();
 
-    assertThat(loaded).hasSize(3);
-    assertThat(loaded.get(10L).getNeighborsList()).containsExactly(11L, 12L, 13L);
-    assertThat(loaded.get(20L).getNeighborsList()).containsExactly(21L, 22L, 23L);
-    assertThat(loaded.get(30L).getNeighborsList()).containsExactly(31L, 32L, 33L);
+    db.runAsync(tr -> {
+          return storage.batchLoadAdjacency(tr, nodeIds).thenApply(loaded -> {
+            assertThat(loaded).hasSize(3);
+            assertThat(loaded.get(10L).getNeighborsList()).containsExactly(11L, 12L, 13L);
+            assertThat(loaded.get(20L).getNeighborsList()).containsExactly(21L, 22L, 23L);
+            assertThat(loaded.get(30L).getNeighborsList()).containsExactly(31L, 32L, 33L);
+            return null;
+          });
+        })
+        .join();
   }
 
   @Test
-  void testBatchLoadWithMissing() throws ExecutionException, InterruptedException {
+  void testBatchLoadWithMissing() {
     // Store only some nodes
-    storage.storeAdjacency(10L, Arrays.asList(1L, 2L)).get();
-    storage.storeAdjacency(30L, Arrays.asList(3L, 4L)).get();
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, 10L, Arrays.asList(1L, 2L))
+              .thenCompose(v -> storage.storeAdjacency(tr, 30L, Arrays.asList(3L, 4L)));
+        })
+        .join();
 
-    Map<Long, NodeAdjacency> loaded =
-        storage.batchLoadAdjacency(Arrays.asList(10L, 20L, 30L)).get();
-
-    assertThat(loaded).hasSize(2);
-    assertThat(loaded).containsKeys(10L, 30L);
-    assertThat(loaded).doesNotContainKey(20L);
+    db.runAsync(tr -> {
+          return storage.batchLoadAdjacency(tr, Arrays.asList(10L, 20L, 30L))
+              .thenApply(loaded -> {
+                assertThat(loaded).hasSize(2);
+                assertThat(loaded).containsKeys(10L, 30L);
+                assertThat(loaded).doesNotContainKey(20L);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testAddNeighbor() throws ExecutionException, InterruptedException {
+  void testAddNeighbor() {
     long nodeId = 75L;
 
-    // Start with some neighbors
-    storage.storeAdjacency(nodeId, Arrays.asList(1L, 2L)).get();
-
-    // Add a new neighbor
-    storage.addNeighbor(nodeId, 3L).get();
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-
-    assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L, 3L);
-    assertThat(loaded.getVersion()).isEqualTo(2);
+    db.runAsync(tr -> {
+          // Start with some neighbors
+          return storage.storeAdjacency(tr, nodeId, Arrays.asList(1L, 2L))
+              .thenCompose(v -> storage.addNeighbor(tr, nodeId, 3L))
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L, 3L);
+                assertThat(loaded.getVersion()).isEqualTo(2);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testAddDuplicateNeighbor() throws ExecutionException, InterruptedException {
+  void testAddDuplicateNeighbor() {
     long nodeId = 80L;
 
-    storage.storeAdjacency(nodeId, Arrays.asList(1L, 2L, 3L)).get();
-    storage.addNeighbor(nodeId, 2L).get(); // Try to add duplicate
-
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-    assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L, 3L);
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, Arrays.asList(1L, 2L, 3L))
+              .thenCompose(v -> storage.addNeighbor(tr, nodeId, 2L)) // Try to add duplicate
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L, 3L);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testAddNeighborToFull() throws ExecutionException, InterruptedException {
+  void testAddNeighborToFull() {
     long nodeId = 85L;
 
-    // Fill to degree limit
-    List<Long> fullNeighbors = new ArrayList<>();
-    for (int i = 0; i < GRAPH_DEGREE; i++) {
-      fullNeighbors.add((long) i);
-    }
-    storage.storeAdjacency(nodeId, fullNeighbors).get();
-
-    // Try to add one more
-    storage.addNeighbor(nodeId, 100L).get();
-
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-    assertThat(loaded.getNeighborsCount()).isEqualTo(GRAPH_DEGREE);
-    assertThat(loaded.getNeighborsList()).doesNotContain(100L);
+    db.runAsync(tr -> {
+          // Fill to degree limit
+          List<Long> fullNeighbors = new ArrayList<>();
+          for (int i = 0; i < GRAPH_DEGREE; i++) {
+            fullNeighbors.add((long) i);
+          }
+          return storage.storeAdjacency(tr, nodeId, fullNeighbors)
+              .thenCompose(v -> storage.addNeighbor(tr, nodeId, 100L)) // Try to add one more
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded.getNeighborsCount()).isEqualTo(GRAPH_DEGREE);
+                assertThat(loaded.getNeighborsList()).doesNotContain(100L);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testRemoveNeighbor() throws ExecutionException, InterruptedException {
+  void testRemoveNeighbor() {
     long nodeId = 90L;
 
-    storage.storeAdjacency(nodeId, Arrays.asList(1L, 2L, 3L, 4L)).get();
-    storage.removeNeighbor(nodeId, 2L).get();
-
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-    assertThat(loaded.getNeighborsList()).containsExactly(1L, 3L, 4L);
-    assertThat(loaded.getVersion()).isEqualTo(2);
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, Arrays.asList(1L, 2L, 3L, 4L))
+              .thenCompose(v -> storage.removeNeighbor(tr, nodeId, 2L))
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded.getNeighborsList()).containsExactly(1L, 3L, 4L);
+                assertThat(loaded.getVersion()).isEqualTo(2);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testRemoveNonExistentNeighbor() throws ExecutionException, InterruptedException {
+  void testRemoveNonExistentNeighbor() {
     long nodeId = 95L;
 
-    storage.storeAdjacency(nodeId, Arrays.asList(1L, 2L)).get();
-    storage.removeNeighbor(nodeId, 99L).get();
-
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-    assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L);
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, Arrays.asList(1L, 2L))
+              .thenCompose(v -> storage.removeNeighbor(tr, nodeId, 99L))
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded.getNeighborsList()).containsExactly(1L, 2L);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testBatchAddBackLinks() throws ExecutionException, InterruptedException {
+  void testAddBackLinks() {
     long nodeId = 100L;
     List<Long> neighbors = Arrays.asList(200L, 300L, 400L);
 
-    // First create the neighbors
-    for (long neighbor : neighbors) {
-      storage.storeAdjacency(neighbor, new ArrayList<>()).get();
-    }
-
-    // Add back links
-    storage.batchAddBackLinks(nodeId, neighbors, 2).get();
-
-    // Verify back links were added
-    for (long neighbor : neighbors) {
-      NodeAdjacency loaded = storage.loadAdjacency(neighbor).get();
-      assertThat(loaded.getNeighborsList()).contains(nodeId);
-    }
+    db.runAsync(tr -> {
+          // First create the neighbors
+          List<CompletableFuture<Void>> createFutures = new ArrayList<>();
+          for (long neighbor : neighbors) {
+            createFutures.add(storage.storeAdjacency(tr, neighbor, new ArrayList<>()));
+          }
+          return CompletableFuture.allOf(createFutures.toArray(CompletableFuture[]::new))
+              .thenCompose(v -> storage.addBackLinks(tr, nodeId, neighbors))
+              .thenCompose(v -> {
+                // Verify back links were added
+                List<CompletableFuture<NodeAdjacency>> loadFutures = new ArrayList<>();
+                for (long neighbor : neighbors) {
+                  loadFutures.add(storage.loadAdjacency(tr, neighbor));
+                }
+                return CompletableFuture.allOf(loadFutures.toArray(CompletableFuture[]::new))
+                    .thenApply(unused -> {
+                      for (int i = 0; i < neighbors.size(); i++) {
+                        NodeAdjacency loaded =
+                            loadFutures.get(i).join();
+                        assertThat(loaded.getNeighborsList())
+                            .contains(nodeId);
+                      }
+                      return null;
+                    });
+              });
+        })
+        .join();
   }
 
   @Test
-  void testBatchRemoveBackLinks() throws ExecutionException, InterruptedException {
+  void testRemoveBackLinks() {
     long nodeId = 150L;
     List<Long> neighbors = Arrays.asList(250L, 350L, 450L);
 
-    // First create neighbors with nodeId as neighbor
-    for (long neighbor : neighbors) {
-      storage.storeAdjacency(neighbor, Arrays.asList(nodeId, 999L)).get();
-    }
-
-    // Remove back links
-    storage.batchRemoveBackLinks(nodeId, neighbors, 2).get();
-
-    // Verify back links were removed
-    for (long neighbor : neighbors) {
-      NodeAdjacency loaded = storage.loadAdjacency(neighbor).get();
-      assertThat(loaded.getNeighborsList()).doesNotContain(nodeId);
-      assertThat(loaded.getNeighborsList()).contains(999L);
-    }
+    db.runAsync(tr -> {
+          // First create neighbors with nodeId as neighbor
+          List<CompletableFuture<Void>> createFutures = new ArrayList<>();
+          for (long neighbor : neighbors) {
+            createFutures.add(storage.storeAdjacency(tr, neighbor, Arrays.asList(nodeId, 999L)));
+          }
+          return CompletableFuture.allOf(createFutures.toArray(CompletableFuture[]::new))
+              .thenCompose(v -> storage.removeBackLinks(tr, nodeId, neighbors))
+              .thenCompose(v -> {
+                // Verify back links were removed
+                List<CompletableFuture<NodeAdjacency>> loadFutures = new ArrayList<>();
+                for (long neighbor : neighbors) {
+                  loadFutures.add(storage.loadAdjacency(tr, neighbor));
+                }
+                return CompletableFuture.allOf(loadFutures.toArray(CompletableFuture[]::new))
+                    .thenApply(unused -> {
+                      for (int i = 0; i < neighbors.size(); i++) {
+                        NodeAdjacency loaded =
+                            loadFutures.get(i).join();
+                        assertThat(loaded.getNeighborsList())
+                            .doesNotContain(nodeId);
+                        assertThat(loaded.getNeighborsList())
+                            .contains(999L);
+                      }
+                      return null;
+                    });
+              });
+        })
+        .join();
   }
 
   @Test
@@ -320,7 +415,7 @@ class NodeAdjacencyStorageTest {
   }
 
   @Test
-  void testStoreAndLoadEntryList() throws ExecutionException, InterruptedException {
+  void testStoreAndLoadEntryList() {
     EntryList entryList = EntryList.newBuilder()
         .addAllPrimaryEntries(Arrays.asList(1L, 2L, 3L))
         .addAllRandomEntries(Arrays.asList(10L, 20L))
@@ -328,24 +423,36 @@ class NodeAdjacencyStorageTest {
         .setVersion(1)
         .build();
 
-    storage.storeEntryList(entryList).get();
-    EntryList loaded = storage.loadEntryList().get();
+    db.runAsync(tr -> {
+          storage.storeEntryList(tr, entryList);
+          return completedFuture(null);
+        })
+        .join();
 
-    assertThat(loaded).isNotNull();
-    assertThat(loaded.getPrimaryEntriesList()).containsExactly(1L, 2L, 3L);
-    assertThat(loaded.getRandomEntriesList()).containsExactly(10L, 20L);
-    assertThat(loaded.getHighDegreeEntriesList()).containsExactly(100L, 200L);
-    assertThat(loaded.getVersion()).isEqualTo(1);
+    db.runAsync(tr -> storage.loadEntryList(tr).thenApply(loaded -> {
+          assertThat(loaded).isNotNull();
+          assertThat(loaded.getPrimaryEntriesList()).containsExactly(1L, 2L, 3L);
+          assertThat(loaded.getRandomEntriesList()).containsExactly(10L, 20L);
+          assertThat(loaded.getHighDegreeEntriesList()).containsExactly(100L, 200L);
+          assertThat(loaded.getVersion()).isEqualTo(1);
+          return null;
+        }))
+        .join();
   }
 
   @Test
-  void testLoadNonExistentEntryList() throws ExecutionException, InterruptedException {
-    EntryList loaded = storage.loadEntryList().get();
-    assertThat(loaded).isNull();
+  void testLoadNonExistentEntryList() {
+    db.runAsync(tr -> {
+          return storage.loadEntryList(tr).thenApply(loaded -> {
+            assertThat(loaded).isNull();
+            return null;
+          });
+        })
+        .join();
   }
 
   @Test
-  void testStoreAndLoadGraphMeta() throws ExecutionException, InterruptedException {
+  void testStoreAndLoadGraphMeta() {
     GraphMeta graphMeta = GraphMeta.newBuilder()
         .setConnectedComponents(2)
         .setLargestComponentSize(1000L)
@@ -355,32 +462,54 @@ class NodeAdjacencyStorageTest {
         .setRepairState(GraphMeta.RepairState.NOT_NEEDED)
         .build();
 
-    storage.storeGraphMeta(graphMeta).get();
-    GraphMeta loaded = storage.loadGraphMeta().get();
+    db.run(tr -> {
+      storage.storeGraphMeta(tr, graphMeta);
+      return completedFuture(null);
+    });
 
-    assertThat(loaded).isNotNull();
-    assertThat(loaded.getConnectedComponents()).isEqualTo(2);
-    assertThat(loaded.getLargestComponentSize()).isEqualTo(1000L);
-    assertThat(loaded.getTotalNodes()).isEqualTo(1100L);
-    assertThat(loaded.getOrphanedNodesList()).containsExactly(500L, 501L);
-    assertThat(loaded.getRepairState()).isEqualTo(GraphMeta.RepairState.NOT_NEEDED);
+    db.runAsync(tr -> storage.loadGraphMeta(tr).thenApply(loaded -> {
+          assertThat(loaded).isNotNull();
+          assertThat(loaded.getConnectedComponents()).isEqualTo(2);
+          assertThat(loaded.getLargestComponentSize()).isEqualTo(1000L);
+          assertThat(loaded.getTotalNodes()).isEqualTo(1100L);
+          assertThat(loaded.getOrphanedNodesList()).containsExactly(500L, 501L);
+          assertThat(loaded.getRepairState()).isEqualTo(GraphMeta.RepairState.NOT_NEEDED);
+          return null;
+        }))
+        .join();
   }
 
   @Test
-  void testLoadNonExistentGraphMeta() throws ExecutionException, InterruptedException {
-    GraphMeta loaded = storage.loadGraphMeta().get();
-    assertThat(loaded).isNull();
+  void testLoadNonExistentGraphMeta() {
+    db.runAsync(tr -> {
+          return storage.loadGraphMeta(tr).thenApply(loaded -> {
+            assertThat(loaded).isNull();
+            return null;
+          });
+        })
+        .join();
   }
 
   @Test
-  void testDeleteNode() throws ExecutionException, InterruptedException {
+  void testDeleteNode() {
     long nodeId = 123L;
 
-    storage.storeAdjacency(nodeId, Arrays.asList(1L, 2L, 3L)).get();
-    assertThat(storage.loadAdjacency(nodeId).get()).isNotNull();
+    db.runAsync(tr -> storage.storeAdjacency(tr, nodeId, Arrays.asList(1L, 2L, 3L)))
+        .join();
 
-    storage.deleteNode(nodeId).get();
-    assertThat(storage.loadAdjacency(nodeId).get()).isNull();
+    db.runAsync(tr -> storage.loadAdjacency(tr, nodeId)
+            .thenApply(loaded -> {
+              assertThat(loaded).isNotNull();
+              return loaded;
+            })
+            .thenAccept(v -> storage.deleteNode(tr, nodeId)))
+        .join();
+
+    db.runAsync(tr -> storage.loadAdjacency(tr, nodeId).thenApply(loaded -> {
+          assertThat(loaded).isNull();
+          return null;
+        }))
+        .join();
   }
 
   @Test
@@ -388,13 +517,16 @@ class NodeAdjacencyStorageTest {
     long nodeId = 555L;
     List<Long> neighbors = Arrays.asList(1L, 2L, 3L);
 
-    storage.storeAdjacency(nodeId, neighbors).get();
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, neighbors);
+        })
+        .join();
 
-    // First load - from DB
-    NodeAdjacency loaded1 = storage.loadAdjacency(nodeId).get();
+    // Load from cache (async method)
+    NodeAdjacency loaded1 = storage.loadAdjacencyAsync(nodeId).get();
 
     // Second load - should be from cache
-    NodeAdjacency loaded2 = storage.loadAdjacency(nodeId).get();
+    NodeAdjacency loaded2 = storage.loadAdjacencyAsync(nodeId).get();
 
     assertThat(loaded1).isEqualTo(loaded2);
 
@@ -402,12 +534,12 @@ class NodeAdjacencyStorageTest {
     storage.clearCache();
 
     // Load again - from DB
-    NodeAdjacency loaded3 = storage.loadAdjacency(nodeId).get();
+    NodeAdjacency loaded3 = storage.loadAdjacencyAsync(nodeId).get();
     assertThat(loaded3.getNeighborsList()).containsExactly(1L, 2L, 3L);
   }
 
   @Test
-  void testTimestamps() throws ExecutionException, InterruptedException {
+  void testTimestamps() {
     // Use fixed time for predictable tests
     Instant fixedInstant = Instant.parse("2024-01-01T00:00:00Z");
     InstantSource fixedSource = InstantSource.fixed(fixedInstant);
@@ -416,70 +548,148 @@ class NodeAdjacencyStorageTest {
         new NodeAdjacencyStorage(db, keys, GRAPH_DEGREE, fixedSource, 1000, Duration.ofMinutes(10));
 
     long nodeId = 777L;
-    storageWithFixedTime.storeAdjacency(nodeId, Arrays.asList(1L, 2L)).get();
 
-    NodeAdjacency loaded = storageWithFixedTime.loadAdjacency(nodeId).get();
-    assertThat(loaded.hasUpdatedAt()).isTrue();
-    assertThat(loaded.getUpdatedAt().getSeconds()).isEqualTo(fixedInstant.getEpochSecond());
+    db.runAsync(tr -> {
+          return storageWithFixedTime
+              .storeAdjacency(tr, nodeId, Arrays.asList(1L, 2L))
+              .thenCompose(v -> storageWithFixedTime.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded.hasUpdatedAt()).isTrue();
+                assertThat(loaded.getUpdatedAt().getSeconds()).isEqualTo(fixedInstant.getEpochSecond());
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testLoadNonExistentNode() throws ExecutionException, InterruptedException {
-    NodeAdjacency loaded = storage.loadAdjacency(999999L).get();
-    assertThat(loaded).isNull();
+  void testLoadNonExistentNode() {
+    db.runAsync(tr -> storage.loadAdjacency(tr, 999999L).thenApply(loaded -> {
+          assertThat(loaded).isNull();
+          return null;
+        }))
+        .join();
   }
 
   @Test
-  void testAddNeighborToNonExistentNode() throws ExecutionException, InterruptedException {
+  void testAddNeighborToNonExistentNode() {
     long nodeId = 888L;
 
-    // Add neighbor to non-existent node
-    storage.addNeighbor(nodeId, 1L).get();
-
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-    assertThat(loaded).isNotNull();
-    assertThat(loaded.getNeighborsList()).containsExactly(1L);
-    assertThat(loaded.getVersion()).isEqualTo(1);
+    db.runAsync(tr -> {
+          // Add neighbor to non-existent node
+          return storage.addNeighbor(tr, nodeId, 1L)
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded).isNotNull();
+                assertThat(loaded.getNeighborsList()).containsExactly(1L);
+                assertThat(loaded.getVersion()).isEqualTo(1);
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testRemoveNeighborFromNonExistentNode() throws ExecutionException, InterruptedException {
+  void testRemoveNeighborFromNonExistentNode() {
     long nodeId = 999L;
 
-    // Should not throw
-    storage.removeNeighbor(nodeId, 1L).get();
-
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-    assertThat(loaded).isNull();
+    db.runAsync(tr -> {
+          // Should not throw
+          return storage.removeNeighbor(tr, nodeId, 1L)
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded).isNull();
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testEmptyNeighborList() throws ExecutionException, InterruptedException {
+  void testEmptyNeighborList() {
     long nodeId = 1234L;
 
-    storage.storeAdjacency(nodeId, new ArrayList<>()).get();
-    NodeAdjacency loaded = storage.loadAdjacency(nodeId).get();
-
-    assertThat(loaded).isNotNull();
-    assertThat(loaded.getNeighborsList()).isEmpty();
+    db.runAsync(tr -> {
+          return storage.storeAdjacency(tr, nodeId, new ArrayList<>())
+              .thenCompose(v -> storage.loadAdjacency(tr, nodeId))
+              .thenApply(loaded -> {
+                assertThat(loaded).isNotNull();
+                assertThat(loaded.getNeighborsList()).isEmpty();
+                return null;
+              });
+        })
+        .join();
   }
 
   @Test
-  void testLastAccessedAtPreservation() throws ExecutionException, InterruptedException {
-    long nodeId = 2000L;
+  void testCompositeOperationsInSingleTransaction() {
+    // Test that multiple operations can be composed in a single transaction
+    long mainNode = 1000L;
+    List<Long> neighbors = Arrays.asList(2000L, 3000L, 4000L);
 
-    // First store
-    storage.storeAdjacency(nodeId, Arrays.asList(1L, 2L)).get();
-    NodeAdjacency first = storage.loadAdjacency(nodeId).get();
+    db.runAsync(tr -> {
+          // Create main node
+          return storage.storeAdjacency(tr, mainNode, neighbors)
+              .thenCompose(v -> {
+                // Create neighbors and add back-links in same transaction
+                List<CompletableFuture<Void>> futures = new ArrayList<>();
+                for (long neighbor : neighbors) {
+                  futures.add(storage.storeAdjacency(tr, neighbor, List.of(mainNode)));
+                }
+                return CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
+              })
+              .thenAccept(v -> {
+                // Update metadata
+                GraphMeta meta = GraphMeta.newBuilder()
+                    .setTotalNodes(4)
+                    .setConnectedComponents(1)
+                    .setLargestComponentSize(4)
+                    .build();
+                storage.storeGraphMeta(tr, meta);
+              })
+              .thenCompose(v -> {
+                // Update entry list
+                EntryList entries = EntryList.newBuilder()
+                    .addPrimaryEntries(mainNode)
+                    .build();
+                storage.storeEntryList(tr, entries);
+                return completedFuture(null);
+              });
+        })
+        .join();
 
-    // Manually set last accessed (in real usage this would be set by access tracking)
-    // For now we just verify it's preserved if present
+    // Verify everything was saved atomically
+    db.runAsync(tr -> {
+          return storage.loadAdjacency(tr, mainNode)
+              .thenCompose(main -> {
+                assertThat(main.getNeighborsList()).containsExactly(2000L, 3000L, 4000L);
 
-    // Update adjacency
-    storage.storeAdjacency(nodeId, Arrays.asList(3L, 4L)).get();
-    NodeAdjacency second = storage.loadAdjacency(nodeId).get();
-
-    assertThat(second.getVersion()).isEqualTo(2);
-    assertThat(second.getNeighborsList()).containsExactly(3L, 4L);
+                List<CompletableFuture<NodeAdjacency>> loadFutures = new ArrayList<>();
+                for (long neighbor : neighbors) {
+                  loadFutures.add(storage.loadAdjacency(tr, neighbor));
+                }
+                return CompletableFuture.allOf(loadFutures.toArray(CompletableFuture[]::new))
+                    .thenApply(v -> {
+                      for (int i = 0; i < neighbors.size(); i++) {
+                        NodeAdjacency adj =
+                            loadFutures.get(i).join();
+                        assertThat(adj.getNeighborsList())
+                            .contains(mainNode);
+                      }
+                      return null;
+                    });
+              })
+              .thenCompose(v -> storage.loadGraphMeta(tr))
+              .thenApply(meta -> {
+                assertThat(meta.getTotalNodes()).isEqualTo(4);
+                return null;
+              })
+              .thenCompose(v -> storage.loadEntryList(tr))
+              .thenApply(entries -> {
+                assertThat(entries.getPrimaryEntriesList()).contains(mainNode);
+                return null;
+              });
+        })
+        .join();
   }
 }
