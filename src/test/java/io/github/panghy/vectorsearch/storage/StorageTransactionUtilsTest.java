@@ -69,7 +69,7 @@ class StorageTransactionUtilsTest {
 
     // Write proto
     db.run(tr -> {
-      StorageTransactionUtils.writeProto(tr, key, config);
+      tr.set(key, config.toByteArray());
       return null;
     });
 
@@ -119,7 +119,7 @@ class StorageTransactionUtilsTest {
     Config initial = Config.newBuilder().setDimension(128).setMetric("L2").build();
 
     db.run(tr -> {
-      StorageTransactionUtils.writeProto(tr, key, initial);
+      tr.set(key, initial.toByteArray());
       return null;
     });
 
@@ -231,7 +231,7 @@ class StorageTransactionUtilsTest {
             .setVersion(1)
             .setTrainedOnVectors(1000L + i)
             .build();
-        StorageTransactionUtils.writeProto(tr, key, codebook);
+        tr.set(key, codebook.toByteArray());
       }
       return null;
     });
@@ -435,7 +435,7 @@ class StorageTransactionUtilsTest {
     // Write initial value
     Config initial = Config.newBuilder().setDimension(128).build();
     db.run(tr -> {
-      StorageTransactionUtils.writeProto(tr, key, initial);
+      tr.set(key, initial.toByteArray());
       return null;
     });
 

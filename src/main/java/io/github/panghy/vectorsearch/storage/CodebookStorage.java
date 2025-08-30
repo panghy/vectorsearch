@@ -63,7 +63,7 @@ public class CodebookStorage {
           builder.setQuantizationError(trainingStats.quantizationError);
         }
 
-        StorageTransactionUtils.writeProto(tx, key, builder.build());
+        tx.set(key, builder.build().toByteArray());
       }
 
       // Update cache

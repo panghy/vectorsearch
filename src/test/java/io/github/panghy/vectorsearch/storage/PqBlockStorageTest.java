@@ -270,18 +270,18 @@ class PqBlockStorageTest {
 
     PqBlockStorage.StorageStats stats = storage.getStats(codebookVersion).get();
 
-    assertThat(stats.blockCount).isGreaterThan(0);
-    assertThat(stats.totalCodes).isGreaterThanOrEqualTo(numCodes);
-    assertThat(stats.storageBytes).isGreaterThan(0);
+    assertThat(stats.blockCount()).isGreaterThan(0);
+    assertThat(stats.totalCodes()).isGreaterThanOrEqualTo(numCodes);
+    assertThat(stats.storageBytes()).isGreaterThan(0);
   }
 
   @Test
   void testGetStatsEmptyVersion() throws ExecutionException, InterruptedException {
     PqBlockStorage.StorageStats stats = storage.getStats(999).get();
 
-    assertThat(stats.blockCount).isEqualTo(0);
-    assertThat(stats.totalCodes).isEqualTo(0);
-    assertThat(stats.storageBytes).isEqualTo(0);
+    assertThat(stats.blockCount()).isEqualTo(0);
+    assertThat(stats.totalCodes()).isEqualTo(0);
+    assertThat(stats.storageBytes()).isEqualTo(0);
   }
 
   @Test

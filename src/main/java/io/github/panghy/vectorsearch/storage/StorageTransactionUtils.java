@@ -1,6 +1,7 @@
 package io.github.panghy.vectorsearch.storage;
 
 import com.apple.foundationdb.KeyValue;
+import com.apple.foundationdb.MutationType;
 import com.apple.foundationdb.Range;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.async.AsyncIterable;
@@ -10,6 +11,7 @@ import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.Function;
@@ -26,10 +28,10 @@ public class StorageTransactionUtils {
   /**
    * Reads a protobuf message from FDB.
    *
-   * @param tx the transaction
-   * @param key the key to read
+   * @param tx     the transaction
+   * @param key    the key to read
    * @param parser protobuf parser for deserialization
-   * @param <T> the protobuf message type
+   * @param <T>    the protobuf message type
    * @return the message or null if not found
    */
   public static <T extends Message> CompletableFuture<T> readProto(Transaction tx, byte[] key, Parser<T> parser) {
@@ -46,31 +48,20 @@ public class StorageTransactionUtils {
   }
 
   /**
-   * Writes a protobuf message to FDB.
-   *
-   * @param tx the transaction
-   * @param key the key to write
-   * @param message the protobuf message
-   */
-  public static void writeProto(Transaction tx, byte[] key, Message message) {
-    tx.set(key, message.toByteArray());
-  }
-
-  /**
    * Performs an atomic read-modify-write operation.
    *
-   * @param tx the transaction
-   * @param key the key
-   * @param parser protobuf parser
+   * @param tx       the transaction
+   * @param key      the key
+   * @param parser   protobuf parser
    * @param modifier function to modify the message (null input means create new)
-   * @param <T> the protobuf message type
+   * @param <T>      the protobuf message type
    * @return the modified message
    */
   public static <T extends Message> CompletableFuture<T> atomicUpdate(
       Transaction tx, byte[] key, Parser<T> parser, Function<T, T> modifier) {
     return readProto(tx, key, parser).thenApply(modifier).thenApply(modified -> {
       if (modified != null) {
-        writeProto(tx, key, modified);
+        tx.set(key, modified.toByteArray());
       }
       return modified;
     });
@@ -79,7 +70,7 @@ public class StorageTransactionUtils {
   /**
    * Reads all key-value pairs in a range.
    *
-   * @param tx the transaction
+   * @param tx    the transaction
    * @param range the key range
    * @return list of key-value pairs
    */
@@ -90,7 +81,7 @@ public class StorageTransactionUtils {
   /**
    * Reads all key-value pairs in a range with limit.
    *
-   * @param tx the transaction
+   * @param tx    the transaction
    * @param range the key range
    * @param limit maximum number of results
    * @return list of key-value pairs
@@ -107,10 +98,10 @@ public class StorageTransactionUtils {
   /**
    * Reads and deserializes protobuf messages from a range.
    *
-   * @param tx the transaction
-   * @param range the key range
+   * @param tx     the transaction
+   * @param range  the key range
    * @param parser protobuf parser
-   * @param <T> the protobuf message type
+   * @param <T>    the protobuf message type
    * @return list of messages
    */
   public static <T extends Message> CompletableFuture<List<T>> readProtoRange(
@@ -131,7 +122,7 @@ public class StorageTransactionUtils {
   /**
    * Performs a batched write of multiple key-value pairs.
    *
-   * @param tx the transaction
+   * @param tx      the transaction
    * @param kvPairs list of key-value pairs
    */
   public static void batchWrite(Transaction tx, List<KeyValue> kvPairs) {
@@ -143,7 +134,7 @@ public class StorageTransactionUtils {
   /**
    * Performs a batched delete of keys in a range.
    *
-   * @param tx the transaction
+   * @param tx    the transaction
    * @param range the key range to clear
    */
   public static void clearRange(Transaction tx, Range range) {
@@ -153,20 +144,20 @@ public class StorageTransactionUtils {
   /**
    * Checks if a key exists.
    *
-   * @param tx the transaction
+   * @param tx  the transaction
    * @param key the key to check
    * @return true if key exists
    */
   public static CompletableFuture<Boolean> exists(Transaction tx, byte[] key) {
-    return tx.get(key).thenApply(value -> value != null);
+    return tx.get(key).thenApply(Objects::nonNull);
   }
 
   /**
    * Performs an atomic increment operation.
    * Uses FDB's atomic operations for conflict-free increments.
    *
-   * @param tx the transaction
-   * @param key the counter key
+   * @param tx    the transaction
+   * @param key   the counter key
    * @param delta the increment value
    */
   public static void atomicIncrement(Transaction tx, byte[] key, long delta) {
@@ -175,13 +166,13 @@ public class StorageTransactionUtils {
     for (int i = 0; i < 8; i++) {
       deltaBytes[i] = (byte) (delta >>> (i * 8));
     }
-    tx.mutate(com.apple.foundationdb.MutationType.ADD, key, deltaBytes);
+    tx.mutate(MutationType.ADD, key, deltaBytes);
   }
 
   /**
    * Gets the count of keys in a range.
    *
-   * @param tx the transaction
+   * @param tx    the transaction
    * @param range the key range
    * @return number of keys
    */
@@ -284,7 +275,7 @@ public class StorageTransactionUtils {
    * Sets a read version for the transaction.
    * Useful for ensuring read consistency across multiple operations.
    *
-   * @param tx the transaction
+   * @param tx      the transaction
    * @param version the read version
    */
   public static void setReadVersion(Transaction tx, long version) {
