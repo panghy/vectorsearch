@@ -61,15 +61,7 @@ class BeamSearchEngineTest {
         }
       }
     }
-    // Use reflection to set the codebooks
-    try {
-      java.lang.reflect.Field codebooksField = ProductQuantizer.class.getDeclaredField("codebooks");
-      codebooksField.setAccessible(true);
-      codebooksField.set(pq, codebooks);
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
-
+    pq.setCodebooks(codebooks);
     searchEngine = new BeamSearchEngine(adjacencyStorage, pqBlockStorage, entryPointStorage, pq);
   }
 
