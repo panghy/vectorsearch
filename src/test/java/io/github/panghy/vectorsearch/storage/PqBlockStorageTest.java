@@ -42,7 +42,7 @@ class PqBlockStorageTest {
     });
 
     keys = new VectorIndexKeys(testSpace, testCollectionName);
-    storage = new PqBlockStorage(db, keys, CODES_PER_BLOCK, PQ_SUBVECTORS);
+    storage = new PqBlockStorage(db, keys, CODES_PER_BLOCK, PQ_SUBVECTORS, 1000, java.time.Duration.ofMinutes(10));
   }
 
   @AfterEach

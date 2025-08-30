@@ -266,11 +266,13 @@ public class CodebookStorage {
   }
 
   private byte[] intToBytes(int value) {
-    return new byte[] {(byte) (value >>> 24), (byte) (value >>> 16), (byte) (value >>> 8), (byte) value};
+    // Little-endian: least significant byte first (consistent with FDB's atomic operations)
+    return new byte[] {(byte) value, (byte) (value >>> 8), (byte) (value >>> 16), (byte) (value >>> 24)};
   }
 
   private int bytesToInt(byte[] bytes) {
-    return ((bytes[0] & 0xFF) << 24) | ((bytes[1] & 0xFF) << 16) | ((bytes[2] & 0xFF) << 8) | (bytes[3] & 0xFF);
+    // Little-endian: least significant byte first (consistent with FDB's atomic operations)
+    return (bytes[0] & 0xFF) | ((bytes[1] & 0xFF) << 8) | ((bytes[2] & 0xFF) << 16) | ((bytes[3] & 0xFF) << 24);
   }
 
   private int parseVersionFromKey(byte[] key, byte[] prefix) {
