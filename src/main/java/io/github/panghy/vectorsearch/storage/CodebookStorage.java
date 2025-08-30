@@ -274,11 +274,22 @@ public class CodebookStorage {
   }
 
   private int parseVersionFromKey(byte[] key, byte[] prefix) {
-    // Skip prefix, then parse tuple elements
-    // This is a simplified version - in production would use Tuple.fromBytes
-    // For now, assume version is encoded as integer in the tuple
-    // Real implementation would properly decode the FDB tuple
-    return 0; // Placeholder
+    // The key structure after prefix is: {version}/{subspace}
+    // We need to extract the version from the tuple
+    try {
+      // Get the part after the prefix
+      byte[] tupleBytes = new byte[key.length - prefix.length];
+      System.arraycopy(key, prefix.length, tupleBytes, 0, tupleBytes.length);
+
+      // Parse the tuple
+      com.apple.foundationdb.tuple.Tuple tuple = com.apple.foundationdb.tuple.Tuple.fromBytes(tupleBytes);
+      if (tuple.size() > 0) {
+        return (int) tuple.getLong(0);
+      }
+    } catch (Exception e) {
+      // Ignore parsing errors
+    }
+    return -1;
   }
 
   private Timestamp currentTimestamp() {
