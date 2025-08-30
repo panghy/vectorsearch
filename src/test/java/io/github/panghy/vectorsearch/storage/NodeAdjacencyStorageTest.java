@@ -462,10 +462,11 @@ class NodeAdjacencyStorageTest {
         .setRepairState(GraphMeta.RepairState.NOT_NEEDED)
         .build();
 
-    db.run(tr -> {
-      storage.storeGraphMeta(tr, graphMeta);
-      return completedFuture(null);
-    });
+    db.runAsync(tr -> {
+          storage.storeGraphMeta(tr, graphMeta);
+          return completedFuture(null);
+        })
+        .join();
 
     db.runAsync(tr -> storage.loadGraphMeta(tr).thenApply(loaded -> {
           assertThat(loaded).isNotNull();

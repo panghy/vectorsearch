@@ -139,9 +139,13 @@ public class NodeAdjacencyStorage {
     CompletableFuture<Map<Long, NodeAdjacency>> resultFuture = completedFuture(new HashMap<>(nodeIds.size()));
 
     for (long nodeId : nodeIds) {
-      resultFuture = resultFuture.thenCombine(loadAdjacency(tx, nodeId), (result, adj) -> {
+      CompletableFuture<NodeAdjacency> future = loadAdjacency(tx, nodeId);
+      resultFuture = resultFuture.thenCombine(future, (result, adj) -> {
         if (adj != null) {
-          result.put(nodeId, adj);
+          //noinspection SynchronizationOnLocalVariableOrMethodParameter
+          synchronized (result) {
+            result.put(nodeId, adj);
+          }
         }
         return result;
       });
