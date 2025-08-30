@@ -102,3 +102,43 @@ The `.github/workflows/publish.yml` workflow automatically:
 - 90% line coverage requirement
 - 75% branch coverage requirement
 - Protobuf generated classes are excluded from coverage
+
+## Architecture Patterns
+
+### Async Operations
+- **Never use `.join()` or blocking calls** within storage layer methods
+- All storage operations should return `CompletableFuture<T>`
+- Use proper future composition with `.thenCompose()`, `.thenApply()`, `.thenAccept()`
+- Tests can use `.join()` at the top level, but storage methods cannot
+
+### Transaction Management
+- All storage layer methods take `Transaction` as a parameter
+- Callers control transaction boundaries via `db.runAsync(tx -> ...)`
+- This allows for efficient batching and conflict resolution at the application layer
+- Example pattern:
+  ```java
+  // Storage method
+  public CompletableFuture<Void> storeData(Transaction tx, long id, Data data) {
+      return readProto(tx, key, Parser.parser()).thenApply(existing -> {
+          // Update logic
+          tx.set(key, updated.toByteArray());
+          return null;
+      });
+  }
+  
+  // Caller usage
+  db.runAsync(tx -> {
+      return storage.storeData(tx, id1, data1)
+          .thenCompose(v -> storage.storeData(tx, id2, data2));
+  }).join();
+  ```
+
+### Thread Safety
+- Use synchronization for shared mutable state in batch operations
+- Caffeine cache handles its own thread safety
+- FoundationDB transactions provide isolation between concurrent operations
+
+## Testing Patterns
+- Use `db.runAsync()` for all database operations in tests
+- Chain futures properly to ensure operations complete in order
+- Always verify test coverage meets requirements before committing
