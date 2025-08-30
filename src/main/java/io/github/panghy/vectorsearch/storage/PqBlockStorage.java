@@ -69,7 +69,7 @@ public class PqBlockStorage {
 
               blockBuilder = PqCodesBlock.newBuilder()
                   .setBlockFirstNid(blockFirstNid)
-                  .setCodesInBlock(1)
+                  .setCodesInBlock(blockOffset + 1)
                   .setCodebookVersion(codebookVersion)
                   .setBlockVersion(1)
                   .setUpdatedAt(currentTimestamp());
@@ -121,11 +121,7 @@ public class PqBlockStorage {
     }
 
     // Group by block for efficiency
-    Map<Long, List<Integer>> blockGroups = new ConcurrentHashMap<>();
-    for (int i = 0; i < nodeIds.size(); i++) {
-      long blockNumber = VectorIndexKeys.blockNumber(nodeIds.get(i), codesPerBlock);
-      blockGroups.computeIfAbsent(blockNumber, k -> new ArrayList<>()).add(i);
-    }
+    Map<Long, List<Integer>> blockGroups = groupByBlocks(nodeIds);
 
     return db.runAsync(tx -> {
       List<CompletableFuture<Void>> futures = new ArrayList<>();
@@ -189,6 +185,15 @@ public class PqBlockStorage {
     });
   }
 
+  private Map<Long, List<Integer>> groupByBlocks(List<Long> nodeIds) {
+    Map<Long, List<Integer>> blockGroups = new ConcurrentHashMap<>();
+    for (int i = 0; i < nodeIds.size(); i++) {
+      long blockNumber = VectorIndexKeys.blockNumber(nodeIds.get(i), codesPerBlock);
+      blockGroups.computeIfAbsent(blockNumber, k -> new ArrayList<>()).add(i);
+    }
+    return blockGroups;
+  }
+
   /**
    * Loads a single PQ code.
    *
@@ -234,11 +239,7 @@ public class PqBlockStorage {
   public CompletableFuture<List<byte[]>> batchLoadPqCodes(List<Long> nodeIds, int codebookVersion) {
 
     // Group by block
-    Map<Long, List<Integer>> blockGroups = new ConcurrentHashMap<>();
-    for (int i = 0; i < nodeIds.size(); i++) {
-      long blockNumber = VectorIndexKeys.blockNumber(nodeIds.get(i), codesPerBlock);
-      blockGroups.computeIfAbsent(blockNumber, k -> new ArrayList<>()).add(i);
-    }
+    Map<Long, List<Integer>> blockGroups = groupByBlocks(nodeIds);
 
     return db.runAsync(tx -> {
       Map<Long, CompletableFuture<PqCodesBlock>> blockFutures = new ConcurrentHashMap<>();

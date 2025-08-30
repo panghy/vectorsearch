@@ -5,7 +5,6 @@ import com.apple.foundationdb.Range;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.async.AsyncIterable;
 import com.apple.foundationdb.async.AsyncIterator;
-import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
@@ -171,7 +170,11 @@ public class StorageTransactionUtils {
    * @param delta the increment value
    */
   public static void atomicIncrement(Transaction tx, byte[] key, long delta) {
-    byte[] deltaBytes = Tuple.from(delta).pack();
+    // FDB's ADD mutation expects little-endian 64-bit integer
+    byte[] deltaBytes = new byte[8];
+    for (int i = 0; i < 8; i++) {
+      deltaBytes[i] = (byte) (delta >>> (i * 8));
+    }
     tx.mutate(com.apple.foundationdb.MutationType.ADD, key, deltaBytes);
   }
 
