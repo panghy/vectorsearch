@@ -1,10 +1,12 @@
 package io.github.panghy.vectorsearch.storage;
 
+import static io.github.panghy.vectorsearch.storage.StorageTransactionUtils.readProto;
 import static java.util.concurrent.CompletableFuture.allOf;
+import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Range;
-import com.github.benmanes.caffeine.cache.AsyncCache;
+import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
@@ -31,7 +33,7 @@ public class PqBlockStorage {
   private final int pqSubvectors;
 
   // Cache for frequently accessed blocks using Caffeine
-  private final AsyncCache<BlockCacheKey, PqCodesBlock> blockCache;
+  private final AsyncLoadingCache<BlockCacheKey, PqCodesBlock> blockCache;
 
   public PqBlockStorage(
       Database db,
@@ -47,7 +49,7 @@ public class PqBlockStorage {
     this.blockCache = Caffeine.newBuilder()
         .maximumSize(maxCacheSize)
         .expireAfterWrite(cacheTtl)
-        .buildAsync();
+        .buildAsync((key, executor) -> loadBlock(key));
   }
 
   /**
@@ -70,54 +72,51 @@ public class PqBlockStorage {
     return db.runAsync(tx -> {
       byte[] blockKey = keys.pqBlockKey(codebookVersion, blockNumber);
 
-      return StorageTransactionUtils.readProto(tx, blockKey, PqCodesBlock.parser())
-          .thenApply(existingBlock -> {
-            PqCodesBlock.Builder blockBuilder;
-            byte[] codes;
+      return readProto(tx, blockKey, PqCodesBlock.parser()).thenApply(existingBlock -> {
+        PqCodesBlock.Builder blockBuilder;
+        byte[] codes;
 
-            if (existingBlock == null) {
-              // Create new block
-              long blockFirstNid = blockNumber * codesPerBlock;
-              codes = new byte[codesPerBlock * pqSubvectors];
+        if (existingBlock == null) {
+          // Create new block
+          long blockFirstNid = blockNumber * codesPerBlock;
+          codes = new byte[codesPerBlock * pqSubvectors];
 
-              blockBuilder = PqCodesBlock.newBuilder()
-                  .setBlockFirstNid(blockFirstNid)
-                  .setCodesInBlock(blockOffset + 1)
-                  .setCodebookVersion(codebookVersion)
-                  .setBlockVersion(1)
-                  .setUpdatedAt(currentTimestamp());
-            } else {
-              // Update existing block
-              codes = existingBlock.getCodes().toByteArray();
+          blockBuilder = PqCodesBlock.newBuilder()
+              .setBlockFirstNid(blockFirstNid)
+              .setCodesInBlock(blockOffset + 1)
+              .setCodebookVersion(codebookVersion)
+              .setBlockVersion(1)
+              .setUpdatedAt(currentTimestamp());
+        } else {
+          // Update existing block
+          codes = existingBlock.getCodes().toByteArray();
 
-              // Ensure block has sufficient capacity
-              if (codes.length < codesPerBlock * pqSubvectors) {
-                byte[] newCodes = new byte[codesPerBlock * pqSubvectors];
-                System.arraycopy(codes, 0, newCodes, 0, codes.length);
-                codes = newCodes;
-              }
+          // Ensure block has sufficient capacity
+          if (codes.length < codesPerBlock * pqSubvectors) {
+            byte[] newCodes = new byte[codesPerBlock * pqSubvectors];
+            System.arraycopy(codes, 0, newCodes, 0, codes.length);
+            codes = newCodes;
+          }
 
-              blockBuilder = existingBlock.toBuilder()
-                  .setCodesInBlock(Math.max(existingBlock.getCodesInBlock(), blockOffset + 1))
-                  .setBlockVersion(existingBlock.getBlockVersion() + 1)
-                  .setUpdatedAt(currentTimestamp());
-            }
+          blockBuilder = existingBlock.toBuilder()
+              .setCodesInBlock(Math.max(existingBlock.getCodesInBlock(), blockOffset + 1))
+              .setBlockVersion(existingBlock.getBlockVersion() + 1)
+              .setUpdatedAt(currentTimestamp());
+        }
 
-            // Write PQ code at the correct offset
-            System.arraycopy(pqCode, 0, codes, blockOffset * pqSubvectors, pqSubvectors);
+        // Write PQ code at the correct offset
+        System.arraycopy(pqCode, 0, codes, blockOffset * pqSubvectors, pqSubvectors);
 
-            blockBuilder.setCodes(ByteString.copyFrom(codes));
-            PqCodesBlock updatedBlock = blockBuilder.build();
+        blockBuilder.setCodes(ByteString.copyFrom(codes));
+        PqCodesBlock updatedBlock = blockBuilder.build();
 
-            tx.set(blockKey, updatedBlock.toByteArray());
+        tx.set(blockKey, updatedBlock.toByteArray());
 
-            // Update cache
-            blockCache.put(
-                new BlockCacheKey(codebookVersion, blockNumber),
-                CompletableFuture.completedFuture(updatedBlock));
+        // Update cache
+        blockCache.put(new BlockCacheKey(codebookVersion, blockNumber), completedFuture(updatedBlock));
 
-            return null;
-          });
+        return null;
+      });
     });
   }
 
@@ -146,52 +145,49 @@ public class PqBlockStorage {
 
         byte[] blockKey = keys.pqBlockKey(codebookVersion, blockNumber);
 
-        futures.add(StorageTransactionUtils.readProto(tx, blockKey, PqCodesBlock.parser())
-            .thenApply(existingBlock -> {
-              long blockFirstNid = blockNumber * codesPerBlock;
-              byte[] codes;
-              int maxOffset = 0;
+        futures.add(readProto(tx, blockKey, PqCodesBlock.parser()).thenApply(existingBlock -> {
+          long blockFirstNid = blockNumber * codesPerBlock;
+          byte[] codes;
+          int maxOffset = 0;
 
-              if (existingBlock == null) {
-                codes = new byte[codesPerBlock * pqSubvectors];
-              } else {
-                codes = existingBlock.getCodes().toByteArray();
-                if (codes.length < codesPerBlock * pqSubvectors) {
-                  byte[] newCodes = new byte[codesPerBlock * pqSubvectors];
-                  System.arraycopy(codes, 0, newCodes, 0, codes.length);
-                  codes = newCodes;
-                }
-                maxOffset = existingBlock.getCodesInBlock();
-              }
+          if (existingBlock == null) {
+            codes = new byte[codesPerBlock * pqSubvectors];
+          } else {
+            codes = existingBlock.getCodes().toByteArray();
+            if (codes.length < codesPerBlock * pqSubvectors) {
+              byte[] newCodes = new byte[codesPerBlock * pqSubvectors];
+              System.arraycopy(codes, 0, newCodes, 0, codes.length);
+              codes = newCodes;
+            }
+            maxOffset = existingBlock.getCodesInBlock();
+          }
 
-              // Write all codes for this block
-              for (int idx : indices) {
-                long nodeId = nodeIds.get(idx);
-                byte[] pqCode = pqCodes.get(idx);
-                int blockOffset = VectorIndexKeys.blockOffset(nodeId, codesPerBlock);
+          // Write all codes for this block
+          for (int idx : indices) {
+            long nodeId = nodeIds.get(idx);
+            byte[] pqCode = pqCodes.get(idx);
+            int blockOffset = VectorIndexKeys.blockOffset(nodeId, codesPerBlock);
 
-                System.arraycopy(pqCode, 0, codes, blockOffset * pqSubvectors, pqSubvectors);
-                maxOffset = Math.max(maxOffset, blockOffset + 1);
-              }
+            System.arraycopy(pqCode, 0, codes, blockOffset * pqSubvectors, pqSubvectors);
+            maxOffset = Math.max(maxOffset, blockOffset + 1);
+          }
 
-              PqCodesBlock.Builder blockBuilder = PqCodesBlock.newBuilder()
-                  .setBlockFirstNid(blockFirstNid)
-                  .setCodesInBlock(maxOffset)
-                  .setCodes(ByteString.copyFrom(codes))
-                  .setCodebookVersion(codebookVersion)
-                  .setBlockVersion(existingBlock != null ? existingBlock.getBlockVersion() + 1 : 1)
-                  .setUpdatedAt(currentTimestamp());
+          PqCodesBlock.Builder blockBuilder = PqCodesBlock.newBuilder()
+              .setBlockFirstNid(blockFirstNid)
+              .setCodesInBlock(maxOffset)
+              .setCodes(ByteString.copyFrom(codes))
+              .setCodebookVersion(codebookVersion)
+              .setBlockVersion(existingBlock != null ? existingBlock.getBlockVersion() + 1 : 1)
+              .setUpdatedAt(currentTimestamp());
 
-              PqCodesBlock updatedBlock = blockBuilder.build();
-              tx.set(blockKey, updatedBlock.toByteArray());
+          PqCodesBlock updatedBlock = blockBuilder.build();
+          tx.set(blockKey, updatedBlock.toByteArray());
 
-              // Update cache
-              blockCache.put(
-                  new BlockCacheKey(codebookVersion, blockNumber),
-                  CompletableFuture.completedFuture(updatedBlock));
+          // Update cache
+          blockCache.put(new BlockCacheKey(codebookVersion, blockNumber), completedFuture(updatedBlock));
 
-              return null;
-            }));
+          return null;
+        }));
       }
       return allOf(futures.toArray(CompletableFuture[]::new));
     });
@@ -217,32 +213,13 @@ public class PqBlockStorage {
     long blockNumber = VectorIndexKeys.blockNumber(nodeId, codesPerBlock);
     int blockOffset = VectorIndexKeys.blockOffset(nodeId, codesPerBlock);
 
-    // Check cache first
+    // Use AsyncLoadingCache which automatically loads if not present
     BlockCacheKey cacheKey = new BlockCacheKey(codebookVersion, blockNumber);
-    CompletableFuture<PqCodesBlock> cachedFuture = blockCache.getIfPresent(cacheKey);
-    if (cachedFuture != null) {
-      return cachedFuture.thenApply(cached -> {
-        if (cached != null && blockOffset < cached.getCodesInBlock()) {
-          return extractCode(cached, blockOffset);
-        }
+    return blockCache.get(cacheKey).thenApply(block -> {
+      if (block == null || blockOffset >= block.getCodesInBlock()) {
         return null;
-      });
-    }
-
-    return db.runAsync(tx -> {
-      byte[] blockKey = keys.pqBlockKey(codebookVersion, blockNumber);
-
-      return StorageTransactionUtils.readProto(tx, blockKey, PqCodesBlock.parser())
-          .thenApply(block -> {
-            if (block == null || blockOffset >= block.getCodesInBlock()) {
-              return null;
-            }
-
-            // Cache the block
-            blockCache.put(cacheKey, CompletableFuture.completedFuture(block));
-
-            return extractCode(block, blockOffset);
-          });
+      }
+      return extractCode(block, blockOffset);
     });
   }
 
@@ -254,63 +231,42 @@ public class PqBlockStorage {
    * @return list of PQ codes (null for missing nodes)
    */
   public CompletableFuture<List<byte[]>> batchLoadPqCodes(List<Long> nodeIds, int codebookVersion) {
-
     // Group by block
     Map<Long, List<Integer>> blockGroups = groupByBlocks(nodeIds);
 
-    return db.runAsync(tx -> {
-      Map<Long, CompletableFuture<PqCodesBlock>> blockFutures = new ConcurrentHashMap<>();
+    // Load all unique blocks using the cache
+    Map<Long, CompletableFuture<PqCodesBlock>> blockFutures = new ConcurrentHashMap<>();
+    for (long blockNumber : blockGroups.keySet()) {
+      BlockCacheKey cacheKey = new BlockCacheKey(codebookVersion, blockNumber);
+      blockFutures.put(blockNumber, blockCache.get(cacheKey));
+    }
 
-      // Load unique blocks
-      for (long blockNumber : blockGroups.keySet()) {
-        BlockCacheKey cacheKey = new BlockCacheKey(codebookVersion, blockNumber);
-        CompletableFuture<PqCodesBlock> cachedFuture = blockCache.getIfPresent(cacheKey);
+    // Extract codes from blocks
+    List<byte[]> results = new ArrayList<>(nodeIds.size());
+    for (int i = 0; i < nodeIds.size(); i++) {
+      results.add(null); // Initialize with nulls
+    }
 
-        if (cachedFuture != null) {
-          blockFutures.put(blockNumber, cachedFuture);
-        } else {
-          byte[] blockKey = keys.pqBlockKey(codebookVersion, blockNumber);
-          CompletableFuture<PqCodesBlock> future = StorageTransactionUtils.readProto(
-                  tx, blockKey, PqCodesBlock.parser())
-              .thenApply(block -> {
-                if (block != null) {
-                  // Cache the block
-                  blockCache.put(cacheKey, CompletableFuture.completedFuture(block));
-                }
-                return block;
-              });
-          blockFutures.put(blockNumber, future);
-        }
-      }
+    List<CompletableFuture<Void>> extractFutures = new ArrayList<>();
+    for (Map.Entry<Long, List<Integer>> entry : blockGroups.entrySet()) {
+      long blockNumber = entry.getKey();
+      List<Integer> indices = entry.getValue();
 
-      // Extract codes from blocks
-      List<byte[]> results = new ArrayList<>(nodeIds.size());
-      for (int i = 0; i < nodeIds.size(); i++) {
-        results.add(null); // Initialize with nulls
-      }
+      extractFutures.add(blockFutures.get(blockNumber).thenAccept(block -> {
+        if (block != null) {
+          for (int idx : indices) {
+            long nodeId = nodeIds.get(idx);
+            int blockOffset = VectorIndexKeys.blockOffset(nodeId, codesPerBlock);
 
-      List<CompletableFuture<Void>> extractFutures = new ArrayList<>();
-
-      for (Map.Entry<Long, List<Integer>> entry : blockGroups.entrySet()) {
-        long blockNumber = entry.getKey();
-        List<Integer> indices = entry.getValue();
-
-        extractFutures.add(blockFutures.get(blockNumber).thenAccept(block -> {
-          if (block != null) {
-            for (int idx : indices) {
-              long nodeId = nodeIds.get(idx);
-              int blockOffset = VectorIndexKeys.blockOffset(nodeId, codesPerBlock);
-
-              if (blockOffset < block.getCodesInBlock()) {
-                results.set(idx, extractCode(block, blockOffset));
-              }
+            if (blockOffset < block.getCodesInBlock()) {
+              results.set(idx, extractCode(block, blockOffset));
             }
           }
-        }));
-      }
+        }
+      }));
+    }
 
-      return allOf(extractFutures.toArray(CompletableFuture[]::new)).thenApply(v -> results);
-    });
+    return allOf(extractFutures.toArray(CompletableFuture[]::new)).thenApply(v -> results);
   }
 
   /**
@@ -394,7 +350,7 @@ public class PqBlockStorage {
 
       LOGGER.info("Deleted all PQ blocks for version {}", version);
 
-      return CompletableFuture.completedFuture(null);
+      return completedFuture(null);
     });
   }
 
@@ -444,14 +400,18 @@ public class PqBlockStorage {
 
   // Helper methods
 
+  // AsyncLoadingCache loader function
+  private CompletableFuture<PqCodesBlock> loadBlock(BlockCacheKey key) {
+    byte[] blockKey = keys.pqBlockKey(key.version(), key.blockNumber());
+    return db.runAsync(tx -> readProto(tx, blockKey, PqCodesBlock.parser()));
+  }
+
   private byte[] extractCode(PqCodesBlock block, int blockOffset) {
     byte[] codes = block.getCodes().toByteArray();
     byte[] pqCode = new byte[pqSubvectors];
     System.arraycopy(codes, blockOffset * pqSubvectors, pqCode, 0, pqSubvectors);
     return pqCode;
   }
-
-  // updateCache method removed - Caffeine handles eviction automatically
 
   private Timestamp currentTimestamp() {
     long millis = System.currentTimeMillis();
