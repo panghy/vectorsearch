@@ -4,13 +4,12 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.directory.Directory;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.vectorsearch.proto.Config;
-import lombok.Getter;
-
 import java.time.Duration;
 import java.time.InstantSource;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
+import lombok.Getter;
 
 /**
  * Configuration for a VectorSearch instance that manages approximate nearest neighbor search
@@ -384,16 +383,14 @@ public class VectorSearchConfig {
             "pqSubvectors must be between 1 and dimension, got: " + pqSubvectors);
       }
       if (dimension % pqSubvectors != 0) {
-        throw new IllegalArgumentException(
-            "dimension must be divisible by pqSubvectors, got dimension="
+        throw new IllegalArgumentException("dimension must be divisible by pqSubvectors, got dimension="
             + dimension + ", pqSubvectors=" + pqSubvectors);
       }
       if (pqNbits != 8) {
         throw new IllegalArgumentException("only 8-bit PQ is currently supported, got: " + pqNbits);
       }
       if (codesPerBlock <= 0 || codesPerBlock > 1024) {
-        throw new IllegalArgumentException(
-            "codesPerBlock must be between 1 and 1024, got: " + codesPerBlock);
+        throw new IllegalArgumentException("codesPerBlock must be between 1 and 1024, got: " + codesPerBlock);
       }
     }
 
@@ -408,8 +405,7 @@ public class VectorSearchConfig {
       throw new IllegalArgumentException("maxSearchVisits must be positive, got: " + maxSearchVisits);
     }
     if (entryPointCount <= 0 || entryPointCount > 256) {
-      throw new IllegalArgumentException(
-          "entryPointCount must be between 1 and 256, got: " + entryPointCount);
+      throw new IllegalArgumentException("entryPointCount must be between 1 and 256, got: " + entryPointCount);
     }
 
     // Cache validation
@@ -417,8 +413,7 @@ public class VectorSearchConfig {
       throw new IllegalArgumentException("pqBlockCacheSize must be non-negative, got: " + pqBlockCacheSize);
     }
     if (adjacencyCacheSize < 0) {
-      throw new IllegalArgumentException(
-          "adjacencyCacheSize must be non-negative, got: " + adjacencyCacheSize);
+      throw new IllegalArgumentException("adjacencyCacheSize must be non-negative, got: " + adjacencyCacheSize);
     }
 
     // Worker validation
@@ -450,15 +445,15 @@ public class VectorSearchConfig {
    * If any immutable value differs, an exception is thrown.
    *
    * @param storedConfig the configuration stored in FoundationDB (protobuf Config message)
-   * @throws IllegalStateException if any immutable configuration value doesn't match
+   * @throws IndexConfigurationException if any immutable configuration value doesn't match
    */
-  public void validateAgainstStored(Config storedConfig) {
+  public void validateAgainstStored(Config storedConfig) throws IndexConfigurationException {
     // Validate dimension (IMMUTABLE)
     if (storedConfig.getDimension() != this.dimension) {
-      throw new IllegalStateException(
-          String.format("Dimension mismatch: configured=%d, stored=%d. " +
-                        "Dimension cannot be changed after collection creation.",
-              this.dimension, storedConfig.getDimension()));
+      throw new IndexConfigurationException(String.format(
+          "Dimension mismatch: configured=%d, stored=%d. "
+              + "Dimension cannot be changed after collection creation.",
+          this.dimension, storedConfig.getDimension()));
     }
 
     // Validate distance metric (IMMUTABLE)
@@ -467,42 +462,42 @@ public class VectorSearchConfig {
     if (storedMetric.equals("L2")) storedMetric = "L2";
     if (storedMetric.equals("IP")) storedMetric = "INNER_PRODUCT";
     if (!storedMetric.equalsIgnoreCase(configuredMetric)) {
-      throw new IllegalStateException(
-          String.format("Distance metric mismatch: configured=%s, stored=%s. " +
-                        "Distance metric cannot be changed after collection creation.",
-              configuredMetric, storedMetric));
+      throw new IndexConfigurationException(String.format(
+          "Distance metric mismatch: configured=%s, stored=%s. "
+              + "Distance metric cannot be changed after collection creation.",
+          configuredMetric, storedMetric));
     }
 
     // Validate PQ configuration (ALL IMMUTABLE)
     if (this.pqEnabled) {
       if (storedConfig.getPqSubvectors() != this.pqSubvectors) {
-        throw new IllegalStateException(
-            String.format("PQ subvectors mismatch: configured=%d, stored=%d. " +
-                          "PQ configuration cannot be changed after collection creation.",
-                this.pqSubvectors, storedConfig.getPqSubvectors()));
+        throw new IndexConfigurationException(String.format(
+            "PQ subvectors mismatch: configured=%d, stored=%d. "
+                + "PQ configuration cannot be changed after collection creation.",
+            this.pqSubvectors, storedConfig.getPqSubvectors()));
       }
 
       if (storedConfig.getPqNbits() != this.pqNbits) {
-        throw new IllegalStateException(
-            String.format("PQ nbits mismatch: configured=%d, stored=%d. " +
-                          "PQ configuration cannot be changed after collection creation.",
-                this.pqNbits, storedConfig.getPqNbits()));
+        throw new IndexConfigurationException(String.format(
+            "PQ nbits mismatch: configured=%d, stored=%d. "
+                + "PQ configuration cannot be changed after collection creation.",
+            this.pqNbits, storedConfig.getPqNbits()));
       }
 
       if (storedConfig.getCodesPerBlock() != this.codesPerBlock) {
-        throw new IllegalStateException(
-            String.format("Codes per block mismatch: configured=%d, stored=%d. " +
-                          "Storage block size cannot be changed after collection creation.",
-                this.codesPerBlock, storedConfig.getCodesPerBlock()));
+        throw new IndexConfigurationException(String.format(
+            "Codes per block mismatch: configured=%d, stored=%d. "
+                + "Storage block size cannot be changed after collection creation.",
+            this.codesPerBlock, storedConfig.getCodesPerBlock()));
       }
     }
 
     // Validate graph degree (IMMUTABLE)
     if (storedConfig.getGraphDegree() != this.graphDegree) {
-      throw new IllegalStateException(
-          String.format("Graph degree mismatch: configured=%d, stored=%d. " +
-                        "Graph degree cannot be changed after collection creation (would require graph rebuild).",
-              this.graphDegree, storedConfig.getGraphDegree()));
+      throw new IndexConfigurationException(String.format(
+          "Graph degree mismatch: configured=%d, stored=%d. "
+              + "Graph degree cannot be changed after collection creation (would require graph rebuild).",
+          this.graphDegree, storedConfig.getGraphDegree()));
     }
 
     // Note: Search parameters, cache sizes, worker counts are MUTABLE and not validated
@@ -516,22 +511,21 @@ public class VectorSearchConfig {
    * @return a Config protobuf message containing immutable configuration
    */
   public Config toProtoConfig() {
-    Config.Builder builder =
-        Config.newBuilder()
-            .setDimension(dimension)
-            .setMetric(distanceMetric == DistanceMetric.INNER_PRODUCT ? "IP" :
-                distanceMetric == DistanceMetric.COSINE ? "COSINE" : "L2")
-            .setGraphDegree(graphDegree)
-            .setCodesPerBlock(codesPerBlock);
+    Config.Builder builder = Config.newBuilder()
+        .setDimension(dimension)
+        .setMetric(
+            distanceMetric == DistanceMetric.INNER_PRODUCT
+                ? "IP"
+                : distanceMetric == DistanceMetric.COSINE ? "COSINE" : "L2")
+        .setGraphDegree(graphDegree)
+        .setCodesPerBlock(codesPerBlock);
 
     if (pqEnabled) {
-      builder.setPqSubvectors(pqSubvectors)
-          .setPqNbits(pqNbits);
+      builder.setPqSubvectors(pqSubvectors).setPqNbits(pqNbits);
     }
 
     // Set defaults for search parameters (these are stored but can be overridden)
-    builder.setDefaultSearchList(defaultSearchList)
-        .setMaxSearchVisits(maxSearchVisits);
+    builder.setDefaultSearchList(defaultSearchList).setMaxSearchVisits(maxSearchVisits);
 
     return builder.build();
   }
@@ -555,26 +549,26 @@ public class VectorSearchConfig {
     private final Directory directory;
 
     // Required parameters (no defaults)
-    private int dimension = -1;  // Must be set explicitly
+    private int dimension = -1; // Must be set explicitly
 
     // Core configuration with defaults
     private DistanceMetric distanceMetric = DistanceMetric.L2;
 
     // PQ configuration defaults (following Milvus/DiskANN)
     private boolean pqEnabled = true;
-    private int pqSubvectors = -1;  // Will default to dimension/2
+    private int pqSubvectors = -1; // Will default to dimension/2
     private int pqNbits = 8;
     private int codesPerBlock = 512;
 
     // Graph configuration defaults
-    private int graphDegree = 64;  // DiskANN default R
-    private int defaultSearchList = 16;  // Milvus default
+    private int graphDegree = 64; // DiskANN default R
+    private int defaultSearchList = 16; // Milvus default
     private int maxSearchVisits = 1500;
     private int entryPointCount = 32;
     private Duration entryPointRefreshInterval = Duration.ofHours(1);
 
     // Cache configuration defaults
-    private long pqBlockCacheSize = 1024L * 1024 * 1024;  // 1GB
+    private long pqBlockCacheSize = 1024L * 1024 * 1024; // 1GB
     private int adjacencyCacheSize = 100_000;
     private boolean keepCodebooksInMemory = true;
 
@@ -839,8 +833,8 @@ public class VectorSearchConfig {
 
       // Auto-configure PQ subvectors if not set
       if (pqEnabled && pqSubvectors == -1) {
-        pqSubvectors = dimension / 2;
-        // Ensure it's at least 1 and divides evenly
+        pqSubvectors = Math.max(1, dimension / 2); // Ensure at least 1
+        // Ensure it divides evenly
         while (pqSubvectors > 1 && dimension % pqSubvectors != 0) {
           pqSubvectors--;
         }
