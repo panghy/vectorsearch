@@ -31,18 +31,22 @@ public class PqBlockStorage {
   private final int pqSubvectors;
 
   // Cache for frequently accessed blocks using Caffeine
-  private final AsyncCache<String, PqCodesBlock> blockCache;
-  private static final int MAX_CACHE_SIZE = 1000;
-  private static final Duration CACHE_TTL = Duration.ofMinutes(10);
+  private final AsyncCache<BlockCacheKey, PqCodesBlock> blockCache;
 
-  public PqBlockStorage(Database db, VectorIndexKeys keys, int codesPerBlock, int pqSubvectors) {
+  public PqBlockStorage(
+      Database db,
+      VectorIndexKeys keys,
+      int codesPerBlock,
+      int pqSubvectors,
+      int maxCacheSize,
+      Duration cacheTtl) {
     this.db = db;
     this.keys = keys;
     this.codesPerBlock = codesPerBlock;
     this.pqSubvectors = pqSubvectors;
     this.blockCache = Caffeine.newBuilder()
-        .maximumSize(MAX_CACHE_SIZE)
-        .expireAfterWrite(CACHE_TTL)
+        .maximumSize(maxCacheSize)
+        .expireAfterWrite(cacheTtl)
         .buildAsync();
   }
 
@@ -109,7 +113,7 @@ public class PqBlockStorage {
 
             // Update cache
             blockCache.put(
-                blockCacheKey(codebookVersion, blockNumber),
+                new BlockCacheKey(codebookVersion, blockNumber),
                 CompletableFuture.completedFuture(updatedBlock));
 
             return null;
@@ -183,7 +187,7 @@ public class PqBlockStorage {
 
               // Update cache
               blockCache.put(
-                  blockCacheKey(codebookVersion, blockNumber),
+                  new BlockCacheKey(codebookVersion, blockNumber),
                   CompletableFuture.completedFuture(updatedBlock));
 
               return null;
@@ -214,7 +218,7 @@ public class PqBlockStorage {
     int blockOffset = VectorIndexKeys.blockOffset(nodeId, codesPerBlock);
 
     // Check cache first
-    String cacheKey = blockCacheKey(codebookVersion, blockNumber);
+    BlockCacheKey cacheKey = new BlockCacheKey(codebookVersion, blockNumber);
     CompletableFuture<PqCodesBlock> cachedFuture = blockCache.getIfPresent(cacheKey);
     if (cachedFuture != null) {
       return cachedFuture.thenApply(cached -> {
@@ -259,7 +263,7 @@ public class PqBlockStorage {
 
       // Load unique blocks
       for (long blockNumber : blockGroups.keySet()) {
-        String cacheKey = blockCacheKey(codebookVersion, blockNumber);
+        BlockCacheKey cacheKey = new BlockCacheKey(codebookVersion, blockNumber);
         CompletableFuture<PqCodesBlock> cachedFuture = blockCache.getIfPresent(cacheKey);
 
         if (cachedFuture != null) {
@@ -447,10 +451,6 @@ public class PqBlockStorage {
     return pqCode;
   }
 
-  private String blockCacheKey(int version, long blockNumber) {
-    return version + ":" + blockNumber;
-  }
-
   // updateCache method removed - Caffeine handles eviction automatically
 
   private Timestamp currentTimestamp() {
@@ -472,4 +472,9 @@ public class PqBlockStorage {
    * Storage statistics.
    */
   public record StorageStats(long blockCount, long totalCodes, long storageBytes) {}
+
+  /**
+   * Cache key for block lookups.
+   */
+  private record BlockCacheKey(int version, long blockNumber) {}
 }
