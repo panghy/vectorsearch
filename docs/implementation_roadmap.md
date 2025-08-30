@@ -37,7 +37,7 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 ## 🚧 **Phase 2: Graph & Search System** (IN PROGRESS)
 
 ### Graph Management
-- [ ] **Node Adjacency Storage** - Per-node neighbor lists with degree bounds
+- [x] **Node Adjacency Storage** - Per-node neighbor lists with degree bounds (COMPLETED)
 - [ ] **Robust Pruning Algorithm** - DiskANN-style neighbor selection with diversity
 - [ ] **Back-link Maintenance** - Bidirectional edge consistency
 - [ ] **Graph Connectivity Monitoring** - Detect and repair disconnected components
@@ -103,7 +103,7 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 
 ### Graph Layer 🚧
 ```
-/C/{collection}/graph/node/{NID}          -> pb.NodeAdj (PLANNED)
+/C/{collection}/graph/node/{NID}          -> pb.NodeAdj (DONE)
 /C/{collection}/graph/meta/connectivity   -> pb.GraphMeta (PLANNED)
 /C/{collection}/entry                     -> pb.EntryList (PLANNED)
 ```
@@ -140,7 +140,7 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 ## 🎯 **Next Milestone: Graph & Search**
 
 **Priority Items:**
-1. **NodeAdj protobuf storage** - Implement per-node neighbor persistence
+1. ~~**NodeAdj protobuf storage**~~ - ✅ Implemented with transaction-based API
 2. **Graph traversal core** - Beam search with PQ distance scoring  
 3. **Entry point system** - Bootstrap search with good starting nodes
 4. **Basic search API** - End-to-end query processing
