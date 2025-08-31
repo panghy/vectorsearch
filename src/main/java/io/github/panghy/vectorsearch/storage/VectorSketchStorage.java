@@ -8,7 +8,6 @@ import io.github.panghy.vectorsearch.proto.VectorSketch;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Storage handler for vector sketches in FoundationDB.
@@ -52,8 +51,8 @@ public class VectorSketchStorage {
    * Generates a SimHash sketch of a vector.
    */
   private byte[] generateSimHash(float[] vector) {
-    // Simple SimHash implementation
-    int[] bits = new int[256];
+    // Simple SimHash implementation using float accumulation for better precision
+    float[] accumulator = new float[256];
 
     try {
       MessageDigest md = MessageDigest.getInstance("SHA-256");
@@ -64,20 +63,20 @@ public class VectorSketchStorage {
         md.update(ByteBuffer.allocate(4).putInt(i).array());
         byte[] hash = md.digest();
 
-        // Weight by vector value
+        // Weight by vector value (keep full float precision)
         float weight = vector[i];
         for (int j = 0; j < 256 && j < hash.length * 8; j++) {
           int byteIdx = j / 8;
           int bitIdx = j % 8;
           boolean bit = ((hash[byteIdx] >> bitIdx) & 1) == 1;
-          bits[j] += bit ? (int) weight : (int) -weight;
+          accumulator[j] += bit ? weight : -weight;
         }
       }
 
-      // Convert to binary
+      // Convert to binary (threshold at 0)
       byte[] sketch = new byte[32]; // 256 bits
       for (int i = 0; i < 256; i++) {
-        if (bits[i] > 0) {
+        if (accumulator[i] > 0) {
           int byteIdx = i / 8;
           int bitIdx = i % 8;
           sketch[byteIdx] |= (byte) (1 << bitIdx);
@@ -86,10 +85,7 @@ public class VectorSketchStorage {
 
       return sketch;
     } catch (Exception e) {
-      // Fallback to random sketch
-      byte[] sketch = new byte[32];
-      ThreadLocalRandom.current().nextBytes(sketch);
-      return sketch;
+      throw new RuntimeException("Failed to generate SimHash", e);
     }
   }
 }
