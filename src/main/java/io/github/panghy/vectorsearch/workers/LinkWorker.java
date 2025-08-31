@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch.workers;
 
+import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
@@ -290,14 +291,13 @@ public class LinkWorker implements Runnable {
             }
 
             // Wait for all operations to complete
-            return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                .thenApply(v -> {
-                  // Check if we're still within time budget
-                  if (instantSource.instant().isAfter(deadline)) {
-                    throw new RuntimeException("Transaction exceeded time budget");
-                  }
-                  return true;
-                });
+            return allOf(futures.toArray(CompletableFuture[]::new)).thenApply(v -> {
+              // Check if we're still within time budget
+              if (instantSource.instant().isAfter(deadline)) {
+                throw new RuntimeException("Transaction exceeded time budget");
+              }
+              return true;
+            });
           })
           .get(TRANSACTION_BUDGET.toSeconds() + 1, TimeUnit.SECONDS);
 
@@ -336,31 +336,27 @@ public class LinkWorker implements Runnable {
           tr, claim.taskKey(), task.getPqCode().toByteArray(), (int) task.getCodebookVersion()));
     }
 
-    return CompletableFuture.allOf(persistFutures.toArray(new CompletableFuture[0]))
-        .thenCompose(v -> {
-          // Step 2: Discover neighbors for all nodes
-          List<CompletableFuture<List<Long>>> neighborFutures = new ArrayList<>();
+    return allOf(persistFutures.toArray(CompletableFuture[]::new)).thenCompose(v -> {
+      // Step 2: Discover neighbors for all nodes
+      List<CompletableFuture<List<Long>>> neighborFutures = new ArrayList<>();
 
-          for (TaskClaim<Long, LinkTask> claim : claims) {
-            neighborFutures.add(discoverNeighbors(tr, claim.taskKey(), claim.task()));
-          }
+      for (TaskClaim<Long, LinkTask> claim : claims) {
+        neighborFutures.add(discoverNeighbors(tr, claim.taskKey(), claim.task()));
+      }
 
-          return CompletableFuture.allOf(neighborFutures.toArray(new CompletableFuture[0]))
-              .thenCompose($ -> {
-                // Step 3: Update adjacency lists with back-links
-                List<CompletableFuture<Void>> updateFutures = new ArrayList<>();
+      return allOf(neighborFutures.toArray(CompletableFuture[]::new)).thenCompose($ -> {
+        // Step 3: Update adjacency lists with back-links
+        List<CompletableFuture<Void>> updateFutures = new ArrayList<>();
 
-                for (int i = 0; i < claims.size(); i++) {
-                  TaskClaim<Long, LinkTask> claim = claims.get(i);
-                  List<Long> neighbors =
-                      neighborFutures.get(i).join();
+        for (int i = 0; i < claims.size(); i++) {
+          TaskClaim<Long, LinkTask> claim = claims.get(i);
+          List<Long> neighbors = neighborFutures.get(i).join();
 
-                  updateFutures.add(updateAdjacencyWithBacklinks(tr, claim.taskKey(), neighbors));
-                }
-
-                return CompletableFuture.allOf(updateFutures.toArray(new CompletableFuture[0]));
-              });
-        });
+          updateFutures.add(updateAdjacencyWithBacklinks(tr, claim.taskKey(), neighbors));
+        }
+        return allOf(updateFutures.toArray(CompletableFuture[]::new));
+      });
+    });
   }
 
   /**
@@ -434,7 +430,7 @@ public class LinkWorker implements Runnable {
           backLinkFutures.add(addBackLink(tr, neighborId, nodeId));
         }
 
-        return CompletableFuture.allOf(backLinkFutures.toArray(new CompletableFuture[0]));
+        return allOf(backLinkFutures.toArray(CompletableFuture[]::new));
       });
     });
   }
@@ -562,5 +558,74 @@ public class LinkWorker implements Runnable {
    */
   public long getTotalFailed() {
     return totalFailed.get();
+  }
+
+  /**
+   * Processes a single task and returns when complete.
+   * This is primarily for testing purposes.
+   *
+   * @return CompletableFuture that completes when the task is processed
+   */
+  public CompletableFuture<Boolean> processOneTask() {
+    // Use claimTask with a timeout to avoid indefinite waiting
+    try {
+      CompletableFuture<TaskClaim<Long, LinkTask>> claimFuture = taskQueue.awaitAndClaimTask(database);
+      TaskClaim<Long, LinkTask> claim = claimFuture.get(CLAIM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+
+      if (claim == null) {
+        return completedFuture(false);
+      }
+
+      TASKS_CLAIMED.add(1);
+      List<TaskClaim<Long, LinkTask>> claims = List.of(claim);
+
+      // Process the single task
+      boolean success = processTasksInTransaction(claims);
+
+      if (success) {
+        completeTasks(claims);
+        totalProcessed.incrementAndGet();
+        return completedFuture(true);
+      } else {
+        failTasks(claims);
+        totalFailed.incrementAndGet();
+        return completedFuture(false);
+      }
+    } catch (TimeoutException e) {
+      // No task available within timeout
+      return completedFuture(false);
+    } catch (Exception e) {
+      LOGGER.log(Level.WARNING, "Failed to process single task", e);
+      return completedFuture(false);
+    }
+  }
+
+  /**
+   * Processes all available tasks until the queue is empty.
+   * This is primarily for testing purposes.
+   *
+   * @param maxTasks maximum number of tasks to process (0 for unlimited)
+   * @return CompletableFuture with the number of tasks processed
+   */
+  public CompletableFuture<Integer> processAllAvailableTasks(int maxTasks) {
+    return processTasksRecursively(0, maxTasks);
+  }
+
+  /**
+   * Helper method for recursive task processing.
+   */
+  private CompletableFuture<Integer> processTasksRecursively(int processedCount, int maxTasks) {
+    if (maxTasks > 0 && processedCount >= maxTasks) {
+      return completedFuture(processedCount);
+    }
+
+    return processOneTask().thenCompose(processed -> {
+      if (!processed) {
+        // No more tasks available
+        return completedFuture(processedCount);
+      }
+      // Process next task
+      return processTasksRecursively(processedCount + 1, maxTasks);
+    });
   }
 }
