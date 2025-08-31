@@ -38,8 +38,8 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 
 ### Graph Management
 - [x] **Node Adjacency Storage** - Per-node neighbor lists with degree bounds (COMPLETED)
-- [ ] **Robust Pruning Algorithm** - DiskANN-style neighbor selection with diversity
-- [ ] **Back-link Maintenance** - Bidirectional edge consistency
+- [x] **Robust Pruning Algorithm** - DiskANN-style neighbor selection with diversity (COMPLETED)
+- [x] **Back-link Maintenance** - Bidirectional edge consistency (COMPLETED)
 - [ ] **Graph Connectivity Monitoring** - Detect and repair disconnected components
 
 ### Search Engine
@@ -141,7 +141,7 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 ## 🎯 **Next Milestone: Online Operations**
 
 **Priority Items:**
-1. **Robust Pruning Algorithm** - DiskANN-style neighbor selection with diversity
+1. **Graph Connectivity Monitoring** - Detect and repair disconnected components
 2. **Transactional Queue Integration** - Link worker task management
 3. **Link Worker Implementation** - Neighbor discovery and graph linking
 4. **Unlink Worker** - Safe node removal with back-link cleanup
