@@ -20,7 +20,7 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 - [x] **Protocol Buffers** - Define all data structures (`Config`, `CodebookSub`, `PqCodesBlock`, `NodeAdj`, etc.)
 - [x] **FDB Key Management** - Tuple-encoded keyspace structure (`VectorIndexKeys`)
 - [x] **Storage Transaction Utils** - Common FDB transaction patterns and protobuf I/O
-- [x] **Comprehensive Test Coverage** - 93% line coverage, 89% branch coverage
+- [x] **Comprehensive Test Coverage** - 93% line coverage, 91% instruction coverage, 81% branch coverage
 
 #### PQ (Product Quantization) System  
 - [x] **PQ Core Algorithm** - K-means clustering, vector encoding/decoding
@@ -64,8 +64,8 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 - [ ] **Graph Repair** - Reconnect components after deletions
 
 ### Background Workers
-- [ ] **Entry List Maintenance** - Periodic refresh of search entry points
-- [ ] **Connectivity Monitor** - Graph health checking and repair
+- [x] **Entry List Maintenance** - Periodic refresh of search entry points (COMPLETED)
+- [x] **Connectivity Monitor** - Graph health checking and repair (COMPLETED)
 - [ ] **Statistics Collection** - Index health and performance metrics
 
 ---
@@ -130,10 +130,18 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 - **Distance metrics**: L2, IP, COSINE supported
 
 ### **Test Coverage Standards**
-- **Line coverage**: 91% achieved (target: >90%)
-- **Branch coverage**: 82% achieved (target: >75%) 
-- **Integration**: Real FDB connections, no mocks
+- **Instruction coverage**: 91% achieved (target: >90%)
+- **Line coverage**: 93% achieved (exceeds 90% target)
+- **Branch coverage**: 81% achieved (exceeds 75% target) 
+- **Integration**: Real FDB connections, no mocks per project standards
 - **Patterns**: Follow existing test structure
+
+### **Recent Implementation Patterns**
+- **Maintenance Methods**: Made package-private for better testability while keeping public APIs clean
+- **Async Maintenance**: All maintenance operations return `CompletableFuture<Void>` for proper testing
+- **Cache Testing**: Added `getPqBlockCache()` accessor for testing cache behavior and eviction
+- **Background Services**: Integrated scheduled maintenance tasks for entry point refresh and connectivity repair
+- **Test Isolation**: Each test uses unique collections to avoid interference
 
 ---
 

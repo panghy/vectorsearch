@@ -99,8 +99,9 @@ The `.github/workflows/publish.yml` workflow automatically:
 
 ## Code Style
 - Uses Palantir Java Format via Spotless
-- 90% line coverage requirement
-- 75% branch coverage requirement
+- 90% instruction coverage requirement (currently 91%)
+- 75% branch coverage requirement (currently 81%)
+- Line coverage currently at 93%
 - Protobuf generated classes are excluded from coverage
 
 ## Architecture Patterns
@@ -188,13 +189,33 @@ The `.github/workflows/publish.yml` workflow automatically:
     ```
   - Automatic repair reconnects orphaned nodes using PQ-based distance calculations
 
+### Maintenance Operations
+- **Background Tasks**: Scheduled maintenance for entry point refresh and connectivity monitoring
+- **Package-Private Methods**: Maintenance operations exposed as package-private for testing
+- **Async Design**: All maintenance methods return `CompletableFuture<Void>` for proper composition
+- **Example pattern**:
+  ```java
+  // Package-private maintenance method for testing
+  CompletableFuture<Void> refreshEntryPoints() {
+      return db.runAsync(tx -> 
+          connectivityMonitor.refreshEntryPoints(tx)
+      );
+  }
+  
+  // Test usage
+  index.refreshEntryPoints().join(); // Test can call directly
+  ```
+
 ## Testing Patterns
 - Use `db.runAsync()` for all database operations in tests
 - Chain futures properly to ensure operations complete in order
 - Always verify test coverage meets requirements before committing
 - Integration tests should use unique test collections to avoid conflicts
-- **Use real FDB instances** instead of mocks for storage layer tests
+- **Use real FDB instances** instead of mocks for storage layer tests (project standard)
 - Test with various graph sizes to ensure algorithms handle edge cases
+- **Maintenance Method Testing**: Use package-private methods with `CompletableFuture<Void>` returns for testability
+- **Cache Testing**: Use accessor methods like `getPqBlockCache()` to verify cache behavior
+- **Async Testing**: All maintenance operations should be properly tested with future composition
 
 ## Debugging Tips
 - When tests fail, use `./gradlew test -i` to see detailed output
