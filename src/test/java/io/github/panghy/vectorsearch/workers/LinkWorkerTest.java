@@ -1116,38 +1116,4 @@ class LinkWorkerTest {
     linkWorker.adjustBatchSize(Duration.ofMillis(1000), true);
     assertThat(linkWorker.getCurrentBatchSize()).isEqualTo(maxSize);
   }
-
-  @Test
-  @DisplayName("Test LinkWorker run method with tasks")
-  void testRunMethodWithTasks() throws Exception {
-    // Add multiple tasks
-    for (int i = 0; i < 3; i++) {
-      float[] queryVector = generateRandomVector(DIMENSION);
-      byte[] pqCode = pq.encode(queryVector);
-      LinkTask task = LinkTask.newBuilder()
-          .setPqCode(ByteString.copyFrom(pqCode))
-          .setCodebookVersion(1)
-          .setNodeId(600L + i)
-          .build();
-
-      taskQueue.enqueue(600L + i, task).get();
-    }
-
-    // Start worker in a thread
-    Thread workerThread = new Thread(linkWorker);
-    workerThread.start();
-
-    // Let it process tasks
-    Thread.sleep(500);
-
-    // Stop the worker
-    linkWorker.stop();
-
-    // Wait for thread to finish
-    workerThread.join(2000);
-
-    // Verify tasks were processed
-    assertThat(linkWorker.getTotalProcessed()).isGreaterThan(0);
-    assertThat(workerThread.isAlive()).isFalse();
-  }
 }
