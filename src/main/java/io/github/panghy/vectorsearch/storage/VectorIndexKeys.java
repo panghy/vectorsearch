@@ -4,6 +4,8 @@ import com.apple.foundationdb.directory.DirectorySubspace;
 import com.apple.foundationdb.tuple.Tuple;
 import lombok.Getter;
 
+import static com.apple.foundationdb.tuple.ByteArrayUtil.printable;
+
 /**
  * Key builders for vector index storage in FoundationDB.
  * All keys follow the pattern: /C/{collection}/...
@@ -38,7 +40,7 @@ public class VectorIndexKeys {
 
   /**
    * -- GETTER --
-   *  Gets the collection subspace.
+   * Gets the collection subspace.
    */
   @Getter
   private final DirectorySubspace collectionSubspace;
@@ -49,7 +51,7 @@ public class VectorIndexKeys {
    * Creates a key builder for a specific collection.
    *
    * @param collectionSubspace the FDB directory subspace for this collection
-   * @param collectionName the name of the collection
+   * @param collectionName     the name of the collection
    */
   public VectorIndexKeys(DirectorySubspace collectionSubspace, String collectionName) {
     this.collectionSubspace = collectionSubspace;
@@ -98,7 +100,7 @@ public class VectorIndexKeys {
    * Key for a PQ codebook subspace.
    * Path: /C/{collection}/pq/codebook/{version}/{subspace}
    *
-   * @param version codebook version
+   * @param version       codebook version
    * @param subspaceIndex PQ subspace index [0, m-1]
    */
   public byte[] codebookKey(long version, int subspaceIndex) {
@@ -129,7 +131,7 @@ public class VectorIndexKeys {
    * Key for a PQ codes block.
    * Path: /C/{collection}/pq/block/{version}/{blockNumber}
    *
-   * @param version codebook version these codes are encoded with
+   * @param version     codebook version these codes are encoded with
    * @param blockNumber block number (nodeId / codesPerBlock)
    */
   public byte[] pqBlockKey(int version, long blockNumber) {
@@ -140,9 +142,9 @@ public class VectorIndexKeys {
    * Key for a striped PQ codes block (for hotspot mitigation).
    * Path: /C/{collection}/pq/block/{version}/{blockNumber}/{stripe}
    *
-   * @param version codebook version
+   * @param version     codebook version
    * @param blockNumber block number
-   * @param stripe stripe index for load distribution
+   * @param stripe      stripe index for load distribution
    */
   public byte[] pqBlockKeyStriped(int version, long blockNumber, int stripe) {
     return collectionSubspace.pack(Tuple.from(PQ, BLOCK, version, blockNumber, stripe));
@@ -223,7 +225,7 @@ public class VectorIndexKeys {
    * @return tuple of [startKey, endKey) for range scan
    */
   public static byte[][] prefixRange(byte[] prefix) {
-    return new byte[][] {prefix, com.apple.foundationdb.tuple.ByteArrayUtil.strinc(prefix)};
+    return new byte[][]{prefix, com.apple.foundationdb.tuple.ByteArrayUtil.strinc(prefix)};
   }
 
   // ==================== Utility Methods ====================
@@ -231,7 +233,7 @@ public class VectorIndexKeys {
   /**
    * Calculates the block number for a given node ID.
    *
-   * @param nodeId the node ID
+   * @param nodeId        the node ID
    * @param codesPerBlock number of codes per block
    * @return block number
    */
@@ -242,7 +244,7 @@ public class VectorIndexKeys {
   /**
    * Calculates the offset within a block for a given node ID.
    *
-   * @param nodeId the node ID
+   * @param nodeId        the node ID
    * @param codesPerBlock number of codes per block
    * @return offset within the block
    */
@@ -253,7 +255,7 @@ public class VectorIndexKeys {
   /**
    * Calculates the stripe index for load distribution.
    *
-   * @param nodeId the node ID
+   * @param nodeId     the node ID
    * @param numStripes number of stripes
    * @return stripe index
    */
@@ -282,18 +284,15 @@ public class VectorIndexKeys {
    * Key format: /C/{collection}/graph/node/{nodeId}
    *
    * @param key the adjacency key
-   * @return the node ID, or null if extraction fails
+   * @return the node ID
+   * @throws IllegalArgumentException if the key is not a valid adjacency key
    */
-  public Long extractNodeIdFromAdjacencyKey(byte[] key) {
-    try {
-      Tuple tuple = collectionSubspace.unpack(key);
-      // Tuple should be (GRAPH, NODE, nodeId)
-      if (tuple.size() >= 3 && GRAPH.equals(tuple.getString(0)) && NODE.equals(tuple.getString(1))) {
-        return tuple.getLong(2);
-      }
-    } catch (Exception e) {
-      // Invalid key format
+  public long extractNodeIdFromAdjacencyKey(byte[] key) {
+    Tuple tuple = collectionSubspace.unpack(key);
+    // Tuple should be (GRAPH, NODE, nodeId)
+    if (tuple.size() >= 3 && GRAPH.equals(tuple.getString(0)) && NODE.equals(tuple.getString(1))) {
+      return tuple.getLong(2);
     }
-    return null;
+    throw new IllegalArgumentException("Invalid adjacency key: " + printable(key));
   }
 }
