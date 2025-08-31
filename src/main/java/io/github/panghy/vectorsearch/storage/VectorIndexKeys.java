@@ -1,10 +1,10 @@
 package io.github.panghy.vectorsearch.storage;
 
+import static com.apple.foundationdb.tuple.ByteArrayUtil.printable;
+
 import com.apple.foundationdb.directory.DirectorySubspace;
 import com.apple.foundationdb.tuple.Tuple;
 import lombok.Getter;
-
-import static com.apple.foundationdb.tuple.ByteArrayUtil.printable;
 
 /**
  * Key builders for vector index storage in FoundationDB.
@@ -225,7 +225,7 @@ public class VectorIndexKeys {
    * @return tuple of [startKey, endKey) for range scan
    */
   public static byte[][] prefixRange(byte[] prefix) {
-    return new byte[][]{prefix, com.apple.foundationdb.tuple.ByteArrayUtil.strinc(prefix)};
+    return new byte[][] {prefix, com.apple.foundationdb.tuple.ByteArrayUtil.strinc(prefix)};
   }
 
   // ==================== Utility Methods ====================
