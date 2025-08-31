@@ -1,7 +1,5 @@
 package io.github.panghy.vectorsearch.graph;
 
-import static java.util.concurrent.CompletableFuture.completedFuture;
-
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.KeySelector;
 import com.apple.foundationdb.Transaction;
@@ -12,6 +10,7 @@ import io.github.panghy.vectorsearch.storage.GraphMetaStorage;
 import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
+
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -25,6 +24,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.BiFunction;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+
+import static java.util.concurrent.CompletableFuture.completedFuture;
 
 /**
  * Monitors and repairs graph connectivity in the vector search index.
@@ -537,10 +538,7 @@ public class GraphConnectivityMonitor {
     for (Long nodeId : sampleNodes) {
       CompletableFuture<Integer> future = limitedBFS(tx, nodeId, MAX_BFS_VISITS);
       reachabilityFutures = reachabilityFutures.thenCombine(future, (list, count) -> {
-        //noinspection SynchronizationOnLocalVariableOrMethodParameter
-        synchronized (list) {
-          list.add(count);
-        }
+        list.add(count);
         return list;
       });
     }
@@ -675,7 +673,8 @@ public class GraphConnectivityMonitor {
   /**
    * Helper class for tracking node degrees.
    */
-  private record NodeDegree(Long nodeId, int degree) {}
+  private record NodeDegree(Long nodeId, int degree) {
+  }
 
   /**
    * Represents a range for sampling.
@@ -701,5 +700,6 @@ public class GraphConnectivityMonitor {
   /**
    * Represents a node ID range.
    */
-  record NodeIdRange(long min, long max) {}
+  record NodeIdRange(long min, long max) {
+  }
 }
