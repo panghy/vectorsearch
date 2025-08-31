@@ -43,10 +43,10 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 - [x] **Graph Connectivity Monitoring** - Detect and repair disconnected components (COMPLETED)
 
 ### Search Engine
-- [x] **Beam Search Implementation** - Graph traversal with PQ-based scoring (COMPLETED)
+- [x] **Beam Search Implementation** - Graph traversal with PQ-based scoring (IMPLEMENTED BUT NOT INTEGRATED ⚠️)
 - [x] **Entry Point Management** - Hierarchical entry strategies (medoids, random, high-degree) (COMPLETED)
-- [x] **Query Processing Pipeline** - End-to-end search with configurable parameters (COMPLETED)
-- [x] **Search Result Ranking** - Top-k result selection and scoring (COMPLETED)
+- [ ] **Query Processing Pipeline** - End-to-end search with configurable parameters (NOT WIRED UP)
+- [x] **Search Result Ranking** - Top-k result selection and scoring (IMPLEMENTED BUT UNUSED)
 
 ---
 
@@ -74,11 +74,11 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 
 ### Codebook Management
 - [ ] **Two-Phase Rotation** - Safe codebook updates without downtime
-- [ ] **Vector Sketches** - SimHash/PCA for codebook retraining
+- [x] **Vector Sketches** - SimHash/PCA for codebook retraining (STORAGE ONLY - NO RETRAINING IMPL)
 - [ ] **Quality Monitoring** - Track quantization error and recall
 
 ### Performance & Scaling
-- [ ] **Cache Management** - LRU caches for PQ blocks and adjacency data
+- [x] **Cache Management** - LRU caches for PQ blocks and adjacency data (IMPLEMENTED)
 - [ ] **Hotspot Mitigation** - Block striping for high-contention scenarios
 - [ ] **Range Configuration** - FDB placement optimization
 - [ ] **Admission Control** - Rate limiting and backpressure
@@ -108,9 +108,9 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 /C/{collection}/entry                     -> pb.EntryList (DONE)
 ```
 
-### Sketch Layer 📋
+### Sketch Layer ⚠️
 ```
-/C/{collection}/sketch/{NID}              -> pb.VectorSketch (PLANNED)
+/C/{collection}/sketch/{NID}              -> pb.VectorSketch (STORING BUT NOT USED FOR RETRAINING)
 ```
 
 ---
@@ -145,20 +145,37 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 
 ---
 
-## 🎯 **Next Milestone: Delete Operations & Background Workers**
+## ⚠️ **Critical Integration Gaps**
 
-**Priority Items:**
-1. **Unlink Worker** - Safe node removal with back-link cleanup
-2. **Orphan Detection** - Identify disconnected nodes after deletions
-3. **Graph Repair** - Reconnect components to maintain connectivity
-4. **Entry List Maintenance** - Keep search entry points fresh
+### Components Built But Not Connected:
+1. **BeamSearchEngine** - Fully implemented search engine returning empty results (search() in FdbVectorSearch has TODO)
+2. **ProductQuantizer** - Not initialized from codebook storage (line 426-428 TODO)
+3. **VectorSketchStorage** - Storing sketches but no codebook retraining implementation uses them
+4. **Statistics Collection** - getStats() returns hardcoded zeros, no actual metrics gathering
+
+### Missing Components:
+1. **UnlinkWorker** - Does not exist, delete operations enqueue tasks with no processor
+2. **Codebook Rotation** - Two-phase rotation not implemented
+3. **Vector Count** - getVectorCount() returns 0, not implemented
+
+## 🎯 **Next Milestone: Wire Up Existing Components**
+
+**Priority 1 - Critical (System Non-Functional):**
+1. **Wire BeamSearchEngine to search()** - Make search actually work
+2. **Create UnlinkWorker** - Process delete operations
+3. **Initialize ProductQuantizer** - Load from codebook storage on startup
+
+**Priority 2 - Enhanced Functionality:**
+4. **Implement getStats()** - Gather actual metrics
+5. **Implement getVectorCount()** - Track actual vector count
+6. **Codebook retraining** - Use stored vector sketches
 
 **Success Criteria:**
-- Delete operations maintain graph connectivity
-- No orphaned nodes after deletions
-- Automatic repair of disconnected components
-- Entry points remain optimal for search performance
+- Search returns actual results using BeamSearchEngine
+- Delete operations are processed by UnlinkWorker
+- ProductQuantizer properly initialized from stored codebooks
+- Statistics reflect actual system state
 
 ---
 
-*This roadmap will be updated as implementation progresses. Current focus: implementing online operations for dynamic index updates.*
+*This roadmap will be updated as implementation progresses. Current focus: **CRITICAL - Wiring up existing components to make search functional.***

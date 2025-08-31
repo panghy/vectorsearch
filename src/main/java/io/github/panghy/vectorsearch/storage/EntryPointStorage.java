@@ -38,11 +38,10 @@ public class EntryPointStorage {
    * Creates a new EntryPointStorage instance.
    *
    * @param subspace       the FDB directory subspace for this collection
-   * @param collectionName the name of the collection
    * @param instantSource  source for timestamps
    */
-  public EntryPointStorage(DirectorySubspace subspace, String collectionName, InstantSource instantSource) {
-    this.keys = new VectorIndexKeys(subspace, collectionName);
+  public EntryPointStorage(DirectorySubspace subspace, InstantSource instantSource) {
+    this.keys = new VectorIndexKeys(subspace);
     this.instantSource = instantSource;
   }
 

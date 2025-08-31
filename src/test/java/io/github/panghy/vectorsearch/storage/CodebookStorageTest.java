@@ -38,7 +38,7 @@ class CodebookStorageTest {
       return null;
     });
 
-    keys = new VectorIndexKeys(testSpace, testCollectionName);
+    keys = new VectorIndexKeys(testSpace);
     storage = new CodebookStorage(db, keys);
   }
 

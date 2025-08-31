@@ -45,17 +45,13 @@ public class VectorIndexKeys {
   @Getter
   private final DirectorySubspace collectionSubspace;
 
-  private final String collectionName;
-
   /**
    * Creates a key builder for a specific collection.
    *
    * @param collectionSubspace the FDB directory subspace for this collection
-   * @param collectionName     the name of the collection
    */
-  public VectorIndexKeys(DirectorySubspace collectionSubspace, String collectionName) {
+  public VectorIndexKeys(DirectorySubspace collectionSubspace) {
     this.collectionSubspace = collectionSubspace;
-    this.collectionName = collectionName;
   }
 
   // ==================== Metadata Keys ====================
@@ -262,13 +258,6 @@ public class VectorIndexKeys {
   public static int stripeIndex(long nodeId, int numStripes) {
     // Use a simple hash for stripe distribution
     return (int) (Math.abs(nodeId * 2654435761L) % numStripes);
-  }
-
-  /**
-   * Gets the collection name.
-   */
-  public String getCollectionName() {
-    return collectionName;
   }
 
   /**

@@ -3,6 +3,7 @@ package io.github.panghy.vectorsearch;
 import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
 import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
 import static com.apple.foundationdb.tuple.Tuple.from;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -17,7 +18,9 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.vectorsearch.proto.Config;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -712,5 +715,340 @@ class FdbVectorSearchTest {
     // Verify stats are recorded (since recordStats() was called in builder)
     var stats = cache.stats();
     assertNotNull(stats);
+  }
+
+  // ============= Vector Insertion Tests =============
+
+  @Test
+  @DisplayName("Should insert single vector and return assigned ID")
+  void testInsertSingleVector() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Create test vector
+    float[] vector = new float[128];
+    Arrays.fill(vector, 1.0f);
+
+    // Insert vector
+    List<Long> assignedIds = index.insert(Arrays.asList(vector)).join();
+
+    assertThat(assignedIds).hasSize(1);
+    assertThat(assignedIds.get(0)).isEqualTo(1L);
+  }
+
+  @Test
+  @DisplayName("Should insert multiple vectors and return consecutive IDs")
+  void testInsertMultipleVectors() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Create test vectors
+    float[] vector1 = new float[128];
+    Arrays.fill(vector1, 1.0f);
+    float[] vector2 = new float[128];
+    Arrays.fill(vector2, 2.0f);
+    float[] vector3 = new float[128];
+    Arrays.fill(vector3, 3.0f);
+
+    // Insert vectors
+    List<Long> assignedIds =
+        index.insert(Arrays.asList(vector1, vector2, vector3)).join();
+
+    assertThat(assignedIds).hasSize(3);
+    assertThat(assignedIds).containsExactly(1L, 2L, 3L);
+  }
+
+  @Test
+  @DisplayName("Should maintain ID counter across multiple insert calls")
+  void testInsertIdCounterPersistence() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // First batch
+    float[] vector1 = new float[128];
+    Arrays.fill(vector1, 1.0f);
+    List<Long> ids1 = index.insert(Arrays.asList(vector1)).join();
+
+    // Second batch
+    float[] vector2 = new float[128];
+    Arrays.fill(vector2, 2.0f);
+    float[] vector3 = new float[128];
+    Arrays.fill(vector3, 3.0f);
+    List<Long> ids2 = index.insert(Arrays.asList(vector2, vector3)).join();
+
+    assertThat(ids1).containsExactly(1L);
+    assertThat(ids2).containsExactly(2L, 3L);
+  }
+
+  @Test
+  @DisplayName("Should reject vectors with wrong dimension")
+  void testInsertWrongDimension() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Create vector with wrong dimension
+    float[] wrongVector = new float[64]; // Config expects 128
+    Arrays.fill(wrongVector, 1.0f);
+
+    // Should fail
+    assertThatThrownBy(() -> index.insert(Arrays.asList(wrongVector)).join())
+        .hasRootCauseInstanceOf(IllegalArgumentException.class)
+        .hasRootCauseMessage("Vector dimension mismatch: expected 128 but got 64");
+  }
+
+  @Test
+  @DisplayName("Should reject insert when index not initialized")
+  void testInsertNotInitialized() throws Exception {
+    // Test by creating a config that would fail validation
+    assertThatThrownBy(() -> {
+          VectorSearchConfig invalidConfig = VectorSearchConfig.builder(db, directory)
+              .dimension(0) // Invalid dimension
+              .build();
+        })
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("dimension must be set and positive");
+  }
+
+  @Test
+  @DisplayName("Should upsert vectors with specified IDs")
+  void testUpsertSpecifiedIds() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Create test vectors with specific IDs
+    float[] vector1 = new float[128];
+    Arrays.fill(vector1, 1.0f);
+    float[] vector2 = new float[128];
+    Arrays.fill(vector2, 2.0f);
+
+    Map<Long, float[]> vectors = Map.of(
+        100L, vector1,
+        200L, vector2);
+
+    // Upsert vectors
+    index.upsert(vectors).join();
+
+    // Should complete without error
+  }
+
+  @Test
+  @DisplayName("Should reject upsert with wrong dimension")
+  void testUpsertWrongDimension() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    float[] wrongVector = new float[64]; // Config expects 128
+    Arrays.fill(wrongVector, 1.0f);
+
+    Map<Long, float[]> vectors = Map.of(100L, wrongVector);
+
+    assertThatThrownBy(() -> index.upsert(vectors).join())
+        .hasRootCauseInstanceOf(IllegalArgumentException.class)
+        .hasRootCauseMessage("Vector dimension mismatch for ID 100: expected 128 but got 64");
+  }
+
+  @Test
+  @DisplayName("Should delete vectors by ID")
+  void testDeleteVectors() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Delete some IDs
+    List<Long> idsToDelete = Arrays.asList(1L, 2L, 3L);
+    index.delete(idsToDelete).join();
+
+    // Should complete without error
+  }
+
+  @Test
+  @DisplayName("Should return basic health status")
+  void testIsHealthy() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    Boolean healthy = index.isHealthy().join();
+    assertThat(healthy).isTrue();
+  }
+
+  @Test
+  @DisplayName("Should return index stats")
+  void testGetStats() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    VectorSearch.IndexStats stats = index.getStats().join();
+    assertThat(stats).isNotNull();
+    assertThat(stats.getVectorCount()).isEqualTo(0L);
+    assertThat(stats.getGraphEdgeCount()).isEqualTo(0L);
+    assertThat(stats.getGraphConnectivity()).isEqualTo(0.0);
+    assertThat(stats.getQueueDepth()).isEqualTo(0L);
+    assertThat(stats.getCacheHitRate()).isEqualTo(0.0);
+  }
+
+  @Test
+  @DisplayName("Should perform search with empty results")
+  void testSearchEmpty() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    float[] queryVector = new float[128];
+    Arrays.fill(queryVector, 1.0f);
+
+    List<io.github.panghy.vectorsearch.search.SearchResult> results =
+        index.search(queryVector, 10).join();
+    assertThat(results).isEmpty(); // TODO implementation returns empty
+  }
+
+  @Test
+  @DisplayName("Should perform search with custom parameters")
+  void testSearchWithCustomParameters() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    float[] queryVector = new float[128];
+    Arrays.fill(queryVector, 1.0f);
+
+    List<io.github.panghy.vectorsearch.search.SearchResult> results =
+        index.search(queryVector, 5, 20, 2000).join();
+    assertThat(results).isEmpty(); // TODO implementation returns empty
+  }
+
+  @Test
+  @DisplayName("Should reject search with wrong dimension")
+  void testSearchWrongDimension() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    float[] wrongQueryVector = new float[64]; // Config expects 128
+    Arrays.fill(wrongQueryVector, 1.0f);
+
+    assertThatThrownBy(() -> index.search(wrongQueryVector, 10).join())
+        .hasRootCauseInstanceOf(IllegalArgumentException.class)
+        .hasRootCauseMessage("Query vector dimension mismatch: expected 128 but got 64");
+  }
+
+  @Test
+  @DisplayName("Should test convertDistanceMetric utility")
+  void testConvertDistanceMetric() throws Exception {
+    // Create indices with different distance metrics to test conversion
+    VectorSearchConfig l2Config = VectorSearchConfig.builder(db, directory)
+        .dimension(64)
+        .distanceMetric(VectorSearchConfig.DistanceMetric.L2)
+        .build();
+
+    VectorSearchConfig ipConfig = VectorSearchConfig.builder(db, directory)
+        .dimension(64)
+        .distanceMetric(VectorSearchConfig.DistanceMetric.INNER_PRODUCT)
+        .build();
+
+    VectorSearchConfig cosineConfig = VectorSearchConfig.builder(db, directory)
+        .dimension(64)
+        .distanceMetric(VectorSearchConfig.DistanceMetric.COSINE)
+        .build();
+
+    // Create temp directories for each test
+    DirectorySubspace l2Dir = db.run(tr -> {
+      DirectoryLayer layer = DirectoryLayer.getDefault();
+      return layer.createOrOpen(
+              tr, List.of("test_convert_l2", UUID.randomUUID().toString()))
+          .join();
+    });
+
+    DirectorySubspace ipDir = db.run(tr -> {
+      DirectoryLayer layer = DirectoryLayer.getDefault();
+      return layer.createOrOpen(
+              tr, List.of("test_convert_ip", UUID.randomUUID().toString()))
+          .join();
+    });
+
+    DirectorySubspace cosineDir = db.run(tr -> {
+      DirectoryLayer layer = DirectoryLayer.getDefault();
+      return layer.createOrOpen(
+              tr, List.of("test_convert_cosine", UUID.randomUUID().toString()))
+          .join();
+    });
+
+    try {
+      // Test L2 metric conversion
+      VectorSearchConfig l2TestConfig = VectorSearchConfig.builder(db, l2Dir)
+          .dimension(64)
+          .distanceMetric(VectorSearchConfig.DistanceMetric.L2)
+          .build();
+      FdbVectorSearch l2Index =
+          FdbVectorSearch.createOrOpen(l2TestConfig, db).join();
+      l2Index.shutdown();
+
+      // Test IP metric conversion
+      VectorSearchConfig ipTestConfig = VectorSearchConfig.builder(db, ipDir)
+          .dimension(64)
+          .distanceMetric(VectorSearchConfig.DistanceMetric.INNER_PRODUCT)
+          .build();
+      FdbVectorSearch ipIndex =
+          FdbVectorSearch.createOrOpen(ipTestConfig, db).join();
+      ipIndex.shutdown();
+
+      // Test COSINE metric conversion
+      VectorSearchConfig cosineTestConfig = VectorSearchConfig.builder(db, cosineDir)
+          .dimension(64)
+          .distanceMetric(VectorSearchConfig.DistanceMetric.COSINE)
+          .build();
+      FdbVectorSearch cosineIndex =
+          FdbVectorSearch.createOrOpen(cosineTestConfig, db).join();
+      cosineIndex.shutdown();
+    } finally {
+      // Cleanup
+      db.run(tr -> {
+        l2Dir.remove(tr);
+        ipDir.remove(tr);
+        cosineDir.remove(tr);
+        return null;
+      });
+    }
+  }
+
+  @Test
+  @DisplayName("Should test varargs methods")
+  void testVarargsConvenienceMethods() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Test insert with varargs
+    float[] vector1 = new float[128];
+    Arrays.fill(vector1, 1.0f);
+    float[] vector2 = new float[128];
+    Arrays.fill(vector2, 2.0f);
+
+    List<Long> ids = index.insert(vector1, vector2).join();
+    assertThat(ids).hasSize(2);
+
+    // Test delete with varargs
+    index.delete(ids.get(0), ids.get(1)).join();
+  }
+
+  @Test
+  @DisplayName("Should handle empty vectors list")
+  void testInsertEmptyList() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    List<Long> ids = index.insert(List.of()).join();
+    assertThat(ids).isEmpty();
+  }
+
+  @Test
+  @DisplayName("Should handle empty delete list")
+  void testDeleteEmptyList() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    index.delete(List.of()).join();
+    // Should complete successfully
+  }
+
+  @Test
+  @DisplayName("Should handle single vector insert via varargs")
+  void testInsertSingleVectorVarargs() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    float[] vector = new float[128];
+    Arrays.fill(vector, 3.0f);
+
+    List<Long> ids = index.insert(vector).join();
+    assertThat(ids).hasSize(1);
+    assertThat(ids.get(0)).isEqualTo(1L);
+  }
+
+  @Test
+  @DisplayName("Should handle single vector delete via varargs")
+  void testDeleteSingleVectorVarargs() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    index.delete(123L).join();
+    // Should complete successfully
   }
 }

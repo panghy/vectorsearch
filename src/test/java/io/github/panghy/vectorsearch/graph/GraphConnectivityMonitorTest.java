@@ -51,12 +51,12 @@ class GraphConnectivityMonitorTest {
       return null;
     });
 
-    keys = new VectorIndexKeys(testSpace, testCollectionName);
+    keys = new VectorIndexKeys(testSpace);
     Clock clock = Clock.systemUTC();
     metaStorage = new GraphMetaStorage(keys, clock);
     adjacencyStorage = new NodeAdjacencyStorage(db, keys, 32, clock, 10000, Duration.ofMinutes(5));
     pqBlockStorage = new PqBlockStorage(db, keys, 1000, 16, clock, 10000, Duration.ofMinutes(5));
-    entryPointStorage = new EntryPointStorage(testSpace, testCollectionName, clock);
+    entryPointStorage = new EntryPointStorage(testSpace, clock);
 
     // Create monitor without PQ for simplicity in tests
     monitor = new GraphConnectivityMonitor(
