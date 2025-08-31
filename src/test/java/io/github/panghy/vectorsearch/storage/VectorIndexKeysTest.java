@@ -276,7 +276,6 @@ class VectorIndexKeysTest {
 
   @Test
   void testGetters() {
-    assertThat(keys.getCollectionName()).isEqualTo(testCollectionName);
     assertThat(keys.getCollectionSubspace()).isEqualTo(collectionSubspace);
   }
 

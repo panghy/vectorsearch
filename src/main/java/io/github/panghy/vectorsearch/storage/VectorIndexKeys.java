@@ -2,6 +2,7 @@ package io.github.panghy.vectorsearch.storage;
 
 import com.apple.foundationdb.directory.DirectorySubspace;
 import com.apple.foundationdb.tuple.Tuple;
+import lombok.Getter;
 
 /**
  * Key builders for vector index storage in FoundationDB.
@@ -35,7 +36,13 @@ public class VectorIndexKeys {
   // Sketch storage keys
   private static final String SKETCH = "sketch";
 
+  /**
+   * -- GETTER --
+   *  Gets the collection subspace.
+   */
+  @Getter
   private final DirectorySubspace collectionSubspace;
+
   private final String collectionName;
 
   /**
@@ -94,7 +101,7 @@ public class VectorIndexKeys {
    * @param version codebook version
    * @param subspaceIndex PQ subspace index [0, m-1]
    */
-  public byte[] codebookKey(int version, int subspaceIndex) {
+  public byte[] codebookKey(long version, int subspaceIndex) {
     return collectionSubspace.pack(Tuple.from(PQ, CODEBOOK, version, subspaceIndex));
   }
 
@@ -104,7 +111,7 @@ public class VectorIndexKeys {
    *
    * @param version codebook version
    */
-  public byte[] codebookPrefixForVersion(int version) {
+  public byte[] codebookPrefixForVersion(long version) {
     return collectionSubspace.pack(Tuple.from(PQ, CODEBOOK, version));
   }
 
@@ -263,9 +270,30 @@ public class VectorIndexKeys {
   }
 
   /**
-   * Gets the collection subspace.
+   * Key for graph metadata.
+   * Path: /C/{collection}/graph/meta
    */
-  public DirectorySubspace getCollectionSubspace() {
-    return collectionSubspace;
+  public byte[] graphMetaKey() {
+    return collectionSubspace.pack(Tuple.from(GRAPH, META));
+  }
+
+  /**
+   * Extracts node ID from an adjacency key.
+   * Key format: /C/{collection}/graph/node/{nodeId}
+   *
+   * @param key the adjacency key
+   * @return the node ID, or null if extraction fails
+   */
+  public Long extractNodeIdFromAdjacencyKey(byte[] key) {
+    try {
+      Tuple tuple = collectionSubspace.unpack(key);
+      // Tuple should be (GRAPH, NODE, nodeId)
+      if (tuple.size() >= 3 && GRAPH.equals(tuple.getString(0)) && NODE.equals(tuple.getString(1))) {
+        return tuple.getLong(2);
+      }
+    } catch (Exception e) {
+      // Invalid key format
+    }
+    return null;
   }
 }
