@@ -138,6 +138,23 @@ The `.github/workflows/publish.yml` workflow automatically:
 - Caffeine cache handles its own thread safety
 - FoundationDB transactions provide isolation between concurrent operations
 
+### Storage Components
+- **CodebookStorage** - Manages PQ codebooks with versioning and rotation support
+- **PqBlockStorage** - Stores quantized vectors in blocks for efficient batch operations
+- **NodeAdjacencyStorage** - Manages graph adjacency lists with robust pruning
+- **GraphMetaStorage** - Tracks connectivity metadata and repair state
+- **EntryPointStorage** - Manages search entry points with multiple strategies
+- All storage classes follow async patterns with `CompletableFuture<T>` returns
+
+### FoundationDB Constraints
+- **5-second transaction limit** - All operations must complete within 5 seconds
+- **10MB transaction size limit** - Cannot read/write more than 10MB in a single transaction
+- **Key strategies for large-scale operations:**
+  - Use sampling instead of full scans
+  - Batch operations into multiple transactions
+  - Implement cursor-based pagination for large result sets
+  - Use range-splitting for distributed sampling
+
 ### Graph Algorithms
 - **Robust Pruning (DiskANN-style)**
   - Maintains diversity in neighbor lists through dominance testing
@@ -155,8 +172,35 @@ The `.github/workflows/publish.yml` workflow automatically:
     ```
   - Integrated into NodeAdjacencyStorage for automatic neighbor management
 
+- **Graph Connectivity Monitoring**
+  - Sampling-based connectivity analysis to work within FDB's 5-second transaction limit
+  - Uses intelligent range-splitting algorithm for unbiased random sampling
+  - Key constraints:
+    - Cannot load all nodes (would exceed transaction limits)
+    - Sample size: 10,000 nodes maximum
+    - BFS limited to 1,000 visits per starting node
+  - Implementation pattern:
+    ```java
+    // Analyze and repair graph connectivity
+    GraphConnectivityMonitor monitor = new GraphConnectivityMonitor(...);
+    monitor.analyzeAndRepair(codebookVersion)
+        .thenAccept(v -> System.out.println("Repair complete"));
+    ```
+  - Automatic repair reconnects orphaned nodes using PQ-based distance calculations
+
 ## Testing Patterns
 - Use `db.runAsync()` for all database operations in tests
 - Chain futures properly to ensure operations complete in order
 - Always verify test coverage meets requirements before committing
 - Integration tests should use unique test collections to avoid conflicts
+- **Use real FDB instances** instead of mocks for storage layer tests
+- Test with various graph sizes to ensure algorithms handle edge cases
+
+## Debugging Tips
+- When tests fail, use `./gradlew test -i` to see detailed output
+- For flaky tests, check for proper future composition and transaction boundaries
+- Common pitfalls:
+  - Forgetting to handle empty results from sampling operations
+  - Not checking for division by zero in statistical calculations
+  - Missing synchronization in batch operations with shared state
+- Use `LOGGER.fine()` for debug output that won't clutter production logs
