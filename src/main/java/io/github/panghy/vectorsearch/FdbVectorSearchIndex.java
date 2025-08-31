@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch;
 
+import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
 import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
@@ -8,7 +9,6 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.TransactionContext;
 import com.apple.foundationdb.directory.Directory;
 import com.apple.foundationdb.directory.DirectorySubspace;
-import com.apple.foundationdb.tuple.ByteArrayUtil;
 import com.apple.foundationdb.tuple.Tuple;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -561,7 +561,7 @@ public class FdbVectorSearchIndex {
             byte[] cbvKey = metaSubspace.pack(Tuple.from("cbv_active"));
             return tr.get(cbvKey).thenAccept(cbvBytes -> {
               if (cbvBytes != null) {
-                int cbv = (int) ByteArrayUtil.decodeInt(cbvBytes);
+                int cbv = (int) decodeInt(cbvBytes);
                 this.activeCodebookVersion.set(cbv);
               }
 
@@ -598,29 +598,30 @@ public class FdbVectorSearchIndex {
   }
 
   // Maintenance task implementations
-  private void refreshEntryPoints() {
+  CompletableFuture<Void> refreshEntryPoints() {
     if (connectivityMonitor == null) {
       LOGGER.warning("Cannot refresh entry points: storage not initialized");
-      return;
+      return completedFuture(null);
     }
 
     LOGGER.info("Starting entry point refresh");
 
-    database.runAsync(tx -> connectivityMonitor.refreshEntryPoints(tx).thenAccept(v -> {
-          LOGGER.info("Entry points refreshed successfully");
-          // Clear cached entry points to force reload
-          cachedEntryPoints.set(null);
-        }))
+    return database.runAsync(
+            tx -> connectivityMonitor.refreshEntryPoints(tx).thenAccept(v -> {
+              LOGGER.info("Entry points refreshed successfully");
+              // Clear cached entry points to force reload
+              cachedEntryPoints.set(null);
+            }))
         .exceptionally(e -> {
           LOGGER.severe("Failed to refresh entry points: " + e.getMessage());
           return null;
         });
   }
 
-  private void checkAndRepairConnectivity() {
+  CompletableFuture<Void> checkAndRepairConnectivity() {
     if (connectivityMonitor == null || graphMetaStorage == null) {
       LOGGER.warning("Cannot check connectivity: storage not initialized");
-      return;
+      return completedFuture(null);
     }
 
     LOGGER.info("Starting graph connectivity check and repair");
@@ -629,7 +630,7 @@ public class FdbVectorSearchIndex {
     int codebookVersion = activeCodebookVersion.get();
 
     // Check if analysis is needed (default: every 6 hours)
-    database.runAsync(tx -> {
+    return database.runAsync(tx -> {
           long maxAgeSeconds = config.getGraphRepairInterval().getSeconds();
           return graphMetaStorage.isAnalysisNeeded(tx, maxAgeSeconds);
         })
@@ -704,13 +705,18 @@ public class FdbVectorSearchIndex {
     shutdown(false, 0, TimeUnit.SECONDS);
   }
 
-  // Helper classes for cache keys
-  private record CodebookCacheKey(int version, int subspace) {}
+  // Package-private for testing
+  Cache<PqBlockCacheKey, PqCodesBlock> getPqBlockCache() {
+    return pqBlockCache;
+  }
 
-  private record PqBlockCacheKey(int version, long blockNumber) {}
+  // Helper classes for cache keys
+  record CodebookCacheKey(int version, int subspace) {}
+
+  record PqBlockCacheKey(int version, long blockNumber) {}
 
   // Serializers for task queues
-  private static class LongSerializer implements TaskQueueConfig.TaskSerializer<Long> {
+  static class LongSerializer implements TaskQueueConfig.TaskSerializer<Long> {
     @Override
     public ByteString serialize(Long value) {
       return ByteString.copyFrom(encodeInt(value));
@@ -718,12 +724,12 @@ public class FdbVectorSearchIndex {
 
     @Override
     public Long deserialize(ByteString bytes) {
-      return ByteArrayUtil.decodeInt(bytes.toByteArray());
+      return decodeInt(bytes.toByteArray());
     }
   }
 
   // Generic protobuf message serializer for task queues
-  private record ProtoSerializer<T extends Message>(Parser<T> parser) implements TaskQueueConfig.TaskSerializer<T> {
+  record ProtoSerializer<T extends Message>(Parser<T> parser) implements TaskQueueConfig.TaskSerializer<T> {
 
     @Override
     public ByteString serialize(T value) {
