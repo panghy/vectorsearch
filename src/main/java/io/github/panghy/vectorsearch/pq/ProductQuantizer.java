@@ -254,6 +254,29 @@ public class ProductQuantizer {
   }
 
   /**
+   * Builds a lookup table from PQ codes for neighbor search.
+   * This approximates the lookup table by using the reconstructed vector.
+   *
+   * @param pqCode the PQ codes of a vector
+   * @return lookup table [subvector_index][centroid_index] -> distance
+   */
+  public float[][] buildLookupTableFromPqCode(byte[] pqCode) {
+    if (codebooks == null) {
+      throw new IllegalStateException("Product quantizer has not been trained");
+    }
+    if (pqCode.length != numSubvectors) {
+      throw new IllegalArgumentException(
+          "Code length mismatch: expected " + numSubvectors + ", got " + pqCode.length);
+    }
+
+    // Reconstruct the vector from PQ codes
+    float[] reconstructed = decode(pqCode);
+
+    // Build lookup table using the reconstructed vector
+    return buildLookupTable(reconstructed);
+  }
+
+  /**
    * Loads codebooks from serialized format.
    *
    * @param serializedCodebooks codebooks in the format [subvector][centroid][dimension]

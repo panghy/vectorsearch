@@ -110,6 +110,17 @@ public class EntryPointStorage {
   }
 
   /**
+   * Gets entry points from the entry list.
+   * Alias for getAllEntryPoints with no limit.
+   *
+   * @param tx the transaction to use
+   * @return future containing list of entry node IDs
+   */
+  public CompletableFuture<List<Long>> getEntryPoints(Transaction tx) {
+    return getAllEntryPoints(tx, 0);
+  }
+
+  /**
    * Gets all entry points from the entry list, combining all strategies.
    * Returns entries in priority order: primary, random, then high-degree.
    *
