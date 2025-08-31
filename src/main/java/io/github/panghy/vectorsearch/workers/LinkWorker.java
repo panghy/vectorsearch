@@ -572,10 +572,6 @@ public class LinkWorker implements Runnable {
       CompletableFuture<TaskClaim<Long, LinkTask>> claimFuture = taskQueue.awaitAndClaimTask(database);
       TaskClaim<Long, LinkTask> claim = claimFuture.get(CLAIM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 
-      if (claim == null) {
-        return completedFuture(false);
-      }
-
       TASKS_CLAIMED.add(1);
       List<TaskClaim<Long, LinkTask>> claims = List.of(claim);
 
@@ -612,20 +608,31 @@ public class LinkWorker implements Runnable {
   }
 
   /**
-   * Helper method for recursive task processing.
+   * Helper method for iterative task processing to avoid stack overflow.
    */
   private CompletableFuture<Integer> processTasksRecursively(int processedCount, int maxTasks) {
-    if (maxTasks > 0 && processedCount >= maxTasks) {
-      return completedFuture(processedCount);
-    }
+    CompletableFuture<Integer> result = new CompletableFuture<>();
 
-    return processOneTask().thenCompose(processed -> {
-      if (!processed) {
-        // No more tasks available
-        return completedFuture(processedCount);
+    class TaskLoop {
+      void next(int count) {
+        if (maxTasks > 0 && count >= maxTasks) {
+          result.complete(count);
+          return;
+        }
+        processOneTask().thenAccept(processed -> {
+          if (!processed) {
+            // No more tasks available
+            result.complete(count);
+          } else {
+            next(count + 1);
+          }
+        }).exceptionally(ex -> {
+          result.completeExceptionally(ex);
+          return null;
+        });
       }
-      // Process next task
-      return processTasksRecursively(processedCount + 1, maxTasks);
-    });
+    }
+    new TaskLoop().next(processedCount);
+    return result;
   }
 }

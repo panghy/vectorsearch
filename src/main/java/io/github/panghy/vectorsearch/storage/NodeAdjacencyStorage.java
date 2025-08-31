@@ -474,6 +474,8 @@ public class NodeAdjacencyStorage {
       return new ArrayList<>(candidateIds);
     }
     // Without distance information, just keep first maxDegree
+    // Note: alpha parameter is kept for API consistency with full robust pruning
+    // which would use it for diversity control if distance information was available
     return candidateIds.subList(0, maxDegree);
   }
 
