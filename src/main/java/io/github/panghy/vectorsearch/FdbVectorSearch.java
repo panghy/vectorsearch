@@ -4,8 +4,10 @@ import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
 import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.CompletableFuture.failedFuture;
 
 import com.apple.foundationdb.Database;
+import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.TransactionContext;
 import com.apple.foundationdb.directory.Directory;
 import com.apple.foundationdb.directory.DirectorySubspace;
@@ -20,6 +22,7 @@ import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.TaskQueues;
 import io.github.panghy.vectorsearch.graph.GraphConnectivityMonitor;
+import io.github.panghy.vectorsearch.pq.DistanceMetrics;
 import io.github.panghy.vectorsearch.pq.ProductQuantizer;
 import io.github.panghy.vectorsearch.proto.CodebookSub;
 import io.github.panghy.vectorsearch.proto.Config;
@@ -27,12 +30,14 @@ import io.github.panghy.vectorsearch.proto.LinkTask;
 import io.github.panghy.vectorsearch.proto.NodeAdjacency;
 import io.github.panghy.vectorsearch.proto.PqCodesBlock;
 import io.github.panghy.vectorsearch.proto.UnlinkTask;
+import io.github.panghy.vectorsearch.search.SearchResult;
 import io.github.panghy.vectorsearch.storage.CodebookStorage;
 import io.github.panghy.vectorsearch.storage.EntryPointStorage;
 import io.github.panghy.vectorsearch.storage.GraphMetaStorage;
 import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
+import io.github.panghy.vectorsearch.storage.VectorSketchStorage;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.LongHistogram;
@@ -40,6 +45,8 @@ import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Tracer;
 import java.time.Duration;
 import java.time.InstantSource;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -48,6 +55,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
@@ -88,7 +96,7 @@ import java.util.logging.Logger;
  * List<SearchResult> results = index.search(queryVector, topK).join();
  * }</pre>
  */
-public class FdbVectorSearch {
+public class FdbVectorSearch implements VectorSearch {
 
   private static final Logger LOGGER = Logger.getLogger(FdbVectorSearch.class.getName());
 
@@ -196,9 +204,10 @@ public class FdbVectorSearch {
   private final Cache<Long, NodeAdjacency> adjacencyCache;
 
   /**
-   * Currently active codebook version
+   * Currently active codebook version - cached for read-only operations
+   * For transactional consistency, always read from database within transactions
    */
-  private final AtomicInteger activeCodebookVersion;
+  private final AtomicInteger cachedCodebookVersion;
 
   /**
    * Cached entry points for search initialization
@@ -255,6 +264,11 @@ public class FdbVectorSearch {
   private GraphMetaStorage graphMetaStorage;
 
   /**
+   * Storage for vector sketches
+   */
+  private VectorSketchStorage vectorSketchStorage;
+
+  /**
    * Graph connectivity monitor
    */
   private GraphConnectivityMonitor connectivityMonitor;
@@ -280,6 +294,11 @@ public class FdbVectorSearch {
    * Stored configuration from FDB (for validation)
    */
   private volatile Config storedConfig;
+
+  /**
+   * Counter for generating unique node IDs
+   */
+  private final AtomicLong nodeIdCounter = new AtomicLong();
 
   /**
    * Private constructor. Use {@link #createOrOpen(VectorSearchConfig, TransactionContext)} to create an instance.
@@ -343,7 +362,7 @@ public class FdbVectorSearch {
         .build();
 
     // Initialize state
-    this.activeCodebookVersion = new AtomicInteger(0);
+    this.cachedCodebookVersion = new AtomicInteger(0);
     this.cachedEntryPoints = new AtomicReference<>(List.of());
     this.initialized = false;
     this.storedConfig = null;
@@ -371,16 +390,12 @@ public class FdbVectorSearch {
    * Must be called before using any storage operations.
    */
   private void initializeStorageComponents() {
-    // Get collection name from directory path (use last component)
-    List<String> path = rootDirectory.getPath();
-    String collectionName = path.isEmpty() ? "default" : path.get(path.size() - 1);
-
     // Use metaSubspace as the collection subspace since all our subspaces are under the same root
     // The VectorIndexKeys will handle the proper key paths
     DirectorySubspace collectionSubspace = metaSubspace;
 
     // Initialize storage components
-    this.vectorIndexKeys = new VectorIndexKeys(collectionSubspace, collectionName);
+    this.vectorIndexKeys = new VectorIndexKeys(collectionSubspace);
     this.codebookStorage = new CodebookStorage(database, vectorIndexKeys);
 
     // Get PQ configuration from stored config or use defaults
@@ -404,8 +419,9 @@ public class FdbVectorSearch {
         instantSource,
         config.getAdjacencyCacheSize(),
         Duration.ofMinutes(5));
-    this.entryPointStorage = new EntryPointStorage(collectionSubspace, collectionName, instantSource);
+    this.entryPointStorage = new EntryPointStorage(collectionSubspace, instantSource);
     this.graphMetaStorage = new GraphMetaStorage(vectorIndexKeys, instantSource);
+    this.vectorSketchStorage = new VectorSketchStorage(vectorIndexKeys);
 
     // TODO: Initialize product quantizer from codebook storage
     // For now, create a placeholder that will be loaded when needed
@@ -544,7 +560,7 @@ public class FdbVectorSearch {
           tr.set(cbvKey, encodeInt(0));
 
           this.storedConfig = protoConfig;
-          this.activeCodebookVersion.set(0);
+          this.cachedCodebookVersion.set(0);
           this.initialized = true;
 
           LOGGER.info("Created new vector search index with dimension=" + config.getDimension());
@@ -562,7 +578,7 @@ public class FdbVectorSearch {
             return tr.get(cbvKey).thenAccept(cbvBytes -> {
               if (cbvBytes != null) {
                 int cbv = (int) decodeInt(cbvBytes);
-                this.activeCodebookVersion.set(cbv);
+                this.cachedCodebookVersion.set(cbv);
               }
 
               this.initialized = true;
@@ -598,7 +614,8 @@ public class FdbVectorSearch {
   }
 
   // Maintenance task implementations
-  CompletableFuture<Void> refreshEntryPoints() {
+  @Override
+  public CompletableFuture<Void> refreshEntryPoints() {
     if (connectivityMonitor == null) {
       LOGGER.warning("Cannot refresh entry points: storage not initialized");
       return completedFuture(null);
@@ -627,7 +644,8 @@ public class FdbVectorSearch {
     LOGGER.info("Starting graph connectivity check and repair");
 
     // Get active codebook version for distance calculations
-    int codebookVersion = activeCodebookVersion.get();
+    // Using cached version for read-only operation (non-transactional)
+    int codebookVersion = cachedCodebookVersion.get();
 
     // Check if analysis is needed (default: every 6 hours)
     return database.runAsync(tx -> {
@@ -708,6 +726,224 @@ public class FdbVectorSearch {
   // Package-private for testing
   Cache<PqBlockCacheKey, PqCodesBlock> getPqBlockCache() {
     return pqBlockCache;
+  }
+
+  // ============= VectorSearch Interface Implementation =============
+
+  @Override
+  public CompletableFuture<List<Long>> insert(List<float[]> vectors) {
+    if (!initialized) {
+      return failedFuture(new IllegalStateException("Index not initialized"));
+    }
+
+    // Validate dimensions
+    for (float[] vector : vectors) {
+      if (vector.length != config.getDimension()) {
+        return failedFuture(new IllegalArgumentException(
+            "Vector dimension mismatch: expected " + config.getDimension() + " but got " + vector.length));
+      }
+    }
+
+    // Allocate IDs and insert vectors transactionally
+    return database.runAsync(tr -> {
+      // Get and update ID counter
+      byte[] counterKey = metaSubspace.pack(Tuple.from("node_id_counter"));
+
+      return tr.get(counterKey).thenCompose(counterBytes -> {
+        long startId = counterBytes == null ? 1L : (long) decodeInt(counterBytes) + 1;
+        long endId = startId + vectors.size() - 1;
+
+        // Update counter for next batch
+        tr.set(counterKey, encodeInt((int) endId));
+
+        // Create ID to vector mapping
+        Map<Long, float[]> idToVector = new LinkedHashMap<>();
+        List<Long> assignedIds = new ArrayList<>();
+        long currentId = startId;
+
+        for (float[] vector : vectors) {
+          idToVector.put(currentId, vector);
+          assignedIds.add(currentId);
+          currentId++;
+        }
+
+        // Enqueue upsert tasks
+        return upsertInternal(tr, idToVector).thenApply(v -> assignedIds);
+      });
+    });
+  }
+
+  @Override
+  public CompletableFuture<Void> upsert(Map<Long, float[]> vectors) {
+    if (!initialized) {
+      return failedFuture(new IllegalStateException("Index not initialized"));
+    }
+
+    // Validate dimensions
+    for (Map.Entry<Long, float[]> entry : vectors.entrySet()) {
+      if (entry.getValue().length != config.getDimension()) {
+        return failedFuture(new IllegalArgumentException("Vector dimension mismatch for ID " + entry.getKey()
+            + ": expected " + config.getDimension()
+            + " but got " + entry.getValue().length));
+      }
+    }
+
+    return database.runAsync(tr -> upsertInternal(tr, vectors));
+  }
+
+  /**
+   * Internal upsert implementation that runs within a transaction.
+   */
+  private CompletableFuture<Void> upsertInternal(Transaction tr, Map<Long, float[]> vectors) {
+    // Read active codebook version from database for transactional consistency
+    return readActiveCodebookVersion(tr).thenCompose(cbv -> {
+      // Load codebooks if available
+      CompletableFuture<ProductQuantizer> pqFuture;
+      if (productQuantizer != null) {
+        pqFuture = completedFuture(productQuantizer);
+      } else if (codebookStorage != null && cbv > 0) {
+        // Try to load codebooks
+        pqFuture = codebookStorage.loadCodebooks(cbv).thenApply(codebooks -> {
+          if (codebooks == null || codebooks.length == 0) {
+            return null;
+          }
+          // Create PQ from loaded codebooks
+          ProductQuantizer pq = new ProductQuantizer(
+              config.getDimension(), codebooks.length, convertDistanceMetric(config.getDistanceMetric()));
+          pq.setCodebooks(codebooks);
+          productQuantizer = pq; // Cache for future use
+          return pq;
+        });
+      } else {
+        pqFuture = completedFuture(null);
+      }
+
+      return pqFuture.thenCompose(pq -> {
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+        for (Map.Entry<Long, float[]> entry : vectors.entrySet()) {
+          long nodeId = entry.getKey();
+          float[] vector = entry.getValue();
+
+          // Ensure node adjacency exists
+          CompletableFuture<Void> adjFuture = nodeAdjacencyStorage.storeAdjacency(tr, nodeId, List.of());
+
+          // Create link task
+          LinkTask.Builder taskBuilder =
+              LinkTask.newBuilder().setNodeId(nodeId).setCodebookVersion(cbv);
+
+          // Encode vector if PQ is available
+          if (pq != null) {
+            byte[] pqCode = pq.encode(vector);
+            taskBuilder.setPqCode(ByteString.copyFrom(pqCode));
+          }
+
+          // Store vector sketch for future codebook retraining
+          CompletableFuture<Void> sketchFuture = vectorSketchStorage.storeVectorSketch(tr, nodeId, vector);
+
+          // Enqueue link task
+          CompletableFuture<Void> enqueueFuture = linkTaskQueue
+              .enqueue(tr, nodeId, taskBuilder.build())
+              .thenApply(metadata -> null);
+
+          // Combine all operations for this vector
+          futures.add(CompletableFuture.allOf(adjFuture, sketchFuture, enqueueFuture));
+        }
+
+        // Update metrics
+        VECTORS_INSERTED.add(vectors.size());
+
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+      });
+    });
+  }
+
+  /**
+   * Reads the active codebook version from the database.
+   * @param tr the transaction to use
+   * @return the active codebook version, or 0 if not set
+   */
+  private CompletableFuture<Integer> readActiveCodebookVersion(Transaction tr) {
+    // Construct the active codebook version key using metaSubspace
+    byte[] key = metaSubspace.pack(Tuple.from("cbv", "active"));
+    return tr.get(key).thenApply(value -> {
+      if (value == null) {
+        return 0;
+      }
+      return (int) decodeInt(value);
+    });
+  }
+
+  /**
+   * Converts VectorSearchConfig.DistanceMetric to DistanceMetrics.Metric.
+   */
+  private DistanceMetrics.Metric convertDistanceMetric(VectorSearchConfig.DistanceMetric metric) {
+    return switch (metric) {
+      case L2 -> DistanceMetrics.Metric.L2;
+      case INNER_PRODUCT -> DistanceMetrics.Metric.INNER_PRODUCT;
+      case COSINE -> DistanceMetrics.Metric.COSINE;
+    };
+  }
+
+  @Override
+  public CompletableFuture<List<SearchResult>> search(float[] queryVector, int k) {
+    // Use default search list (max(16, k))
+    int searchList = Math.max(16, k);
+    return search(queryVector, k, searchList, 1500);
+  }
+
+  @Override
+  public CompletableFuture<List<SearchResult>> search(float[] queryVector, int k, int searchList, int maxVisits) {
+
+    if (!initialized) {
+      return failedFuture(new IllegalStateException("Index not initialized"));
+    }
+
+    if (queryVector.length != config.getDimension()) {
+      return failedFuture(new IllegalArgumentException("Query vector dimension mismatch: expected "
+          + config.getDimension() + " but got " + queryVector.length));
+    }
+
+    // TODO: Implement beam search
+    // For now, return empty results
+    SEARCHES_PERFORMED.add(1);
+    return completedFuture(List.of());
+  }
+
+  @Override
+  public CompletableFuture<Void> delete(List<Long> ids) {
+    if (!initialized) {
+      return failedFuture(new IllegalStateException("Index not initialized"));
+    }
+
+    return database.runAsync(tr -> {
+      List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+      for (Long nodeId : ids) {
+        // Create unlink task
+        UnlinkTask task = UnlinkTask.newBuilder().setNodeId(nodeId).build();
+
+        // Enqueue unlink task
+        futures.add(unlinkTaskQueue.enqueue(tr, nodeId, task).thenApply(metadata -> null));
+      }
+
+      // Update metrics
+      VECTORS_DELETED.add(ids.size());
+
+      return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+    });
+  }
+
+  @Override
+  public CompletableFuture<IndexStats> getStats() {
+    // TODO: Gather actual statistics
+    return completedFuture(new IndexStats(0, 0, 0.0, 0, 0.0));
+  }
+
+  @Override
+  public CompletableFuture<Boolean> isHealthy() {
+    // Check basic health indicators
+    return completedFuture(initialized && database != null);
   }
 
   // Helper classes for cache keys

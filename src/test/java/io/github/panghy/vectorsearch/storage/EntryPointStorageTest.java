@@ -39,9 +39,9 @@ class EntryPointStorageTest {
       return null;
     });
 
-    keys = new VectorIndexKeys(testSpace, testCollectionName);
+    keys = new VectorIndexKeys(testSpace);
     instantSource = Clock.systemUTC();
-    storage = new EntryPointStorage(testSpace, testCollectionName, instantSource);
+    storage = new EntryPointStorage(testSpace, instantSource);
   }
 
   @AfterEach

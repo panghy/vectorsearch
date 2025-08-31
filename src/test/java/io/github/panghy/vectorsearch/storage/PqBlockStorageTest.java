@@ -41,7 +41,7 @@ class PqBlockStorageTest {
       return null;
     });
 
-    keys = new VectorIndexKeys(testSpace, testCollectionName);
+    keys = new VectorIndexKeys(testSpace);
     storage = new PqBlockStorage(
         db,
         keys,

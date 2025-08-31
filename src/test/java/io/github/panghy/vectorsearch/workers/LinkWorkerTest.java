@@ -91,7 +91,7 @@ class LinkWorkerTest {
         .get(5, TimeUnit.SECONDS);
 
     // Initialize storage components
-    keys = new VectorIndexKeys(testDirectory, testId);
+    keys = new VectorIndexKeys(testDirectory);
 
     pqBlockStorage = new PqBlockStorage(
         db, keys, CODES_PER_BLOCK, PQ_SUBVECTORS, InstantSource.system(), 100, Duration.ofMinutes(5));
@@ -99,7 +99,7 @@ class LinkWorkerTest {
     nodeAdjacencyStorage =
         new NodeAdjacencyStorage(db, keys, GRAPH_DEGREE, InstantSource.system(), 100, Duration.ofMinutes(5));
 
-    entryPointStorage = new EntryPointStorage(testDirectory, testId, InstantSource.system());
+    entryPointStorage = new EntryPointStorage(testDirectory, InstantSource.system());
 
     codebookStorage = new CodebookStorage(db, keys);
 
@@ -1115,5 +1115,247 @@ class LinkWorkerTest {
     // Try to increase further - should stay at maximum
     linkWorker.adjustBatchSize(Duration.ofMillis(1000), true);
     assertThat(linkWorker.getCurrentBatchSize()).isEqualTo(maxSize);
+  }
+
+  @Test
+  @DisplayName("Test processing with no entry points")
+  void testProcessWithNoEntryPoints() throws Exception {
+    // Clear any existing entry points
+    db.runAsync(tr -> entryPointStorage.storeEntryList(tr, new ArrayList<>(), null, null))
+        .get();
+
+    // Add a task
+    float[] queryVector = generateRandomVector(DIMENSION);
+    byte[] pqCode = pq.encode(queryVector);
+    LinkTask task = LinkTask.newBuilder()
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(1)
+        .setNodeId(400L)
+        .build();
+
+    taskQueue.enqueue(400L, task).get();
+
+    // Process task - should succeed even with no entry points
+    boolean processed = linkWorker.processOneTask().get();
+    assertThat(processed).isTrue();
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(1);
+  }
+
+  @Test
+  @DisplayName("Test processing with codebook not found")
+  void testProcessWithCodebookNotFound() throws Exception {
+    // Add a task with invalid codebook version that doesn't exist
+    float[] queryVector = generateRandomVector(DIMENSION);
+    byte[] pqCode = pq.encode(queryVector);
+    LinkTask task = LinkTask.newBuilder()
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(999) // Codebook version that doesn't exist
+        .setNodeId(500L)
+        .build();
+
+    taskQueue.enqueue(500L, task).get();
+
+    // Process task - should fail gracefully
+    boolean processed = linkWorker.processOneTask().get();
+    assertThat(processed).isFalse();
+    assertThat(linkWorker.getTotalFailed()).isEqualTo(1);
+  }
+
+  @Test
+  @DisplayName("Test processAllAvailableTasks with max limit")
+  void testProcessAllAvailableTasksWithMaxLimit() throws Exception {
+    // Add 20 tasks
+    for (int i = 0; i < 20; i++) {
+      float[] queryVector = generateRandomVector(DIMENSION);
+      byte[] pqCode = pq.encode(queryVector);
+      LinkTask task = LinkTask.newBuilder()
+          .setPqCode(ByteString.copyFrom(pqCode))
+          .setCodebookVersion(1)
+          .setNodeId(600L + i)
+          .build();
+
+      taskQueue.enqueue(600L + i, task).get();
+    }
+
+    // Process with a max limit of 5
+    int processed = linkWorker.processAllAvailableTasks(5).get();
+
+    // Should process exactly 5 tasks
+    assertThat(processed).isEqualTo(5);
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(5);
+  }
+
+  @Test
+  @DisplayName("Test processAllAvailableTasks with no tasks")
+  void testProcessAllAvailableTasksEmpty() throws Exception {
+    // Process when no tasks available
+    int processed = linkWorker.processAllAvailableTasks(10).get();
+
+    // Should process 0 tasks
+    assertThat(processed).isEqualTo(0);
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(0);
+  }
+
+  @Test
+  @DisplayName("Test back-link pruning when neighbors exceed graphDegree")
+  void testBackLinkPruningWhenNeighborsExceedGraphDegree() throws Exception {
+    // Given - a node that already has many neighbors (more than graphDegree)
+    long targetNode = 8000L;
+    long newNode = 8001L;
+
+    // Create target node with many existing neighbors
+    List<Long> existingNeighbors = new ArrayList<>();
+    for (int i = 0; i < GRAPH_DEGREE + 10; i++) {
+      long neighborId = 8100L + i;
+      existingNeighbors.add(neighborId);
+
+      // Store PQ codes for all neighbors
+      byte[] pqCode = pq.encode(generateRandomVector(DIMENSION));
+      db.runAsync(tr -> pqBlockStorage.storePqCode(tr, neighborId, pqCode, 1))
+          .get();
+    }
+
+    // Store PQ code for target node
+    db.runAsync(tr -> pqBlockStorage.storePqCode(tr, targetNode, pq.encode(generateRandomVector(DIMENSION)), 1))
+        .get();
+
+    // Create adjacency for target node with many neighbors
+    db.runAsync(tr -> {
+          NodeAdjacency adj = NodeAdjacency.newBuilder()
+              .setNodeId(targetNode)
+              .addAllNeighbors(existingNeighbors)
+              .setState(NodeAdjacency.State.ACTIVE)
+              .build();
+          return nodeAdjacencyStorage.storeNodeAdjacency(tr, targetNode, adj);
+        })
+        .get();
+
+    // Store PQ code for new node
+    byte[] newNodePqCode = pq.encode(generateRandomVector(DIMENSION));
+    db.runAsync(tr -> pqBlockStorage.storePqCode(tr, newNode, newNodePqCode, 1))
+        .get();
+
+    // Create adjacency for new node pointing to target
+    db.runAsync(tr -> {
+          NodeAdjacency adj = NodeAdjacency.newBuilder()
+              .setNodeId(newNode)
+              .addNeighbors(targetNode)
+              .setState(NodeAdjacency.State.ACTIVE)
+              .build();
+          return nodeAdjacencyStorage.storeNodeAdjacency(tr, newNode, adj);
+        })
+        .get();
+
+    // Set entry points
+    db.runAsync(tr -> entryPointStorage.storeEntryList(tr, Arrays.asList(targetNode), null, null))
+        .get();
+
+    // Create link task for new node
+    LinkTask linkTask = LinkTask.newBuilder()
+        .setCollection("test-collection")
+        .setNodeId(newNode)
+        .setPqCode(ByteString.copyFrom(newNodePqCode))
+        .setCodebookVersion(1)
+        .build();
+
+    taskQueue.enqueue(newNode, linkTask).get();
+
+    // When - process the task
+    boolean processed = linkWorker.processOneTask().get();
+
+    // Then
+    assertThat(processed).isTrue();
+
+    // Verify target node's neighbors were pruned
+    NodeAdjacency targetAdjAfter = db.runAsync(tr -> nodeAdjacencyStorage.loadAdjacency(tr, targetNode))
+        .get();
+    assertThat(targetAdjAfter).isNotNull();
+
+    // Should have been pruned to graphDegree
+    assertThat(targetAdjAfter.getNeighborsList().size()).isLessThanOrEqualTo(GRAPH_DEGREE);
+
+    // The new node may or may not be retained after pruning based on distance
+    // Just verify pruning occurred
+  }
+
+  @Test
+  @DisplayName("Test back-link pruning with null PQ codes")
+  void testBackLinkPruningWithNullPqCodes() throws Exception {
+    // Given - a node with neighbors where some have null PQ codes
+    long targetNode = 9000L;
+    long newNode = 9001L;
+
+    // Create target node with many neighbors
+    List<Long> existingNeighbors = new ArrayList<>();
+    for (int i = 0; i < GRAPH_DEGREE + 5; i++) {
+      long neighborId = 9100L + i;
+      existingNeighbors.add(neighborId);
+
+      // Store PQ codes for only some neighbors (simulate missing codes)
+      if (i % 3 != 0) {
+        byte[] pqCode = pq.encode(generateRandomVector(DIMENSION));
+        db.runAsync(tr -> pqBlockStorage.storePqCode(tr, neighborId, pqCode, 1))
+            .get();
+      }
+      // Every 3rd neighbor has no PQ code stored
+    }
+
+    // Store PQ code for target and new node
+    db.runAsync(tr -> pqBlockStorage.storePqCode(tr, targetNode, pq.encode(generateRandomVector(DIMENSION)), 1))
+        .get();
+    byte[] newNodePqCode = pq.encode(generateRandomVector(DIMENSION));
+    db.runAsync(tr -> pqBlockStorage.storePqCode(tr, newNode, newNodePqCode, 1))
+        .get();
+
+    // Create adjacency for target node
+    db.runAsync(tr -> {
+          NodeAdjacency adj = NodeAdjacency.newBuilder()
+              .setNodeId(targetNode)
+              .addAllNeighbors(existingNeighbors)
+              .setState(NodeAdjacency.State.ACTIVE)
+              .build();
+          return nodeAdjacencyStorage.storeNodeAdjacency(tr, targetNode, adj);
+        })
+        .get();
+
+    // Create adjacency for new node
+    db.runAsync(tr -> {
+          NodeAdjacency adj = NodeAdjacency.newBuilder()
+              .setNodeId(newNode)
+              .addNeighbors(targetNode)
+              .setState(NodeAdjacency.State.ACTIVE)
+              .build();
+          return nodeAdjacencyStorage.storeNodeAdjacency(tr, newNode, adj);
+        })
+        .get();
+
+    // Set entry points
+    db.runAsync(tr -> entryPointStorage.storeEntryList(tr, Arrays.asList(targetNode), null, null))
+        .get();
+
+    // Create link task
+    LinkTask linkTask = LinkTask.newBuilder()
+        .setCollection("test-collection")
+        .setNodeId(newNode)
+        .setPqCode(ByteString.copyFrom(newNodePqCode))
+        .setCodebookVersion(1)
+        .build();
+
+    taskQueue.enqueue(newNode, linkTask).get();
+
+    // When - process the task
+    boolean processed = linkWorker.processOneTask().get();
+
+    // Then
+    assertThat(processed).isTrue();
+
+    // Verify pruning occurred despite null PQ codes
+    NodeAdjacency targetAdjAfter = db.runAsync(tr -> nodeAdjacencyStorage.loadAdjacency(tr, targetNode))
+        .get();
+    assertThat(targetAdjAfter).isNotNull();
+    assertThat(targetAdjAfter.getNeighborsList().size()).isLessThanOrEqualTo(GRAPH_DEGREE);
+
+    // Nodes with null PQ codes should have been deprioritized (treated as MAX_VALUE distance)
+    // Verify that pruning occurred
   }
 }

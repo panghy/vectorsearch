@@ -596,10 +596,7 @@ class VectorSearchConfigTest {
     DirectorySubspace queueDir =
         directory.createOrOpen(db, List.of("test_queue")).get(5, TimeUnit.SECONDS);
     TaskQueueConfig<Long, Long> customTaskQueueConfig = TaskQueueConfig.builder(
-            db,
-            queueDir,
-            new FdbVectorSearch.LongSerializer(),
-            new FdbVectorSearch.LongSerializer())
+            db, queueDir, new FdbVectorSearch.LongSerializer(), new FdbVectorSearch.LongSerializer())
         .build();
 
     VectorSearchConfig.Builder builder =

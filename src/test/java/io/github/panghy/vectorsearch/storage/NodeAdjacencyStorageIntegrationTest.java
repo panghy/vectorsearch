@@ -40,7 +40,7 @@ class NodeAdjacencyStorageIntegrationTest {
       return null;
     });
 
-    keys = new VectorIndexKeys(testSpace, testCollectionName);
+    keys = new VectorIndexKeys(testSpace);
     storage = new NodeAdjacencyStorage(db, keys, GRAPH_DEGREE, InstantSource.system(), 100, Duration.ofMinutes(5));
   }
 

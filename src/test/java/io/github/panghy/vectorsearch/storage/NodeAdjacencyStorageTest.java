@@ -47,7 +47,7 @@ class NodeAdjacencyStorageTest {
       return null;
     });
 
-    keys = new VectorIndexKeys(testSpace, testCollectionName);
+    keys = new VectorIndexKeys(testSpace);
     testInstantSource = InstantSource.system();
     storage = new NodeAdjacencyStorage(db, keys, GRAPH_DEGREE, testInstantSource, 1000, Duration.ofMinutes(10));
   }

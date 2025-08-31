@@ -38,7 +38,7 @@ class VectorIndexKeysTest {
       return null;
     });
 
-    keys = new VectorIndexKeys(collectionSubspace, testCollectionName);
+    keys = new VectorIndexKeys(collectionSubspace);
   }
 
   @AfterEach
