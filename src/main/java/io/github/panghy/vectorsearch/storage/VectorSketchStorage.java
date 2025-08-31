@@ -68,6 +68,7 @@ public class VectorSketchStorage {
         for (int j = 0; j < 256 && j < hash.length * 8; j++) {
           int byteIdx = j / 8;
           int bitIdx = j % 8;
+          // Using little-endian bit ordering within bytes (LSB = bit 0)
           boolean bit = ((hash[byteIdx] >> bitIdx) & 1) == 1;
           accumulator[j] += bit ? weight : -weight;
         }
@@ -79,6 +80,7 @@ public class VectorSketchStorage {
         if (accumulator[i] > 0) {
           int byteIdx = i / 8;
           int bitIdx = i % 8;
+          // Using same little-endian bit ordering for consistency
           sketch[byteIdx] |= (byte) (1 << bitIdx);
         }
       }
