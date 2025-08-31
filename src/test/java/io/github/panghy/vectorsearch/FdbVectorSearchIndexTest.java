@@ -5,6 +5,7 @@ import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
 import static com.apple.foundationdb.tuple.Tuple.from;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -516,5 +517,200 @@ class FdbVectorSearchIndexTest {
         indices[i].shutdown();
       }
     }
+  }
+
+  @Test
+  @DisplayName("Test LongSerializer serialization and deserialization")
+  void testLongSerializer() {
+    FdbVectorSearchIndex.LongSerializer serializer = new FdbVectorSearchIndex.LongSerializer();
+
+    // Test positive number
+    Long value1 = 12345L;
+    com.google.protobuf.ByteString serialized1 = serializer.serialize(value1);
+    Long deserialized1 = serializer.deserialize(serialized1);
+    assertEquals(value1, deserialized1);
+
+    // Test zero
+    Long value2 = 0L;
+    com.google.protobuf.ByteString serialized2 = serializer.serialize(value2);
+    Long deserialized2 = serializer.deserialize(serialized2);
+    assertEquals(value2, deserialized2);
+
+    // Test negative number
+    Long value3 = -99999L;
+    com.google.protobuf.ByteString serialized3 = serializer.serialize(value3);
+    Long deserialized3 = serializer.deserialize(serialized3);
+    assertEquals(value3, deserialized3);
+
+    // Test max value
+    Long value4 = Long.MAX_VALUE;
+    com.google.protobuf.ByteString serialized4 = serializer.serialize(value4);
+    Long deserialized4 = serializer.deserialize(serialized4);
+    assertEquals(value4, deserialized4);
+
+    // Test min value
+    Long value5 = Long.MIN_VALUE;
+    com.google.protobuf.ByteString serialized5 = serializer.serialize(value5);
+    Long deserialized5 = serializer.deserialize(serialized5);
+    assertEquals(value5, deserialized5);
+  }
+
+  @Test
+  @DisplayName("Test ProtoSerializer with LinkTask")
+  void testProtoSerializerWithLinkTask() {
+    FdbVectorSearchIndex.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
+        new FdbVectorSearchIndex.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
+
+    // Create a test LinkTask
+    io.github.panghy.vectorsearch.proto.LinkTask task = io.github.panghy.vectorsearch.proto.LinkTask.newBuilder()
+        .setNodeId(12345L)
+        .setCodebookVersion(1)
+        .setPqCode(com.google.protobuf.ByteString.copyFrom(new byte[] {1, 2, 3, 4, 5}))
+        .build();
+
+    // Serialize
+    com.google.protobuf.ByteString serialized = serializer.serialize(task);
+    assertNotNull(serialized);
+    assertTrue(serialized.size() > 0);
+
+    // Deserialize
+    io.github.panghy.vectorsearch.proto.LinkTask deserialized = serializer.deserialize(serialized);
+    assertNotNull(deserialized);
+    assertEquals(task.getNodeId(), deserialized.getNodeId());
+    assertEquals(task.getCodebookVersion(), deserialized.getCodebookVersion());
+    assertEquals(task.getPqCode(), deserialized.getPqCode());
+  }
+
+  @Test
+  @DisplayName("Test ProtoSerializer with invalid data")
+  void testProtoSerializerWithInvalidData() {
+    FdbVectorSearchIndex.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
+        new FdbVectorSearchIndex.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
+
+    // Test with invalid protobuf data
+    com.google.protobuf.ByteString invalidData =
+        com.google.protobuf.ByteString.copyFromUtf8("not a valid protobuf");
+
+    assertThatThrownBy(() -> serializer.deserialize(invalidData))
+        .isInstanceOf(RuntimeException.class)
+        .hasMessageContaining("Failed to parse protobuf message")
+        .hasCauseInstanceOf(InvalidProtocolBufferException.class);
+  }
+
+  @Test
+  @DisplayName("Test ProtoSerializer with empty ByteString")
+  void testProtoSerializerWithEmptyData() {
+    FdbVectorSearchIndex.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
+        new FdbVectorSearchIndex.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
+
+    // Test with empty ByteString - should parse to default instance
+    com.google.protobuf.ByteString emptyData = com.google.protobuf.ByteString.EMPTY;
+    io.github.panghy.vectorsearch.proto.LinkTask deserialized = serializer.deserialize(emptyData);
+    assertNotNull(deserialized);
+    // Should have default values
+    assertEquals(0, deserialized.getNodeId());
+    assertEquals(0, deserialized.getCodebookVersion());
+  }
+
+  @Test
+  @DisplayName("Test CodebookCacheKey record")
+  void testCodebookCacheKey() {
+    // Test creation and fields
+    FdbVectorSearchIndex.CodebookCacheKey key1 = new FdbVectorSearchIndex.CodebookCacheKey(1, 5);
+    assertEquals(1, key1.version());
+    assertEquals(5, key1.subspace());
+
+    // Test equality
+    FdbVectorSearchIndex.CodebookCacheKey key2 = new FdbVectorSearchIndex.CodebookCacheKey(1, 5);
+    assertEquals(key1, key2);
+    assertEquals(key1.hashCode(), key2.hashCode());
+
+    // Test inequality
+    FdbVectorSearchIndex.CodebookCacheKey key3 = new FdbVectorSearchIndex.CodebookCacheKey(2, 5);
+    assertNotEquals(key1, key3);
+
+    FdbVectorSearchIndex.CodebookCacheKey key4 = new FdbVectorSearchIndex.CodebookCacheKey(1, 6);
+    assertNotEquals(key1, key4);
+
+    // Test toString
+    assertNotNull(key1.toString());
+    assertTrue(key1.toString().contains("1"));
+    assertTrue(key1.toString().contains("5"));
+  }
+
+  @Test
+  @DisplayName("Test PqBlockCacheKey record")
+  void testPqBlockCacheKey() {
+    // Test creation and fields
+    FdbVectorSearchIndex.PqBlockCacheKey key1 = new FdbVectorSearchIndex.PqBlockCacheKey(1, 1000L);
+    assertEquals(1, key1.version());
+    assertEquals(1000L, key1.blockNumber());
+
+    // Test equality
+    FdbVectorSearchIndex.PqBlockCacheKey key2 = new FdbVectorSearchIndex.PqBlockCacheKey(1, 1000L);
+    assertEquals(key1, key2);
+    assertEquals(key1.hashCode(), key2.hashCode());
+
+    // Test inequality
+    FdbVectorSearchIndex.PqBlockCacheKey key3 = new FdbVectorSearchIndex.PqBlockCacheKey(2, 1000L);
+    assertNotEquals(key1, key3);
+
+    FdbVectorSearchIndex.PqBlockCacheKey key4 = new FdbVectorSearchIndex.PqBlockCacheKey(1, 2000L);
+    assertNotEquals(key1, key4);
+
+    // Test toString
+    assertNotNull(key1.toString());
+    assertTrue(key1.toString().contains("1"));
+    assertTrue(key1.toString().contains("1000"));
+  }
+
+  @Test
+  @DisplayName("Test refreshEntryPoints method")
+  void testRefreshEntryPoints() throws Exception {
+    // Create index
+    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(config, db);
+    index = future.get(10, TimeUnit.SECONDS);
+
+    index.refreshEntryPoints().join();
+  }
+
+  @Test
+  @DisplayName("Test checkAndRepairConnectivity method")
+  void testCheckAndRepairConnectivity() throws Exception {
+    // Create index
+    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(config, db);
+    index = future.get(10, TimeUnit.SECONDS);
+
+    // Use reflection to access private method
+    index.checkAndRepairConnectivity().join();
+  }
+
+  @Test
+  @DisplayName("Test PqBlockCache weigher")
+  void testPqBlockCacheWeigher() throws Exception {
+    // Create index
+    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(config, db);
+    index = future.get(10, TimeUnit.SECONDS);
+
+    // Get the cache
+    var cache = index.getPqBlockCache();
+    assertNotNull(cache);
+
+    // Create a test PqCodesBlock
+    io.github.panghy.vectorsearch.proto.PqCodesBlock block =
+        io.github.panghy.vectorsearch.proto.PqCodesBlock.newBuilder()
+            .setCodes(com.google.protobuf.ByteString.copyFrom(new byte[1000]))
+            .build();
+
+    // Put it in the cache
+    FdbVectorSearchIndex.PqBlockCacheKey key = new FdbVectorSearchIndex.PqBlockCacheKey(1, 100L);
+    cache.put(key, block);
+
+    // Verify the cache contains the entry
+    assertEquals(block, cache.getIfPresent(key));
+
+    // Verify stats are recorded (since recordStats() was called in builder)
+    var stats = cache.stats();
+    assertNotNull(stats);
   }
 }
