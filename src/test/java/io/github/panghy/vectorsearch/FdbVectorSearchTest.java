@@ -29,14 +29,14 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for FdbVectorSearchIndex.
+ * Unit tests for FdbVectorSearch.
  */
-class FdbVectorSearchIndexTest {
+class FdbVectorSearchTest {
 
   private Database db;
   private DirectorySubspace directory;
   private VectorSearchConfig config;
-  private FdbVectorSearchIndex index;
+  private FdbVectorSearch index;
 
   @BeforeEach
   void setUp() throws ExecutionException, InterruptedException, TimeoutException {
@@ -80,7 +80,7 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Should create new index successfully")
   void testCreateNewIndex() throws ExecutionException, InterruptedException, TimeoutException {
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(config, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(config, db);
     index = future.get(10, TimeUnit.SECONDS);
 
     assertNotNull(index);
@@ -108,14 +108,14 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should open existing index successfully")
   void testOpenExistingIndex() throws ExecutionException, InterruptedException, TimeoutException {
     // Create the index first
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     assertNotNull(index);
 
     // Close it
     index.shutdown();
 
     // Open it again with same config
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     assertNotNull(index);
   }
 
@@ -123,7 +123,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should validate configuration when opening existing index")
   void testValidateConfigurationOnOpen() throws ExecutionException, InterruptedException, TimeoutException {
     // Create the index first
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     assertNotNull(index);
 
     // Close it
@@ -136,7 +136,7 @@ class FdbVectorSearchIndexTest {
         .distanceMetric(VectorSearchConfig.DistanceMetric.COSINE)
         .build();
 
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(differentConfig, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(differentConfig, db);
 
     assertThatThrownBy(() -> future.get(10, TimeUnit.SECONDS))
         .isInstanceOf(ExecutionException.class)
@@ -150,7 +150,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should allow different mutable configuration when reopening")
   void testAllowMutableConfigChanges() throws ExecutionException, InterruptedException, TimeoutException {
     // Create the index first
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     assertNotNull(index);
 
     // Close it
@@ -167,7 +167,7 @@ class FdbVectorSearchIndexTest {
         .pqBlockCacheSize(2L * 1024 * 1024 * 1024) // Different cache size (mutable)
         .build();
 
-    index = FdbVectorSearchIndex.createOrOpen(differentConfig, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(differentConfig, db).get(10, TimeUnit.SECONDS);
     assertNotNull(index);
   }
 
@@ -176,7 +176,7 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Should create all required subspaces")
   void testSubspaceCreation() throws ExecutionException, InterruptedException, TimeoutException {
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     // Verify all subspaces were created
     db.run(tr -> {
@@ -226,7 +226,7 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Should initialize codebook version to 0")
   void testInitialCodebookVersion() throws ExecutionException, InterruptedException, TimeoutException {
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     // Check codebook version in FDB
     long version = db.run(tr -> {
@@ -244,7 +244,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should preserve codebook version when reopening")
   void testPreserveCodebookVersion() throws ExecutionException, InterruptedException, TimeoutException {
     // Create index
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     // Manually update codebook version to test preservation
     db.run(tr -> {
@@ -257,7 +257,7 @@ class FdbVectorSearchIndexTest {
 
     // Close and reopen
     index.shutdown();
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     // Verify version was preserved
     long version = db.run(tr -> {
@@ -282,7 +282,7 @@ class FdbVectorSearchIndexTest {
         .entryPointRefreshInterval(Duration.ofMinutes(1))
         .build();
 
-    index = FdbVectorSearchIndex.createOrOpen(configWithRepair, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(configWithRepair, db).get(10, TimeUnit.SECONDS);
     assertNotNull(index);
 
     // Tasks should be scheduled but we can't easily verify this without exposing internals
@@ -297,7 +297,7 @@ class FdbVectorSearchIndexTest {
         .autoRepairEnabled(false)
         .build();
 
-    index = FdbVectorSearchIndex.createOrOpen(configNoRepair, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(configNoRepair, db).get(10, TimeUnit.SECONDS);
     assertNotNull(index);
 
     // Tasks should not be scheduled
@@ -309,7 +309,7 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Should shutdown gracefully with timeout")
   void testGracefulShutdown() throws ExecutionException, InterruptedException, TimeoutException {
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     boolean terminated = index.shutdown(true, 5, TimeUnit.SECONDS);
     assertTrue(terminated);
@@ -318,7 +318,7 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Should shutdown immediately without waiting")
   void testImmediateShutdown() throws ExecutionException, InterruptedException, TimeoutException {
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     index.shutdown(); // Immediate shutdown
 
@@ -328,7 +328,7 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Should handle multiple shutdown calls")
   void testMultipleShutdowns() throws ExecutionException, InterruptedException, TimeoutException {
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     // First shutdown
     boolean terminated1 = index.shutdown(true, 1, TimeUnit.SECONDS);
@@ -345,7 +345,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should reject incompatible dimension when reopening")
   void testRejectIncompatibleDimension() throws ExecutionException, InterruptedException, TimeoutException {
     // Create with dimension 128
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     index.shutdown();
     index = null;
 
@@ -353,7 +353,7 @@ class FdbVectorSearchIndexTest {
     VectorSearchConfig incompatibleConfig =
         VectorSearchConfig.builder(db, directory).dimension(256).build();
 
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(incompatibleConfig, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(incompatibleConfig, db);
 
     assertThatThrownBy(() -> future.get(10, TimeUnit.SECONDS))
         .isInstanceOf(ExecutionException.class)
@@ -367,7 +367,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should reject incompatible metric when reopening")
   void testRejectIncompatibleMetric() throws ExecutionException, InterruptedException, TimeoutException {
     // Create with L2 metric
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     index.shutdown();
     index = null;
 
@@ -377,7 +377,7 @@ class FdbVectorSearchIndexTest {
         .distanceMetric(VectorSearchConfig.DistanceMetric.COSINE)
         .build();
 
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(incompatibleConfig, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(incompatibleConfig, db);
 
     assertThatThrownBy(() -> future.get(10, TimeUnit.SECONDS))
         .isInstanceOf(ExecutionException.class)
@@ -391,7 +391,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should reject incompatible PQ configuration when reopening")
   void testRejectIncompatiblePqConfig() throws ExecutionException, InterruptedException, TimeoutException {
     // Create with PQ subvectors 16
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     index.shutdown();
     index = null;
 
@@ -401,7 +401,7 @@ class FdbVectorSearchIndexTest {
         .pqSubvectors(32)
         .build();
 
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(incompatibleConfig, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(incompatibleConfig, db);
     assertThatThrownBy(() -> future.get(10, TimeUnit.SECONDS))
         .isInstanceOf(ExecutionException.class)
         .hasRootCauseInstanceOf(IndexConfigurationException.class)
@@ -414,7 +414,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should reject incompatible graph degree when reopening")
   void testRejectIncompatibleGraphDegree() throws ExecutionException, InterruptedException, TimeoutException {
     // Create with graph degree 32
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     index.shutdown();
     index = null;
 
@@ -425,7 +425,7 @@ class FdbVectorSearchIndexTest {
         .graphDegree(64)
         .build();
 
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(incompatibleConfig, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(incompatibleConfig, db);
 
     assertThatThrownBy(() -> future.get(10, TimeUnit.SECONDS))
         .isInstanceOf(ExecutionException.class)
@@ -441,7 +441,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should handle corrupted config gracefully")
   void testHandleCorruptedConfig() throws ExecutionException, InterruptedException, TimeoutException {
     // Create index first
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     index.shutdown();
     index = null;
 
@@ -455,7 +455,7 @@ class FdbVectorSearchIndexTest {
     });
 
     // Try to open - should fail with proper error
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(config, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(config, db);
 
     assertThatThrownBy(() -> future.get(10, TimeUnit.SECONDS))
         .isInstanceOf(ExecutionException.class)
@@ -466,7 +466,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Should handle missing codebook version gracefully")
   void testHandleMissingCodebookVersion() throws ExecutionException, InterruptedException, TimeoutException {
     // Create index
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     // Delete the codebook version
     db.run(tr -> {
@@ -479,7 +479,7 @@ class FdbVectorSearchIndexTest {
 
     // Close and reopen - should handle missing version gracefully
     index.shutdown();
-    index = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
     assertNotNull(index);
   }
 
@@ -491,13 +491,13 @@ class FdbVectorSearchIndexTest {
     // Launch multiple threads trying to create the same index
     int threadCount = 5;
     CompletableFuture<?>[] futures = new CompletableFuture[threadCount];
-    FdbVectorSearchIndex[] indices = new FdbVectorSearchIndex[threadCount];
+    FdbVectorSearch[] indices = new FdbVectorSearch[threadCount];
 
     for (int i = 0; i < threadCount; i++) {
       final int idx = i;
       futures[i] = CompletableFuture.supplyAsync(() -> {
         try {
-          indices[idx] = FdbVectorSearchIndex.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+          indices[idx] = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
           return indices[idx];
         } catch (Exception e) {
           throw new RuntimeException(e);
@@ -522,7 +522,7 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Test LongSerializer serialization and deserialization")
   void testLongSerializer() {
-    FdbVectorSearchIndex.LongSerializer serializer = new FdbVectorSearchIndex.LongSerializer();
+    FdbVectorSearch.LongSerializer serializer = new FdbVectorSearch.LongSerializer();
 
     // Test positive number
     Long value1 = 12345L;
@@ -558,8 +558,8 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Test ProtoSerializer with LinkTask")
   void testProtoSerializerWithLinkTask() {
-    FdbVectorSearchIndex.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
-        new FdbVectorSearchIndex.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
+    FdbVectorSearch.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
+        new FdbVectorSearch.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
 
     // Create a test LinkTask
     io.github.panghy.vectorsearch.proto.LinkTask task = io.github.panghy.vectorsearch.proto.LinkTask.newBuilder()
@@ -584,8 +584,8 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Test ProtoSerializer with invalid data")
   void testProtoSerializerWithInvalidData() {
-    FdbVectorSearchIndex.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
-        new FdbVectorSearchIndex.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
+    FdbVectorSearch.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
+        new FdbVectorSearch.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
 
     // Test with invalid protobuf data
     com.google.protobuf.ByteString invalidData =
@@ -600,8 +600,8 @@ class FdbVectorSearchIndexTest {
   @Test
   @DisplayName("Test ProtoSerializer with empty ByteString")
   void testProtoSerializerWithEmptyData() {
-    FdbVectorSearchIndex.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
-        new FdbVectorSearchIndex.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
+    FdbVectorSearch.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
+        new FdbVectorSearch.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
 
     // Test with empty ByteString - should parse to default instance
     com.google.protobuf.ByteString emptyData = com.google.protobuf.ByteString.EMPTY;
@@ -616,20 +616,20 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Test CodebookCacheKey record")
   void testCodebookCacheKey() {
     // Test creation and fields
-    FdbVectorSearchIndex.CodebookCacheKey key1 = new FdbVectorSearchIndex.CodebookCacheKey(1, 5);
+    FdbVectorSearch.CodebookCacheKey key1 = new FdbVectorSearch.CodebookCacheKey(1, 5);
     assertEquals(1, key1.version());
     assertEquals(5, key1.subspace());
 
     // Test equality
-    FdbVectorSearchIndex.CodebookCacheKey key2 = new FdbVectorSearchIndex.CodebookCacheKey(1, 5);
+    FdbVectorSearch.CodebookCacheKey key2 = new FdbVectorSearch.CodebookCacheKey(1, 5);
     assertEquals(key1, key2);
     assertEquals(key1.hashCode(), key2.hashCode());
 
     // Test inequality
-    FdbVectorSearchIndex.CodebookCacheKey key3 = new FdbVectorSearchIndex.CodebookCacheKey(2, 5);
+    FdbVectorSearch.CodebookCacheKey key3 = new FdbVectorSearch.CodebookCacheKey(2, 5);
     assertNotEquals(key1, key3);
 
-    FdbVectorSearchIndex.CodebookCacheKey key4 = new FdbVectorSearchIndex.CodebookCacheKey(1, 6);
+    FdbVectorSearch.CodebookCacheKey key4 = new FdbVectorSearch.CodebookCacheKey(1, 6);
     assertNotEquals(key1, key4);
 
     // Test toString
@@ -642,20 +642,20 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Test PqBlockCacheKey record")
   void testPqBlockCacheKey() {
     // Test creation and fields
-    FdbVectorSearchIndex.PqBlockCacheKey key1 = new FdbVectorSearchIndex.PqBlockCacheKey(1, 1000L);
+    FdbVectorSearch.PqBlockCacheKey key1 = new FdbVectorSearch.PqBlockCacheKey(1, 1000L);
     assertEquals(1, key1.version());
     assertEquals(1000L, key1.blockNumber());
 
     // Test equality
-    FdbVectorSearchIndex.PqBlockCacheKey key2 = new FdbVectorSearchIndex.PqBlockCacheKey(1, 1000L);
+    FdbVectorSearch.PqBlockCacheKey key2 = new FdbVectorSearch.PqBlockCacheKey(1, 1000L);
     assertEquals(key1, key2);
     assertEquals(key1.hashCode(), key2.hashCode());
 
     // Test inequality
-    FdbVectorSearchIndex.PqBlockCacheKey key3 = new FdbVectorSearchIndex.PqBlockCacheKey(2, 1000L);
+    FdbVectorSearch.PqBlockCacheKey key3 = new FdbVectorSearch.PqBlockCacheKey(2, 1000L);
     assertNotEquals(key1, key3);
 
-    FdbVectorSearchIndex.PqBlockCacheKey key4 = new FdbVectorSearchIndex.PqBlockCacheKey(1, 2000L);
+    FdbVectorSearch.PqBlockCacheKey key4 = new FdbVectorSearch.PqBlockCacheKey(1, 2000L);
     assertNotEquals(key1, key4);
 
     // Test toString
@@ -668,7 +668,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Test refreshEntryPoints method")
   void testRefreshEntryPoints() throws Exception {
     // Create index
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(config, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(config, db);
     index = future.get(10, TimeUnit.SECONDS);
 
     index.refreshEntryPoints().join();
@@ -678,7 +678,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Test checkAndRepairConnectivity method")
   void testCheckAndRepairConnectivity() throws Exception {
     // Create index
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(config, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(config, db);
     index = future.get(10, TimeUnit.SECONDS);
 
     // Use reflection to access private method
@@ -689,7 +689,7 @@ class FdbVectorSearchIndexTest {
   @DisplayName("Test PqBlockCache weigher")
   void testPqBlockCacheWeigher() throws Exception {
     // Create index
-    CompletableFuture<FdbVectorSearchIndex> future = FdbVectorSearchIndex.createOrOpen(config, db);
+    CompletableFuture<FdbVectorSearch> future = FdbVectorSearch.createOrOpen(config, db);
     index = future.get(10, TimeUnit.SECONDS);
 
     // Get the cache
@@ -703,7 +703,7 @@ class FdbVectorSearchIndexTest {
             .build();
 
     // Put it in the cache
-    FdbVectorSearchIndex.PqBlockCacheKey key = new FdbVectorSearchIndex.PqBlockCacheKey(1, 100L);
+    FdbVectorSearch.PqBlockCacheKey key = new FdbVectorSearch.PqBlockCacheKey(1, 100L);
     cache.put(key, block);
 
     // Verify the cache contains the entry

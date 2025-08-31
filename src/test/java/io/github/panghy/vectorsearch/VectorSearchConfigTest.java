@@ -598,8 +598,8 @@ class VectorSearchConfigTest {
     TaskQueueConfig<Long, Long> customTaskQueueConfig = TaskQueueConfig.builder(
             db,
             queueDir,
-            new FdbVectorSearchIndex.LongSerializer(),
-            new FdbVectorSearchIndex.LongSerializer())
+            new FdbVectorSearch.LongSerializer(),
+            new FdbVectorSearch.LongSerializer())
         .build();
 
     VectorSearchConfig.Builder builder =
