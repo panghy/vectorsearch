@@ -28,11 +28,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,7 +50,6 @@ class LinkWorkerTest {
   private BeamSearchEngine searchEngine;
   private ProductQuantizer pq;
   private LinkWorker linkWorker;
-  private ExecutorService executorService;
 
   private static final int DIMENSION = 8;
   private static final int PQ_SUBVECTORS = 4;
@@ -135,22 +130,11 @@ class LinkWorkerTest {
         MAX_SEARCH_VISITS,
         PRUNING_ALPHA,
         InstantSource.system());
-
-    executorService = Executors.newSingleThreadExecutor();
   }
 
   @AfterEach
   void tearDown() throws Exception {
-    if (linkWorker != null) {
-      linkWorker.stop();
-    }
-    if (executorService != null) {
-      executorService.shutdown();
-      executorService.awaitTermination(5, TimeUnit.SECONDS);
-    }
-
     // Clean up test data - using unique test IDs so cleanup isn't critical
-
     if (db != null) {
       db.close();
     }
@@ -179,29 +163,12 @@ class LinkWorkerTest {
             tr, Arrays.asList(1L, 2L, 3L), Arrays.asList(4L, 5L), Arrays.asList(6L, 7L)))
         .get();
 
-    // When
-    AtomicBoolean processed = new AtomicBoolean(false);
-    executorService.submit(() -> {
-      try {
-        // Run for a short time
-        Thread.sleep(2000);
-        processed.set(true);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    });
-
-    // Start worker in background
-    ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
-    workerExecutor.submit(linkWorker);
-
-    // Wait for processing
-    Thread.sleep(3000);
-    linkWorker.stop();
-    workerExecutor.shutdown();
-    workerExecutor.awaitTermination(5, TimeUnit.SECONDS);
+    // When - process single task
+    boolean processed = linkWorker.processOneTask().get();
 
     // Then
+    assertThat(processed).isTrue();
+
     // Verify PQ code was stored
     byte[] storedCode = pqBlockStorage.loadPqCode(nodeId, 1).get();
     assertThat(storedCode).isEqualTo(pqCode);
@@ -212,7 +179,7 @@ class LinkWorkerTest {
     assertThat(adjacency).isNotNull();
     assertThat(adjacency.getNodeId()).isEqualTo(nodeId);
 
-    assertThat(linkWorker.getTotalProcessed()).isGreaterThan(0);
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(1);
     assertThat(linkWorker.getTotalFailed()).isEqualTo(0);
   }
 
@@ -246,17 +213,12 @@ class LinkWorkerTest {
     db.runAsync(tr -> entryPointStorage.storeEntryList(tr, Arrays.asList(1L, 2L, 3L), null, null))
         .get();
 
-    // When
-    ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
-    workerExecutor.submit(linkWorker);
-
-    // Wait for processing
-    Thread.sleep(3000);
-    linkWorker.stop();
-    workerExecutor.shutdown();
-    workerExecutor.awaitTermination(5, TimeUnit.SECONDS);
+    // When - process all tasks
+    int processed = linkWorker.processAllAvailableTasks(0).get();
 
     // Then
+    assertThat(processed).isEqualTo(batchSize);
+
     for (int i = 0; i < batchSize; i++) {
       long nodeId = nodeIds.get(i);
       byte[] expectedCode = pqCodes.get(i);
@@ -294,16 +256,12 @@ class LinkWorkerTest {
 
     // No entry points set
 
-    // When
-    ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
-    workerExecutor.submit(linkWorker);
-
-    Thread.sleep(2000);
-    linkWorker.stop();
-    workerExecutor.shutdown();
-    workerExecutor.awaitTermination(5, TimeUnit.SECONDS);
+    // When - process the task
+    boolean processed = linkWorker.processOneTask().get();
 
     // Then
+    assertThat(processed).isTrue();
+
     // Should still store the node with empty neighbors
     NodeAdjacency adjacency = db.runAsync(tr -> nodeAdjacencyStorage.loadAdjacency(tr, nodeId))
         .get();
@@ -355,16 +313,13 @@ class LinkWorkerTest {
 
     taskQueue.enqueue(newNodeId, linkTask).get();
 
-    // When
-    ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
-    workerExecutor.submit(linkWorker);
+    // When - process the task
+    boolean processed = linkWorker.processOneTask().get();
 
-    Thread.sleep(3000);
-    linkWorker.stop();
-    workerExecutor.shutdown();
-    workerExecutor.awaitTermination(5, TimeUnit.SECONDS);
+    // Then
+    assertThat(processed).isTrue();
 
-    // Then - verify the new node has neighbors
+    // Verify the new node has neighbors
     NodeAdjacency newNodeAdj = db.runAsync(tr -> nodeAdjacencyStorage.loadAdjacency(tr, newNodeId))
         .get();
     assertThat(newNodeAdj).isNotNull();
@@ -409,50 +364,279 @@ class LinkWorkerTest {
     db.runAsync(tr -> entryPointStorage.storeEntryList(tr, Arrays.asList(1L, 2L), null, null))
         .get();
 
-    // When
-    ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
-    workerExecutor.submit(linkWorker);
-
-    // Let it process for a while
-    Thread.sleep(5000);
-    linkWorker.stop();
-    workerExecutor.shutdown();
-    workerExecutor.awaitTermination(5, TimeUnit.SECONDS);
+    // When - process all tasks (the worker internally uses batching)
+    int processed = linkWorker.processAllAvailableTasks(0).get();
 
     // Then
+    assertThat(processed).isEqualTo(20);
+
     int finalBatchSize = linkWorker.getCurrentBatchSize();
     LOGGER.info("Batch size changed from " + initialBatchSize + " to " + finalBatchSize);
 
     // Batch size may have changed based on processing speed
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(20);
+  }
+
+  @Test
+  @Timeout(5)
+  void testNoTasksAvailable() throws Exception {
+    // When - try to process when queue is empty
+    boolean processed = linkWorker.processOneTask().get();
+
+    // Then
+    assertThat(processed).isFalse();
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(0);
+    assertThat(linkWorker.getTotalFailed()).isEqualTo(0);
+  }
+
+  @Test
+  @Timeout(5)
+  void testProcessAllWithLimit() throws Exception {
+    // Given - multiple tasks
+    int totalTasks = 10;
+    int limitTasks = 5;
+
+    for (int i = 0; i < totalTasks; i++) {
+      long nodeId = 2000L + i;
+      float[] vector = generateRandomVector(DIMENSION);
+      byte[] pqCode = pq.encode(vector);
+
+      LinkTask linkTask = LinkTask.newBuilder()
+          .setCollection("test-collection")
+          .setNodeId(nodeId)
+          .setPqCode(ByteString.copyFrom(pqCode))
+          .setCodebookVersion(1)
+          .build();
+
+      taskQueue.enqueue(nodeId, linkTask).get();
+    }
+
+    // When - process only limited tasks
+    int processed = linkWorker.processAllAvailableTasks(limitTasks).get();
+
+    // Then
+    assertThat(processed).isEqualTo(limitTasks);
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(limitTasks);
+  }
+
+  @Test
+  @Timeout(5)
+  void testRunMethodWithStop() throws Exception {
+    // Given - a task to process
+    long nodeId = 3000L;
+    byte[] pqCode = new byte[PQ_SUBVECTORS];
+    Arrays.fill(pqCode, (byte) 1);
+
+    LinkTask linkTask = LinkTask.newBuilder()
+        .setCollection("test-collection")
+        .setNodeId(nodeId)
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(1)
+        .build();
+
+    taskQueue.enqueue(nodeId, linkTask).get();
+
+    // When - run the worker in a separate thread
+    Thread workerThread = new Thread(linkWorker);
+    workerThread.start();
+
+    // Let it process the task
+    Thread.sleep(500);
+
+    // Stop the worker
+    linkWorker.stop();
+    workerThread.join(2000);
+
+    // Then
+    assertThat(workerThread.isAlive()).isFalse();
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(1);
+  }
+
+  @Test
+  @Timeout(5)
+  void testTransactionFailure() throws Exception {
+    // Given - create a task with invalid PQ code that will cause transaction to fail
+    long nodeId = 4000L;
+    byte[] invalidPqCode = new byte[2]; // Wrong size
+
+    LinkTask linkTask = LinkTask.newBuilder()
+        .setCollection("test-collection")
+        .setNodeId(nodeId)
+        .setPqCode(ByteString.copyFrom(invalidPqCode))
+        .setCodebookVersion(1)
+        .build();
+
+    taskQueue.enqueue(nodeId, linkTask).get();
+
+    // When - try to process the task
+    boolean processed = linkWorker.processOneTask().get();
+
+    // Then
+    assertThat(processed).isFalse();
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(0);
+    assertThat(linkWorker.getTotalFailed()).isEqualTo(1);
+  }
+
+  @Test
+  @Timeout(5)
+  void testBatchSizeAdjustment() throws Exception {
+    // Given - many tasks to trigger batch size changes
+    int initialBatchSize = linkWorker.getCurrentBatchSize();
+    assertThat(initialBatchSize).isEqualTo(10);
+
+    // Create many small tasks that process quickly
+    for (int i = 0; i < 50; i++) {
+      long nodeId = 5000L + i;
+      byte[] pqCode = new byte[PQ_SUBVECTORS];
+      Arrays.fill(pqCode, (byte) (i % 10));
+
+      LinkTask linkTask = LinkTask.newBuilder()
+          .setCollection("test-collection")
+          .setNodeId(nodeId)
+          .setPqCode(ByteString.copyFrom(pqCode))
+          .setCodebookVersion(1)
+          .build();
+
+      taskQueue.enqueue(nodeId, linkTask).get();
+    }
+
+    // When - process in batches using the run method
+    Thread workerThread = new Thread(linkWorker);
+    workerThread.start();
+
+    // Let it process multiple batches
+    Thread.sleep(2000);
+
+    // Stop the worker
+    linkWorker.stop();
+    workerThread.join(2000);
+
+    // Then - batch size should have changed based on performance
+    int finalBatchSize = linkWorker.getCurrentBatchSize();
+    LOGGER.info("Batch size changed from " + initialBatchSize + " to " + finalBatchSize);
     assertThat(linkWorker.getTotalProcessed()).isGreaterThan(0);
   }
 
   @Test
   @Timeout(5)
-  void testStopMethod() throws Exception {
+  void testWorkerInterruption() throws Exception {
     // Given - no tasks to process
-    ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
+    Thread workerThread = new Thread(linkWorker);
+    workerThread.start();
 
-    // When
-    CountDownLatch started = new CountDownLatch(1);
-    CountDownLatch stopped = new CountDownLatch(1);
-
-    workerExecutor.submit(() -> {
-      started.countDown();
-      linkWorker.run();
-      stopped.countDown();
-    });
-
-    started.await();
-    Thread.sleep(500);
-    linkWorker.stop();
+    // When - interrupt the thread
+    Thread.sleep(200);
+    workerThread.interrupt();
+    workerThread.join(1000);
 
     // Then
-    boolean stoppedInTime = stopped.await(2, TimeUnit.SECONDS);
-    assertThat(stoppedInTime).isTrue();
+    assertThat(workerThread.isAlive()).isFalse();
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(0);
+  }
 
-    workerExecutor.shutdown();
-    workerExecutor.awaitTermination(1, TimeUnit.SECONDS);
+  @Test
+  @Timeout(5)
+  void testBackLinkAlreadyExists() throws Exception {
+    // Given - two nodes that already have back-links
+    long node1 = 6000L;
+    long node2 = 6001L;
+
+    // Store PQ codes
+    db.runAsync(tr -> {
+          pqBlockStorage.storePqCode(tr, node1, pq.encode(generateRandomVector(DIMENSION)), 1);
+          return pqBlockStorage.storePqCode(tr, node2, pq.encode(generateRandomVector(DIMENSION)), 1);
+        })
+        .get();
+
+    // Create adjacency with existing back-link
+    db.runAsync(tr -> {
+          NodeAdjacency adj1 = NodeAdjacency.newBuilder()
+              .setNodeId(node1)
+              .addNeighbors(node2)
+              .setState(NodeAdjacency.State.ACTIVE)
+              .build();
+          NodeAdjacency adj2 = NodeAdjacency.newBuilder()
+              .setNodeId(node2)
+              .addNeighbors(node1) // Already has back-link
+              .setState(NodeAdjacency.State.ACTIVE)
+              .build();
+          nodeAdjacencyStorage.storeNodeAdjacency(tr, node1, adj1);
+          return nodeAdjacencyStorage.storeNodeAdjacency(tr, node2, adj2);
+        })
+        .get();
+
+    // Set entry points
+    db.runAsync(tr -> entryPointStorage.storeEntryList(tr, Arrays.asList(node2), null, null))
+        .get();
+
+    // Create link task for node1
+    LinkTask linkTask = LinkTask.newBuilder()
+        .setCollection("test-collection")
+        .setNodeId(node1)
+        .setPqCode(ByteString.copyFrom(pq.encode(generateRandomVector(DIMENSION))))
+        .setCodebookVersion(1)
+        .build();
+
+    taskQueue.enqueue(node1, linkTask).get();
+
+    // When - process the task
+    boolean processed = linkWorker.processOneTask().get();
+
+    // Then
+    assertThat(processed).isTrue();
+
+    // Verify back-link still exists (should not duplicate)
+    NodeAdjacency adj2After =
+        db.runAsync(tr -> nodeAdjacencyStorage.loadAdjacency(tr, node2)).get();
+    long backLinkCount =
+        adj2After.getNeighborsList().stream().filter(id -> id == node1).count();
+    assertThat(backLinkCount).isEqualTo(1); // Should only have one back-link
+  }
+
+  @Test
+  @Timeout(5)
+  void testPruningWithManyNeighbors() throws Exception {
+    // Given - a node that will discover many neighbors (more than graphDegree)
+    long targetNode = 7000L;
+
+    // Create many existing nodes
+    List<Long> existingNodes = new ArrayList<>();
+    for (int i = 0; i < GRAPH_DEGREE * 2; i++) {
+      long nodeId = 7001L + i;
+      existingNodes.add(nodeId);
+
+      db.runAsync(tr -> {
+            pqBlockStorage.storePqCode(tr, nodeId, pq.encode(generateRandomVector(DIMENSION)), 1);
+            return nodeAdjacencyStorage.storeAdjacency(tr, nodeId, List.of());
+          })
+          .get();
+    }
+
+    // Set many entry points
+    db.runAsync(tr -> entryPointStorage.storeEntryList(tr, existingNodes.subList(0, 10), null, null))
+        .get();
+
+    // Create link task
+    LinkTask linkTask = LinkTask.newBuilder()
+        .setCollection("test-collection")
+        .setNodeId(targetNode)
+        .setPqCode(ByteString.copyFrom(pq.encode(generateRandomVector(DIMENSION))))
+        .setCodebookVersion(1)
+        .build();
+
+    taskQueue.enqueue(targetNode, linkTask).get();
+
+    // When - process the task
+    boolean processed = linkWorker.processOneTask().get();
+
+    // Then
+    assertThat(processed).isTrue();
+
+    // Verify pruning occurred
+    NodeAdjacency adjacency = db.runAsync(tr -> nodeAdjacencyStorage.loadAdjacency(tr, targetNode))
+        .get();
+    assertThat(adjacency).isNotNull();
+    assertThat(adjacency.getNeighborsList().size()).isLessThanOrEqualTo(GRAPH_DEGREE);
   }
 
   // Serializers for task queue
