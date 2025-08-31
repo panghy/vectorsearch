@@ -23,7 +23,7 @@ public class CodebookStorage {
 
   private final Database db;
   private final VectorIndexKeys keys;
-  private final Map<String, float[][][]> codebookCache;
+  private final Map<Long, float[][][]> codebookCache;
 
   public CodebookStorage(Database db, VectorIndexKeys keys) {
     this.db = db;
@@ -34,16 +34,13 @@ public class CodebookStorage {
   /**
    * Stores a complete set of codebooks for a version.
    *
-   * @param version codebook version
-   * @param codebooks array of codebooks [numSubvectors][numCentroids][subDimension]
+   * @param version       codebook version
+   * @param codebooks     array of codebooks [numSubvectors][numCentroids][subDimension]
    * @param trainingStats training statistics (vectors used, error, etc.)
    * @return future completing when all codebooks are stored
    */
-  public CompletableFuture<Void> storeCodebooks(int version, float[][][] codebooks, TrainingStats trainingStats) {
-
+  public CompletableFuture<Void> storeCodebooks(long version, float[][][] codebooks, TrainingStats trainingStats) {
     return db.runAsync(tx -> {
-      List<CompletableFuture<Void>> futures = new ArrayList<>();
-
       for (int i = 0; i < codebooks.length; i++) {
         final int subspaceIndex = i;
         byte[] key = keys.codebookKey(version, subspaceIndex);
@@ -67,8 +64,7 @@ public class CodebookStorage {
       }
 
       // Update cache
-      String cacheKey = codebookCacheKey(version);
-      codebookCache.put(cacheKey, codebooks);
+      codebookCache.put(version, codebooks);
 
       LOGGER.info("Stored {} codebook subspaces for version {}", codebooks.length, version);
 
@@ -82,10 +78,9 @@ public class CodebookStorage {
    * @param version codebook version to load
    * @return array of codebooks or null if version doesn't exist
    */
-  public CompletableFuture<float[][][]> loadCodebooks(int version) {
+  public CompletableFuture<float[][][]> loadCodebooks(long version) {
     // Check cache first
-    String cacheKey = codebookCacheKey(version);
-    float[][][] cached = codebookCache.get(cacheKey);
+    float[][][] cached = codebookCache.get(version);
     if (cached != null) {
       return CompletableFuture.completedFuture(cached);
     }
@@ -124,7 +119,7 @@ public class CodebookStorage {
             }
 
             // Cache for future use
-            codebookCache.put(cacheKey, codebooks);
+            codebookCache.put(version, codebooks);
 
             LOGGER.debug("Loaded {} codebook subspaces for version {}", numSubvectors, version);
 
@@ -205,7 +200,7 @@ public class CodebookStorage {
    * @param version the version to delete
    * @return future completing when deletion is done
    */
-  public CompletableFuture<Void> deleteVersion(int version) {
+  public CompletableFuture<Void> deleteVersion(long version) {
     return db.runAsync(tx -> {
       byte[] prefix = keys.codebookPrefixForVersion(version);
       Range range = Range.startsWith(prefix);
@@ -213,8 +208,7 @@ public class CodebookStorage {
       StorageTransactionUtils.clearRange(tx, range);
 
       // Remove from cache
-      String cacheKey = codebookCacheKey(version);
-      codebookCache.remove(cacheKey);
+      codebookCache.remove(version);
 
       LOGGER.info("Deleted codebook version {}", version);
 
@@ -238,10 +232,6 @@ public class CodebookStorage {
   }
 
   // Helper methods
-
-  private String codebookCacheKey(int version) {
-    return keys.getCollectionName() + ":" + version;
-  }
 
   private float[] flatten(float[][] array) {
     int rows = array.length;

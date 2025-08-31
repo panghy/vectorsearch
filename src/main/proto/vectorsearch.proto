@@ -96,7 +96,7 @@ message CodebookSub {
   uint32 subspace_index = 1;
   
   // Codebook version for tracking rotations
-  uint32 version = 2;
+  uint64 version = 2;
   
   // Packed codewords in fp16 format to save space.
   // Layout: [256 codewords × (dimension/pq_subvectors) dims × 2 bytes]
