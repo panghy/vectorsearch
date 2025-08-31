@@ -145,10 +145,7 @@ public class NodeAdjacencyStorage {
       CompletableFuture<NodeAdjacency> future = loadAdjacency(tx, nodeId);
       resultFuture = resultFuture.thenCombine(future, (result, adj) -> {
         if (adj != null) {
-          //noinspection SynchronizationOnLocalVariableOrMethodParameter
-          synchronized (result) {
-            result.put(nodeId, adj);
-          }
+          result.put(nodeId, adj);
         }
         return result;
       });
@@ -288,10 +285,7 @@ public class NodeAdjacencyStorage {
                         .distanceToQuery(distance)
                         .build());
                 candidateFutures = candidateFutures.thenCombine(candidateFuture, (list, candidate) -> {
-                  //noinspection SynchronizationOnLocalVariableOrMethodParameter
-                  synchronized (candidate) {
-                    list.add(candidate);
-                  }
+                  list.add(candidate);
                   return list;
                 });
               }

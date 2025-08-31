@@ -420,7 +420,7 @@ class GraphConnectivityMonitorTest {
 
     assertThatThrownBy(() -> new GraphConnectivityMonitor.SamplingRange(-1, 10))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Invalid range: -1 or 10 is negative");
+        .hasMessageContaining("Invalid range: min (-1) is negative");
 
     // Test valid range
     GraphConnectivityMonitor.SamplingRange validRange = new GraphConnectivityMonitor.SamplingRange(1, 10);
