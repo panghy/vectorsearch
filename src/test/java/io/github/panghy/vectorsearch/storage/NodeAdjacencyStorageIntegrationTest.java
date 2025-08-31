@@ -13,6 +13,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BiFunction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -138,7 +139,7 @@ class NodeAdjacencyStorageIntegrationTest {
 
   @Test
   void testAddBackLinksWithPruning() {
-    // Test that back-links are properly added with pruning when needed
+    // Test that back-links are properly added with simple pruning when needed
     CompletableFuture<Void> future = db.runAsync(tx -> {
       // First, create some existing neighbors
       List<Long> existingNeighbors =
@@ -159,6 +160,40 @@ class NodeAdjacencyStorageIntegrationTest {
               // If at max capacity, back-link might have been added and something pruned
               assertThat(adjacency.getNeighborsList()).hasSize(GRAPH_DEGREE);
             }
+          });
+    });
+
+    future.join();
+  }
+
+  @Test
+  void testAddBackLinksWithDistanceBasedPruning() {
+    // Test that back-links use robust pruning when distance function is provided
+    CompletableFuture<Void> future = db.runAsync(tx -> {
+      // Create a node with many neighbors
+      List<Long> existingNeighbors =
+          Arrays.asList(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L, 12L, 13L, 14L, 15L);
+
+      // Mock distance function that returns closer distances for lower node IDs
+      BiFunction<Long, Long, CompletableFuture<Float>> distanceFunction = (from, to) -> {
+        // Simulate that lower node IDs are closer
+        float distance = Math.abs(to - from) * 0.1f;
+        return CompletableFuture.completedFuture(distance);
+      };
+
+      return storage.storeAdjacency(tx, 100L, existingNeighbors)
+          .thenCompose(v -> {
+            // Add back-link with distance function - should trigger robust pruning
+            return storage.addBackLinksWithDistanceFunction(
+                tx, 200L, Arrays.asList(100L), distanceFunction);
+          })
+          .thenCompose(v -> storage.loadAdjacency(tx, 100L))
+          .thenAccept(adjacency -> {
+            assertThat(adjacency).isNotNull();
+            assertThat(adjacency.getNeighborsList()).hasSize(GRAPH_DEGREE);
+            // With robust pruning, should keep diverse neighbors
+            // The exact selection depends on the pruning algorithm
+            assertThat(adjacency.getNeighborsList()).contains(200L); // New back-link should be included
           });
     });
 
