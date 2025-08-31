@@ -40,7 +40,7 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 - [x] **Node Adjacency Storage** - Per-node neighbor lists with degree bounds (COMPLETED)
 - [x] **Robust Pruning Algorithm** - DiskANN-style neighbor selection with diversity (COMPLETED)
 - [x] **Back-link Maintenance** - Bidirectional edge consistency (COMPLETED)
-- [ ] **Graph Connectivity Monitoring** - Detect and repair disconnected components
+- [x] **Graph Connectivity Monitoring** - Detect and repair disconnected components (COMPLETED)
 
 ### Search Engine
 - [x] **Beam Search Implementation** - Graph traversal with PQ-based scoring (COMPLETED)
@@ -101,10 +101,10 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 /C/{collection}/pq/block/{cbv}/{blockNo}  -> pb.PqCodesBlock (DONE)
 ```
 
-### Graph Layer 🚧
+### Graph Layer ✅
 ```
 /C/{collection}/graph/node/{NID}          -> pb.NodeAdj (DONE)
-/C/{collection}/graph/meta/connectivity   -> pb.GraphMeta (PLANNED)
+/C/{collection}/graph/meta/connectivity   -> pb.GraphMeta (DONE)
 /C/{collection}/entry                     -> pb.EntryList (DONE)
 ```
 
@@ -141,10 +141,10 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 ## 🎯 **Next Milestone: Online Operations**
 
 **Priority Items:**
-1. **Graph Connectivity Monitoring** - Detect and repair disconnected components
-2. **Transactional Queue Integration** - Link worker task management
-3. **Link Worker Implementation** - Neighbor discovery and graph linking
-4. **Unlink Worker** - Safe node removal with back-link cleanup
+1. **Transactional Queue Integration** - Link worker task management
+2. **Link Worker Implementation** - Neighbor discovery and graph linking
+3. **Unlink Worker** - Safe node removal with back-link cleanup
+4. **Batch Processing** - Efficient handling of bulk upserts
 
 **Success Criteria:**
 - Upsert throughput >1000 vectors/second
