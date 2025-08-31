@@ -475,8 +475,6 @@ class StorageTransactionUtilsTest {
     Long count =
         db.runAsync(tr -> StorageTransactionUtils.countRange(tr, range)).get();
 
-    System.out.println("Count: " + count);
-
     // For large ranges, it uses estimation, so allow some variance
     // The actual size might not trigger estimation, so accept exact or estimated count
     assertThat(count).isBetween((long) (numKeys * 0.5), (long) (numKeys * 2.0));
