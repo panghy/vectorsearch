@@ -750,11 +750,11 @@ public class FdbVectorSearch implements VectorSearch {
       byte[] counterKey = metaSubspace.pack(Tuple.from("node_id_counter"));
 
       return tr.get(counterKey).thenCompose(counterBytes -> {
-        long startId = counterBytes == null ? 1L : (long) decodeInt(counterBytes) + 1;
+        long startId = counterBytes == null ? 1L : ((long) decodeInt(counterBytes)) + 1;
         long endId = startId + vectors.size() - 1;
 
         // Update counter for next batch
-        tr.set(counterKey, encodeInt((int) endId));
+        tr.set(counterKey, encodeInt(endId));
 
         // Create ID to vector mapping
         Map<Long, float[]> idToVector = new LinkedHashMap<>();
