@@ -7,6 +7,7 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Range;
+import com.apple.foundationdb.Transaction;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.protobuf.ByteString;
@@ -59,6 +60,16 @@ public class PqBlockStorage {
   }
 
   /**
+   * Gets the block number for a given node ID.
+   *
+   * @param nodeId the node ID
+   * @return the block number
+   */
+  public long getBlockNumber(long nodeId) {
+    return VectorIndexKeys.blockNumber(nodeId, codesPerBlock);
+  }
+
+  /**
    * Stores a single PQ-encoded vector.
    *
    * @param nodeId          the node/vector ID
@@ -71,58 +82,72 @@ public class PqBlockStorage {
       throw new IllegalArgumentException(
           "PQ code length mismatch: expected " + pqSubvectors + ", got " + pqCode.length);
     }
+    return db.runAsync(tx -> storePqCode(tx, nodeId, pqCode, codebookVersion));
+  }
+
+  /**
+   * Stores a single PQ-encoded vector within an existing transaction.
+   *
+   * @param tx              the transaction to use
+   * @param nodeId          the node/vector ID
+   * @param pqCode          the PQ code bytes
+   * @param codebookVersion version of codebook used for encoding
+   * @return future completing when stored
+   */
+  public CompletableFuture<Void> storePqCode(Transaction tx, long nodeId, byte[] pqCode, int codebookVersion) {
+    if (pqCode.length != pqSubvectors) {
+      throw new IllegalArgumentException(
+          "PQ code length mismatch: expected " + pqSubvectors + ", got " + pqCode.length);
+    }
 
     long blockNumber = VectorIndexKeys.blockNumber(nodeId, codesPerBlock);
     int blockOffset = VectorIndexKeys.blockOffset(nodeId, codesPerBlock);
+    byte[] blockKey = keys.pqBlockKey(codebookVersion, blockNumber);
 
-    return db.runAsync(tx -> {
-      byte[] blockKey = keys.pqBlockKey(codebookVersion, blockNumber);
+    return readProto(tx, blockKey, PqCodesBlock.parser()).thenApply(existingBlock -> {
+      PqCodesBlock.Builder blockBuilder;
+      byte[] codes;
 
-      return readProto(tx, blockKey, PqCodesBlock.parser()).thenApply(existingBlock -> {
-        PqCodesBlock.Builder blockBuilder;
-        byte[] codes;
+      if (existingBlock == null) {
+        // Create new block
+        long blockFirstNid = blockNumber * codesPerBlock;
+        codes = new byte[codesPerBlock * pqSubvectors];
 
-        if (existingBlock == null) {
-          // Create new block
-          long blockFirstNid = blockNumber * codesPerBlock;
-          codes = new byte[codesPerBlock * pqSubvectors];
+        blockBuilder = PqCodesBlock.newBuilder()
+            .setBlockFirstNid(blockFirstNid)
+            .setCodesInBlock(blockOffset + 1)
+            .setCodebookVersion(codebookVersion)
+            .setBlockVersion(1)
+            .setUpdatedAt(currentTimestamp());
+      } else {
+        // Update existing block
+        codes = existingBlock.getCodes().toByteArray();
 
-          blockBuilder = PqCodesBlock.newBuilder()
-              .setBlockFirstNid(blockFirstNid)
-              .setCodesInBlock(blockOffset + 1)
-              .setCodebookVersion(codebookVersion)
-              .setBlockVersion(1)
-              .setUpdatedAt(currentTimestamp());
-        } else {
-          // Update existing block
-          codes = existingBlock.getCodes().toByteArray();
-
-          // Ensure block has sufficient capacity
-          if (codes.length < codesPerBlock * pqSubvectors) {
-            byte[] newCodes = new byte[codesPerBlock * pqSubvectors];
-            System.arraycopy(codes, 0, newCodes, 0, codes.length);
-            codes = newCodes;
-          }
-
-          blockBuilder = existingBlock.toBuilder()
-              .setCodesInBlock(Math.max(existingBlock.getCodesInBlock(), blockOffset + 1))
-              .setBlockVersion(existingBlock.getBlockVersion() + 1)
-              .setUpdatedAt(currentTimestamp());
+        // Ensure block has sufficient capacity
+        if (codes.length < codesPerBlock * pqSubvectors) {
+          byte[] newCodes = new byte[codesPerBlock * pqSubvectors];
+          System.arraycopy(codes, 0, newCodes, 0, codes.length);
+          codes = newCodes;
         }
 
-        // Write PQ code at the correct offset
-        System.arraycopy(pqCode, 0, codes, blockOffset * pqSubvectors, pqSubvectors);
+        blockBuilder = existingBlock.toBuilder()
+            .setCodesInBlock(Math.max(existingBlock.getCodesInBlock(), blockOffset + 1))
+            .setBlockVersion(existingBlock.getBlockVersion() + 1)
+            .setUpdatedAt(currentTimestamp());
+      }
 
-        blockBuilder.setCodes(ByteString.copyFrom(codes));
-        PqCodesBlock updatedBlock = blockBuilder.build();
+      // Write PQ code at the correct offset
+      System.arraycopy(pqCode, 0, codes, blockOffset * pqSubvectors, pqSubvectors);
 
-        tx.set(blockKey, updatedBlock.toByteArray());
+      blockBuilder.setCodes(ByteString.copyFrom(codes));
+      PqCodesBlock updatedBlock = blockBuilder.build();
 
-        // Update cache
-        blockCache.put(new BlockCacheKey(codebookVersion, blockNumber), completedFuture(updatedBlock));
+      tx.set(blockKey, updatedBlock.toByteArray());
 
-        return null;
-      });
+      // Update cache
+      blockCache.put(new BlockCacheKey(codebookVersion, blockNumber), completedFuture(updatedBlock));
+
+      return null;
     });
   }
 

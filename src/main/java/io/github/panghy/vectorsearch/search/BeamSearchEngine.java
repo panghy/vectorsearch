@@ -99,6 +99,56 @@ public class BeamSearchEngine {
   }
 
   /**
+   * Searches for neighbors of a specific node using its PQ codes.
+   * This is used during link operations to find neighbors for a new node.
+   *
+   * @param tx              the transaction
+   * @param nodeId          the node being linked
+   * @param pqCode          the PQ codes of the node
+   * @param codebookVersion the codebook version
+   * @param entryPoints     entry points to start search from
+   * @param candidateSize   number of candidates to find
+   * @param maxVisits       maximum nodes to visit
+   * @return future containing candidate neighbor node IDs
+   */
+  public CompletableFuture<List<Long>> searchForNeighbors(
+      Transaction tx,
+      long nodeId,
+      byte[] pqCode,
+      int codebookVersion,
+      List<Long> entryPoints,
+      int candidateSize,
+      int maxVisits) {
+
+    // Build lookup table from PQ codes
+    // This is an approximation - ideally we'd have the original vector
+    float[][] lookupTable = pq.buildLookupTableFromPqCode(pqCode);
+
+    // Score entry points
+    return scoreNodes(entryPoints, lookupTable, codebookVersion).thenCompose(initialCandidates -> {
+      // Execute beam search to find candidates
+      return executeBeamSearch(
+              tx,
+              initialCandidates,
+              lookupTable,
+              codebookVersion,
+              candidateSize,
+              candidateSize,
+              maxVisits)
+          .thenApply(results -> {
+            // Convert search results to node IDs, excluding self
+            List<Long> neighbors = new ArrayList<>();
+            for (SearchResult result : results) {
+              if (result.getNodeId() != nodeId) {
+                neighbors.add(result.getNodeId());
+              }
+            }
+            return neighbors;
+          });
+    });
+  }
+
+  /**
    * Executes the core beam search algorithm.
    */
   private CompletableFuture<List<SearchResult>> executeBeamSearch(

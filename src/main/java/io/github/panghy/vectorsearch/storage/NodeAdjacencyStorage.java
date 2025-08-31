@@ -100,6 +100,33 @@ public class NodeAdjacencyStorage {
   }
 
   /**
+   * Stores a complete NodeAdjacency message.
+   * This is used by LinkWorker for direct adjacency updates.
+   *
+   * @param tx        the transaction to use
+   * @param nodeId    the node ID
+   * @param adjacency the complete adjacency message
+   * @return future completing when stored
+   */
+  public CompletableFuture<Void> storeNodeAdjacency(Transaction tx, long nodeId, NodeAdjacency adjacency) {
+    byte[] key = keys.nodeAdjacencyKey(nodeId);
+    tx.set(key, adjacency.toByteArray());
+    return completedFuture(null);
+  }
+
+  /**
+   * Gets the node adjacency for a node.
+   * Alias for loadAdjacency for LinkWorker compatibility.
+   *
+   * @param tx     the transaction to use
+   * @param nodeId the node ID
+   * @return future with adjacency or null if not found
+   */
+  public CompletableFuture<NodeAdjacency> getNodeAdjacency(Transaction tx, long nodeId) {
+    return loadAdjacency(tx, nodeId);
+  }
+
+  /**
    * Loads the adjacency list for a node from the transaction.
    *
    * @param tx     the transaction to use
@@ -431,6 +458,23 @@ public class NodeAdjacencyStorage {
 
     // Use the RobustPruning implementation
     return RobustPruning.prune(pruningCandidates, config);
+  }
+
+  /**
+   * Simple robust prune for nodes without distance information.
+   * Falls back to keeping the first maxDegree nodes.
+   *
+   * @param candidateIds list of node IDs
+   * @param maxDegree    maximum neighbors to keep
+   * @param alpha        diversity vs proximity trade-off (unused without distances)
+   * @return pruned list of node IDs
+   */
+  public List<Long> robustPruneSimple(List<Long> candidateIds, int maxDegree, double alpha) {
+    if (candidateIds.size() <= maxDegree) {
+      return new ArrayList<>(candidateIds);
+    }
+    // Without distance information, just keep first maxDegree
+    return candidateIds.subList(0, maxDegree);
   }
 
   /**
