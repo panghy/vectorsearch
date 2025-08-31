@@ -1,13 +1,19 @@
 package io.github.panghy.vectorsearch;
 
 import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
+import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.vectorsearch.proto.Config;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -576,5 +582,55 @@ class VectorSearchConfigTest {
         .minConnectivityThreshold(1.0)
         .build();
     assertEquals(1.0, maxThreshold.getMinConnectivityThreshold());
+  }
+
+  @Test
+  @DisplayName("Test taskQueueConfig getter and builder")
+  void testTaskQueueConfig() throws Exception {
+    // Test with null taskQueueConfig (default)
+    VectorSearchConfig configWithDefault =
+        VectorSearchConfig.builder(db, directory).dimension(128).build();
+    assertNull(configWithDefault.getTaskQueueConfig());
+
+    // Test with custom taskQueueConfig using the builder method
+    DirectorySubspace queueDir =
+        directory.createOrOpen(db, List.of("test_queue")).get(5, TimeUnit.SECONDS);
+    TaskQueueConfig<Long, Long> customTaskQueueConfig = TaskQueueConfig.builder(
+            db,
+            queueDir,
+            new FdbVectorSearchIndex.LongSerializer(),
+            new FdbVectorSearchIndex.LongSerializer())
+        .build();
+
+    VectorSearchConfig.Builder builder =
+        VectorSearchConfig.builder(db, directory).dimension(128);
+
+    // Use the taskQueueConfig method to set it
+    builder.taskQueueConfig(customTaskQueueConfig);
+
+    VectorSearchConfig configWithCustom = builder.build();
+    assertNotNull(configWithCustom.getTaskQueueConfig());
+    assertEquals(customTaskQueueConfig, configWithCustom.getTaskQueueConfig());
+  }
+
+  @Test
+  @DisplayName("Test backgroundExecutor builder")
+  void testBackgroundExecutor() {
+    // Test with default executor
+    VectorSearchConfig configWithDefault =
+        VectorSearchConfig.builder(db, directory).dimension(128).build();
+    assertEquals(ForkJoinPool.commonPool(), configWithDefault.getBackgroundExecutor());
+
+    // Test with custom executor
+    ForkJoinPool customExecutor = new ForkJoinPool(2);
+    try {
+      VectorSearchConfig configWithCustom = VectorSearchConfig.builder(db, directory)
+          .dimension(128)
+          .backgroundExecutor(customExecutor)
+          .build();
+      assertEquals(customExecutor, configWithCustom.getBackgroundExecutor());
+    } finally {
+      customExecutor.shutdown();
+    }
   }
 }
