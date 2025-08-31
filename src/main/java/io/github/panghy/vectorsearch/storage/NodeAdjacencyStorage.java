@@ -254,9 +254,11 @@ public class NodeAdjacencyStorage {
 
               // If we exceed the degree limit, use robust pruning
               if (neighborList.size() > graphDegree) {
-                // For back-link pruning, we don't have distances readily available
-                // So we'll keep the existing neighbors and prune if needed
-                // In a real implementation, we might want to compute distances
+                // For back-link pruning, we don't have distances readily available.
+                // Ideally, we would use RobustPruning.prune() here as well, but since
+                // distances are not available in this context, we fall back to simple
+                // sorting and truncation. If you can provide distances, replace this
+                // block with a call to RobustPruning.prune().
                 Collections.sort(neighborList);
                 neighborList = neighborList.subList(0, graphDegree);
               } else {
@@ -380,20 +382,6 @@ public class NodeAdjacencyStorage {
    * @return merged and pruned list
    */
   public List<Long> mergePruneWithDistances(List<Long> current, List<ScoredNode> additions, int maxDegree) {
-    // Convert additions to RobustPruning.Candidate format
-    List<Candidate> newCandidates = additions.stream()
-        .map(node -> Candidate.builder()
-            .nodeId(node.nodeId)
-            .distanceToQuery((float) node.distance)
-            .build())
-        .collect(Collectors.toList());
-
-    // Create pruning configuration with default alpha
-    PruningConfig config = PruningConfig.builder()
-        .maxDegree(maxDegree)
-        .alpha(DEFAULT_PRUNE_ALPHA)
-        .build();
-
     // Note: This requires a distance function for existing neighbors
     // For now, use a simple merge without distance-based pruning for existing nodes
     // This would be improved by having distances for all nodes
