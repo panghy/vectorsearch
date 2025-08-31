@@ -78,7 +78,7 @@ import java.util.logging.Logger;
  *     .distanceMetric(DistanceMetric.COSINE)
  *     .build();
  *
- * FdbVectorSearchIndex index = FdbVectorSearchIndex.createOrOpen(config, database)
+ * FdbVectorSearch index = FdbVectorSearch.createOrOpen(config, database)
  *     .join();
  *
  * // Insert vectors
@@ -88,9 +88,9 @@ import java.util.logging.Logger;
  * List<SearchResult> results = index.search(queryVector, topK).join();
  * }</pre>
  */
-public class FdbVectorSearchIndex {
+public class FdbVectorSearch {
 
-  private static final Logger LOGGER = Logger.getLogger(FdbVectorSearchIndex.class.getName());
+  private static final Logger LOGGER = Logger.getLogger(FdbVectorSearch.class.getName());
 
   // OpenTelemetry instrumentation
   private static final Tracer TRACER = GlobalOpenTelemetry.getTracer("io.github.panghy.vectorsearch", "0.1.0");
@@ -297,7 +297,7 @@ public class FdbVectorSearchIndex {
    * @param linkTaskQueue     task queue for link operations
    * @param unlinkTaskQueue   task queue for unlink operations
    */
-  private FdbVectorSearchIndex(
+  private FdbVectorSearch(
       VectorSearchConfig config,
       Database database,
       Directory rootDirectory,
@@ -433,7 +433,7 @@ public class FdbVectorSearchIndex {
    * @return a CompletableFuture that completes with the initialized index
    * @throws IllegalStateException if existing index has incompatible configuration
    */
-  public static CompletableFuture<FdbVectorSearchIndex> createOrOpen(
+  public static CompletableFuture<FdbVectorSearch> createOrOpen(
       VectorSearchConfig config, TransactionContext context) {
 
     // Get the root directory from config
@@ -496,7 +496,7 @@ public class FdbVectorSearchIndex {
             TaskQueue<Long, UnlinkTask> unlinkQueue = unlinkQueueF.join();
 
             // Create the index instance
-            FdbVectorSearchIndex index = new FdbVectorSearchIndex(
+            FdbVectorSearch index = new FdbVectorSearch(
                 config,
                 config.getDatabase(),
                 config.getDirectory(),
