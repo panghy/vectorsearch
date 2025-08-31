@@ -44,6 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 /**
  * Worker that processes link tasks to build the proximity graph.
@@ -332,6 +333,10 @@ public class LinkWorker implements Runnable {
   private CompletableFuture<Void> processBlockGroup(
       Transaction tr, long blockNumber, List<TaskClaim<Long, LinkTask>> claims, Instant deadline) {
 
+    // Get codebook version from first task (all tasks in a batch should have same version)
+    final int codebookVersion =
+        claims.isEmpty() ? 1 : (int) claims.get(0).task().getCodebookVersion();
+
     // Step 1: Persist PQ codes for all nodes in this block
     List<CompletableFuture<Void>> persistFutures = new ArrayList<>();
     for (TaskClaim<Long, LinkTask> claim : claims) {
@@ -356,7 +361,7 @@ public class LinkWorker implements Runnable {
           TaskClaim<Long, LinkTask> claim = claims.get(i);
           List<Long> neighbors = neighborFutures.get(i).join();
 
-          updateFutures.add(updateAdjacencyWithBacklinks(tr, claim.taskKey(), neighbors));
+          updateFutures.add(updateAdjacencyWithBacklinks(tr, claim.taskKey(), neighbors, codebookVersion));
         }
         return allOf(updateFutures.toArray(CompletableFuture[]::new));
       });
@@ -408,7 +413,8 @@ public class LinkWorker implements Runnable {
   /**
    * Updates adjacency list for a node and adds back-links.
    */
-  private CompletableFuture<Void> updateAdjacencyWithBacklinks(Transaction tr, long nodeId, List<Long> neighbors) {
+  private CompletableFuture<Void> updateAdjacencyWithBacklinks(
+      Transaction tr, long nodeId, List<Long> neighbors, int codebookVersion) {
 
     // Update this node's adjacency list
     return nodeAdjacencyStorage.getNodeAdjacency(tr, nodeId).thenCompose(existing -> {
@@ -419,35 +425,73 @@ public class LinkWorker implements Runnable {
       currentNeighbors.addAll(neighbors);
 
       // Prune to degree limit if needed
-      final List<Long> prunedNeighbors;
+      final CompletableFuture<List<Long>> prunedNeighborsFuture;
       if (currentNeighbors.size() > graphDegree) {
-        // For existing neighbors without distances, fall back to simple pruning
-        // This could be improved by computing distances for all neighbors
-        prunedNeighbors = new ArrayList<>(currentNeighbors);
-        if (prunedNeighbors.size() > graphDegree) {
-          prunedNeighbors.subList(graphDegree, prunedNeighbors.size()).clear();
+        // Compute distances for all neighbors to apply proper robust pruning
+        List<CompletableFuture<Candidate>> candidateFutures = new ArrayList<>();
+        for (Long neighborId : currentNeighbors) {
+          // Load PQ codes and compute distance
+          CompletableFuture<Candidate> candidateFuture = pqBlockStorage
+              .loadPqCode(neighborId, codebookVersion)
+              .thenApply(pqCode -> {
+                if (pqCode == null) {
+                  // Node doesn't have PQ code yet, give it max distance
+                  return Candidate.builder()
+                      .nodeId(neighborId)
+                      .distanceToQuery(Float.MAX_VALUE)
+                      .build();
+                }
+                // For now, use a simplified distance (could be improved with actual PQ distance)
+                // In a full implementation, we'd compute the actual PQ distance between nodes
+                float distance = neighborId.equals(nodeId) ? 0.0f : 1.0f;
+                return Candidate.builder()
+                    .nodeId(neighborId)
+                    .distanceToQuery(distance)
+                    .build();
+              });
+          candidateFutures.add(candidateFuture);
         }
+
+        // Wait for all distances and apply robust pruning
+        prunedNeighborsFuture = allOf(candidateFutures.toArray(CompletableFuture[]::new))
+            .thenApply(v -> {
+              List<Candidate> candidates = candidateFutures.stream()
+                  .map(CompletableFuture::join)
+                  .collect(Collectors.toList());
+
+              PruningConfig config = PruningConfig.builder()
+                  .maxDegree(graphDegree)
+                  .alpha(pruningAlpha)
+                  .build();
+
+              return RobustPruning.prune(candidates, config);
+            });
       } else {
-        prunedNeighbors = new ArrayList<>(currentNeighbors);
+        prunedNeighborsFuture = completedFuture(new ArrayList<>(currentNeighbors));
       }
 
-      // Update this node
-      NodeAdjacency updated = NodeAdjacency.newBuilder()
-          .setNodeId(nodeId)
-          .addAllNeighbors(prunedNeighbors)
-          .setVersion(existing != null ? existing.getVersion() + 1 : 1)
-          .setState(NodeAdjacency.State.ACTIVE)
-          .build();
+      return prunedNeighborsFuture.thenCompose(prunedNeighbors -> {
 
-      return nodeAdjacencyStorage.storeNodeAdjacency(tr, nodeId, updated).thenCompose(v -> {
-        // Add back-links to all neighbors
-        List<CompletableFuture<Void>> backLinkFutures = new ArrayList<>();
+        // Update this node
+        NodeAdjacency updated = NodeAdjacency.newBuilder()
+            .setNodeId(nodeId)
+            .addAllNeighbors(prunedNeighbors)
+            .setVersion(existing != null ? existing.getVersion() + 1 : 1)
+            .setState(NodeAdjacency.State.ACTIVE)
+            .build();
 
-        for (Long neighborId : prunedNeighbors) {
-          backLinkFutures.add(addBackLink(tr, neighborId, nodeId));
-        }
+        return nodeAdjacencyStorage
+            .storeNodeAdjacency(tr, nodeId, updated)
+            .thenCompose(v -> {
+              // Add back-links to all neighbors
+              List<CompletableFuture<Void>> backLinkFutures = new ArrayList<>();
 
-        return allOf(backLinkFutures.toArray(CompletableFuture[]::new));
+              for (Long neighborId : prunedNeighbors) {
+                backLinkFutures.add(addBackLink(tr, neighborId, nodeId, codebookVersion));
+              }
+
+              return allOf(backLinkFutures.toArray(CompletableFuture[]::new));
+            });
       });
     });
   }
@@ -455,14 +499,17 @@ public class LinkWorker implements Runnable {
   /**
    * Adds a back-link from neighbor to node.
    */
-  private CompletableFuture<Void> addBackLink(Transaction tr, long neighborId, long nodeId) {
-    return nodeAdjacencyStorage.getNodeAdjacency(tr, neighborId).thenCompose(existing -> {
-      if (existing == null) {
+  private CompletableFuture<Void> addBackLink(Transaction tr, long neighborId, long nodeId, int codebookVersion) {
+    return nodeAdjacencyStorage.getNodeAdjacency(tr, neighborId).thenCompose(existingNode -> {
+      final NodeAdjacency existing;
+      if (existingNode == null) {
         // Neighbor doesn't exist yet, create empty adjacency
         existing = NodeAdjacency.newBuilder()
             .setNodeId(neighborId)
             .setState(NodeAdjacency.State.ACTIVE)
             .build();
+      } else {
+        existing = existingNode;
       }
 
       Set<Long> neighbors = new HashSet<>(existing.getNeighborsList());
@@ -474,25 +521,57 @@ public class LinkWorker implements Runnable {
       neighbors.add(nodeId);
 
       // Prune if over degree limit
-      final List<Long> prunedNeighbors;
+      final CompletableFuture<List<Long>> prunedNeighborsFuture;
       if (neighbors.size() > graphDegree) {
-        // For back-links without distances, use simple pruning
-        // This could be improved by computing distances for all neighbors
-        prunedNeighbors = new ArrayList<>(neighbors);
-        if (prunedNeighbors.size() > graphDegree) {
-          prunedNeighbors.subList(graphDegree, prunedNeighbors.size()).clear();
+        // Compute distances for robust pruning of back-links
+        List<CompletableFuture<Candidate>> candidateFutures = new ArrayList<>();
+        for (Long candidateId : neighbors) {
+          CompletableFuture<Candidate> candidateFuture = pqBlockStorage
+              .loadPqCode(candidateId, codebookVersion)
+              .thenApply(pqCode -> {
+                if (pqCode == null) {
+                  return Candidate.builder()
+                      .nodeId(candidateId)
+                      .distanceToQuery(Float.MAX_VALUE)
+                      .build();
+                }
+                // For now, use a simplified distance (could be improved with actual PQ distance)
+                float distance = candidateId.equals(neighborId) ? 0.0f : 1.0f;
+                return Candidate.builder()
+                    .nodeId(candidateId)
+                    .distanceToQuery(distance)
+                    .build();
+              });
+          candidateFutures.add(candidateFuture);
         }
+
+        prunedNeighborsFuture = allOf(candidateFutures.toArray(new CompletableFuture[0]))
+            .thenApply(v -> {
+              List<Candidate> candidates = candidateFutures.stream()
+                  .map(CompletableFuture::join)
+                  .collect(Collectors.toList());
+
+              PruningConfig config = PruningConfig.builder()
+                  .maxDegree(graphDegree)
+                  .alpha(pruningAlpha)
+                  .build();
+
+              return RobustPruning.prune(candidates, config);
+            });
       } else {
-        prunedNeighbors = new ArrayList<>(neighbors);
+        prunedNeighborsFuture = completedFuture(new ArrayList<>(neighbors));
       }
 
-      NodeAdjacency updated = existing.toBuilder()
-          .clearNeighbors()
-          .addAllNeighbors(prunedNeighbors)
-          .setVersion(existing.getVersion() + 1)
-          .build();
+      return prunedNeighborsFuture.thenApply(prunedNeighbors -> {
+        NodeAdjacency updated = existing.toBuilder()
+            .clearNeighbors()
+            .addAllNeighbors(prunedNeighbors)
+            .setVersion(existing.getVersion() + 1)
+            .build();
 
-      return nodeAdjacencyStorage.storeNodeAdjacency(tr, neighborId, updated);
+        nodeAdjacencyStorage.storeNodeAdjacency(tr, neighborId, updated);
+        return null;
+      });
     });
   }
 
