@@ -394,27 +394,6 @@ class NodeAdjacencyStorageTest {
   }
 
   @Test
-  void testMergePrune() {
-    List<Long> current = Arrays.asList(1L, 2L, 3L);
-    List<Long> additions = Arrays.asList(4L, 5L, 2L); // 2L is duplicate
-
-    List<Long> merged = storage.mergePrune(current, additions, 5);
-
-    assertThat(merged).containsExactly(1L, 2L, 3L, 4L, 5L);
-  }
-
-  @Test
-  void testMergePruneExceedingMax() {
-    List<Long> current = Arrays.asList(1L, 2L, 3L);
-    List<Long> additions = Arrays.asList(4L, 5L, 6L);
-
-    List<Long> merged = storage.mergePrune(current, additions, 4);
-
-    assertThat(merged).hasSize(4);
-    assertThat(merged).containsExactly(1L, 2L, 3L, 4L);
-  }
-
-  @Test
   void testStoreAndLoadEntryList() {
     EntryList entryList = EntryList.newBuilder()
         .addAllPrimaryEntries(Arrays.asList(1L, 2L, 3L))

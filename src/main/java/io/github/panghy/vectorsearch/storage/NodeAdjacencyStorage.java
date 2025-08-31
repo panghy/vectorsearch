@@ -461,30 +461,6 @@ public class NodeAdjacencyStorage {
   }
 
   /**
-   * Merges new neighbors with existing ones and prunes to degree limit.
-   * Simple version without distance information.
-   *
-   * @param current   current neighbors
-   * @param additions new neighbors to add (without distances)
-   * @param maxDegree maximum total neighbors
-   * @return merged and pruned list
-   */
-  public List<Long> mergePrune(List<Long> current, List<Long> additions, int maxDegree) {
-    Set<Long> merged = new LinkedHashSet<>(current);
-    merged.addAll(additions);
-
-    List<Long> result = new ArrayList<>(merged);
-    Collections.sort(result);
-
-    if (result.size() > maxDegree) {
-      // Simple strategy: keep first maxDegree after sorting
-      return result.subList(0, maxDegree);
-    }
-
-    return result;
-  }
-
-  /**
    * Merges new neighbors with existing ones and prunes to degree limit using robust pruning.
    *
    * @param current   current neighbors
