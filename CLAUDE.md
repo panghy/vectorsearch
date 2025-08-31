@@ -138,7 +138,25 @@ The `.github/workflows/publish.yml` workflow automatically:
 - Caffeine cache handles its own thread safety
 - FoundationDB transactions provide isolation between concurrent operations
 
+### Graph Algorithms
+- **Robust Pruning (DiskANN-style)**
+  - Maintains diversity in neighbor lists through dominance testing
+  - Alpha parameter controls diversity vs proximity trade-off (typical: 0.95-1.2)
+  - Lower alpha = more diverse neighbors, higher alpha = closer neighbors
+  - Algorithm pattern:
+    ```java
+    // Use RobustPruning for diverse neighbor selection
+    List<Candidate> candidates = /* sorted by distance */;
+    PruningConfig config = PruningConfig.builder()
+        .maxDegree(64)
+        .alpha(1.2)
+        .build();
+    List<Long> pruned = RobustPruning.prune(candidates, config);
+    ```
+  - Integrated into NodeAdjacencyStorage for automatic neighbor management
+
 ## Testing Patterns
 - Use `db.runAsync()` for all database operations in tests
 - Chain futures properly to ensure operations complete in order
 - Always verify test coverage meets requirements before committing
+- Integration tests should use unique test collections to avoid conflicts
