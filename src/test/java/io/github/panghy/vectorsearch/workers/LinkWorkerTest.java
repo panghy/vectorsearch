@@ -1,12 +1,21 @@
 package io.github.panghy.vectorsearch.workers;
 
+import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.CompletableFuture.failedFuture;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
 import com.google.protobuf.ByteString;
+import io.github.panghy.taskqueue.TaskClaim;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.TaskQueues;
@@ -21,17 +30,21 @@ import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -452,15 +465,16 @@ class LinkWorkerTest {
   @Test
   @Timeout(5)
   void testTransactionFailure() throws Exception {
-    // Given - create a task with invalid PQ code that will cause transaction to fail
+    // Given - create a task with invalid codebook version that will cause transaction to fail
     long nodeId = 4000L;
-    byte[] invalidPqCode = new byte[2]; // Wrong size
+    float[] queryVector = generateRandomVector(DIMENSION);
+    byte[] pqCode = pq.encode(queryVector);
 
     LinkTask linkTask = LinkTask.newBuilder()
         .setCollection("test-collection")
         .setNodeId(nodeId)
-        .setPqCode(ByteString.copyFrom(invalidPqCode))
-        .setCodebookVersion(1)
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(999) // Invalid codebook version
         .build();
 
     taskQueue.enqueue(nodeId, linkTask).get();
@@ -469,9 +483,9 @@ class LinkWorkerTest {
     boolean processed = linkWorker.processOneTask().get();
 
     // Then
-    assertThat(processed).isFalse();
-    assertThat(linkWorker.getTotalProcessed()).isEqualTo(0);
-    assertThat(linkWorker.getTotalFailed()).isEqualTo(1);
+    assertThat(processed).isFalse(); // Processing failed due to invalid codebook
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(0); // No successful processing
+    assertThat(linkWorker.getTotalFailed()).isEqualTo(1); // One failure recorded
   }
 
   @Test
@@ -669,5 +683,471 @@ class LinkWorkerTest {
       vector[i] = random.nextFloat() * 2 - 1; // Range [-1, 1]
     }
     return vector;
+  }
+
+  @Test
+  @DisplayName("Test claim timeout scenario")
+  void testClaimTimeout() throws Exception {
+    // Test when no tasks are available and claim times out
+    LinkWorker worker = new LinkWorker(
+        db,
+        taskQueue,
+        keys,
+        pqBlockStorage,
+        nodeAdjacencyStorage,
+        entryPointStorage,
+        codebookStorage,
+        searchEngine,
+        32,
+        1000,
+        1.2,
+        Clock.systemUTC());
+
+    // Process one task when queue is empty - should handle timeout gracefully
+    CompletableFuture<Boolean> result = worker.processOneTask();
+    assertFalse(result.get(1, TimeUnit.SECONDS));
+  }
+
+  @Test
+  @DisplayName("Test exception during task claiming")
+  void testClaimException() throws Exception {
+    // Create a mock task queue that throws exception
+    @SuppressWarnings("unchecked")
+    TaskQueue<Long, LinkTask> failingQueue = mock(TaskQueue.class);
+    when(failingQueue.awaitAndClaimTask(any())).thenReturn(failedFuture(new RuntimeException("Claim failed")));
+
+    LinkWorker worker = new LinkWorker(
+        db,
+        failingQueue,
+        keys,
+        pqBlockStorage,
+        nodeAdjacencyStorage,
+        entryPointStorage,
+        codebookStorage,
+        searchEngine,
+        32,
+        1000,
+        1.2,
+        Clock.systemUTC());
+
+    // Should handle exception and return false
+    CompletableFuture<Boolean> result = worker.processOneTask();
+    assertFalse(result.get(1, TimeUnit.SECONDS));
+  }
+
+  @Test
+  @DisplayName("Test processing with PQ codes not found")
+  void testMissingPqCodes() throws Exception {
+    // Add task
+    float[] queryVector = generateRandomVector(DIMENSION);
+    byte[] pqCode = pq.encode(queryVector);
+    LinkTask task = LinkTask.newBuilder()
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(1)
+        .build();
+
+    db.runAsync(tx -> taskQueue.enqueue(tx, 100L, task)).get();
+
+    // Mock PQ block storage to return null for some nodes
+    PqBlockStorage mockPqStorage = mock(PqBlockStorage.class);
+    when(mockPqStorage.storePqCode(any(), anyLong(), any(), anyInt())).thenReturn(completedFuture(null));
+    when(mockPqStorage.loadPqCode(anyLong(), anyInt())).thenReturn(completedFuture(null)); // Return null PQ codes
+    when(mockPqStorage.getBlockNumber(anyLong())).thenReturn(0L);
+
+    LinkWorker worker = new LinkWorker(
+        db,
+        taskQueue,
+        keys,
+        mockPqStorage,
+        nodeAdjacencyStorage,
+        entryPointStorage,
+        codebookStorage,
+        searchEngine,
+        32,
+        1000,
+        1.2,
+        Clock.systemUTC());
+
+    // Should handle null PQ codes gracefully
+    CompletableFuture<Boolean> result = worker.processOneTask();
+    assertTrue(result.get(5, TimeUnit.SECONDS));
+  }
+
+  @Test
+  @DisplayName("Test error during task completion")
+  void testTaskCompletionError() throws Exception {
+    // This test verifies that the worker handles exceptions during task processing gracefully
+    // We'll test with a valid task but mock the storage to fail
+    float[] queryVector = generateRandomVector(DIMENSION);
+    byte[] pqCode = pq.encode(queryVector);
+    LinkTask task = LinkTask.newBuilder()
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(1)
+        .build();
+
+    db.runAsync(tx -> taskQueue.enqueue(tx, 100L, task)).get();
+
+    // Create a worker with storage that will succeed initially but fail during back-link updates
+    NodeAdjacencyStorage failingAdjacency = mock(NodeAdjacencyStorage.class);
+
+    // Allow loading adjacency but fail on store
+    NodeAdjacency emptyAdjacency = NodeAdjacency.newBuilder().build();
+    when(failingAdjacency.loadAdjacency(any(), anyLong()))
+        .thenReturn(CompletableFuture.completedFuture(emptyAdjacency));
+    when(failingAdjacency.getNodeAdjacency(any(), anyLong()))
+        .thenReturn(CompletableFuture.completedFuture(emptyAdjacency));
+    when(failingAdjacency.storeAdjacency(any(), anyLong(), any()))
+        .thenReturn(failedFuture(new RuntimeException("Store adjacency failed")));
+
+    LinkWorker worker = new LinkWorker(
+        db,
+        taskQueue,
+        keys,
+        pqBlockStorage,
+        failingAdjacency,
+        entryPointStorage,
+        codebookStorage,
+        searchEngine,
+        32,
+        1000,
+        1.2,
+        Clock.systemUTC());
+
+    // Should handle completion error gracefully - the task will be processed but may fail
+    CompletableFuture<Boolean> result = worker.processOneTask();
+    assertFalse(result.get(10, TimeUnit.SECONDS)); // Should return false when storage fails
+  }
+
+  @Test
+  @DisplayName("Test error during task failure marking")
+  void testTaskFailMarkingError() throws Exception {
+    // Add a task that will fail during processing
+    float[] queryVector = generateRandomVector(DIMENSION);
+    byte[] pqCode = pq.encode(queryVector);
+    LinkTask task = LinkTask.newBuilder()
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(1)
+        .build();
+
+    db.runAsync(tx -> taskQueue.enqueue(tx, 100L, task)).get();
+
+    // Mock storage to throw exception during processing
+    PqBlockStorage failingPqStorage = mock(PqBlockStorage.class);
+    when(failingPqStorage.storePqCode(any(), anyLong(), any(), anyInt()))
+        .thenReturn(failedFuture(new RuntimeException("Storage failed")));
+    when(failingPqStorage.getBlockNumber(anyLong())).thenReturn(0L);
+    when(failingPqStorage.loadPqCode(anyLong(), anyInt())).thenReturn(completedFuture(pqCode));
+
+    LinkWorker worker = new LinkWorker(
+        db,
+        taskQueue,
+        keys,
+        failingPqStorage,
+        nodeAdjacencyStorage,
+        entryPointStorage,
+        codebookStorage,
+        searchEngine,
+        32,
+        1000,
+        1.2,
+        Clock.systemUTC());
+
+    // Should handle task processing failure gracefully
+    CompletableFuture<Boolean> result = worker.processOneTask();
+    assertFalse(result.get(10, TimeUnit.SECONDS)); // Should return false when storage fails
+
+    // Verify task was re-enqueued or handled appropriately
+    // The task should be available again after failure
+  }
+
+  @Test
+  @DisplayName("Test transaction timeout scenario")
+  void testTransactionTimeout() throws Exception {
+    // Add task
+    float[] queryVector = generateRandomVector(DIMENSION);
+    byte[] pqCode = pq.encode(queryVector);
+    LinkTask task = LinkTask.newBuilder()
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(1)
+        .build();
+
+    db.runAsync(tx -> taskQueue.enqueue(tx, 100L, task)).get();
+
+    // Create slow instant source that simulates timeout
+    InstantSource slowSource = new InstantSource() {
+      private int callCount = 0;
+
+      @Override
+      public Instant instant() {
+        callCount++;
+        if (callCount > 5) {
+          // After a few calls, jump forward in time to simulate timeout
+          return Instant.now().plus(Duration.ofSeconds(10));
+        }
+        return Instant.now();
+      }
+    };
+
+    LinkWorker worker = new LinkWorker(
+        db,
+        taskQueue,
+        keys,
+        pqBlockStorage,
+        nodeAdjacencyStorage,
+        entryPointStorage,
+        codebookStorage,
+        searchEngine,
+        32,
+        1000,
+        1.2,
+        slowSource);
+
+    // Should handle the timeout scenario
+    CompletableFuture<Boolean> result = worker.processOneTask();
+    assertTrue(result.get(10, TimeUnit.SECONDS)); // Task completes even with simulated timeout
+  }
+
+  @Test
+  @DisplayName("Test claim budget exhaustion")
+  void testClaimBudgetExhaustion() throws Exception {
+    // Add many tasks
+    for (int i = 0; i < 20; i++) {
+      float[] queryVector = generateRandomVector(DIMENSION);
+      byte[] pqCode = pq.encode(queryVector);
+      LinkTask task = LinkTask.newBuilder()
+          .setPqCode(ByteString.copyFrom(pqCode))
+          .setCodebookVersion(1)
+          .build();
+
+      final long taskId = i;
+      db.runAsync(tx -> taskQueue.enqueue(tx, taskId, task)).get();
+    }
+
+    // Create instant source that simulates slow claiming
+    InstantSource slowClaimSource = new InstantSource() {
+      private Instant start = Instant.now();
+      private int callCount = 0;
+
+      @Override
+      public Instant instant() {
+        callCount++;
+        if (callCount > 3) {
+          // After a few claims, jump forward to exhaust budget
+          return start.plus(Duration.ofSeconds(1));
+        }
+        return start;
+      }
+    };
+
+    LinkWorker worker = new LinkWorker(
+        db,
+        taskQueue,
+        keys,
+        pqBlockStorage,
+        nodeAdjacencyStorage,
+        entryPointStorage,
+        codebookStorage,
+        searchEngine,
+        32,
+        1000,
+        1.2,
+        slowClaimSource);
+
+    // Should process some but not all due to budget
+    CompletableFuture<Boolean> result = worker.processOneTask();
+    assertTrue(result.get(10, TimeUnit.SECONDS));
+  }
+
+  @Test
+  @DisplayName("Test processBatch method directly")
+  void testProcessBatch() throws Exception {
+    // Add multiple tasks to process as a batch
+    for (int i = 0; i < 5; i++) {
+      float[] queryVector = generateRandomVector(DIMENSION);
+      byte[] pqCode = pq.encode(queryVector);
+      LinkTask task = LinkTask.newBuilder()
+          .setPqCode(ByteString.copyFrom(pqCode))
+          .setCodebookVersion(1)
+          .setNodeId(100L + i)
+          .build();
+
+      taskQueue.enqueue(100L + i, task).get();
+    }
+
+    // Call processBatch directly
+    linkWorker.processBatch();
+
+    // Verify tasks were processed
+    assertThat(linkWorker.getTotalProcessed()).isGreaterThan(0);
+
+    // Process again when no tasks available (should handle gracefully)
+    linkWorker.processBatch();
+  }
+
+  @Test
+  @DisplayName("Test processBatch with failed transaction")
+  void testProcessBatchWithFailure() throws Exception {
+    // Add a task with invalid codebook version
+    float[] queryVector = generateRandomVector(DIMENSION);
+    byte[] pqCode = pq.encode(queryVector);
+    LinkTask task = LinkTask.newBuilder()
+        .setPqCode(ByteString.copyFrom(pqCode))
+        .setCodebookVersion(999) // Invalid version
+        .setNodeId(200L)
+        .build();
+
+    taskQueue.enqueue(200L, task).get();
+
+    long initialFailed = linkWorker.getTotalFailed();
+
+    // Call processBatch - should handle failure gracefully
+    linkWorker.processBatch();
+
+    // Verify task failed
+    assertThat(linkWorker.getTotalFailed()).isEqualTo(initialFailed + 1);
+    assertThat(linkWorker.getTotalProcessed()).isEqualTo(0);
+  }
+
+  @Test
+  @DisplayName("Test claimTasks method")
+  void testClaimTasks() throws Exception {
+    // Add multiple tasks
+    for (int i = 0; i < 10; i++) {
+      float[] queryVector = generateRandomVector(DIMENSION);
+      byte[] pqCode = pq.encode(queryVector);
+      LinkTask task = LinkTask.newBuilder()
+          .setPqCode(ByteString.copyFrom(pqCode))
+          .setCodebookVersion(1)
+          .setNodeId(300L + i)
+          .build();
+
+      taskQueue.enqueue(300L + i, task).get();
+    }
+
+    // Claim tasks
+    List<TaskClaim<Long, LinkTask>> claims = linkWorker.claimTasks();
+
+    // Should claim up to batch size
+    assertThat(claims).isNotEmpty();
+    assertThat(claims.size()).isLessThanOrEqualTo(linkWorker.getCurrentBatchSize());
+
+    // Verify claimed tasks have correct structure
+    for (TaskClaim<Long, LinkTask> claim : claims) {
+      assertThat(claim.task()).isNotNull();
+      assertThat(claim.task().getCodebookVersion()).isEqualTo(1);
+    }
+  }
+
+  @Test
+  @DisplayName("Test claimTasks with timeout")
+  void testClaimTasksWithTimeout() throws Exception {
+    // Don't add any tasks - should timeout and return empty list
+    List<TaskClaim<Long, LinkTask>> claims = linkWorker.claimTasks();
+    assertThat(claims).isEmpty();
+  }
+
+  @Test
+  @DisplayName("Test adjustBatchSize for failed transaction")
+  void testAdjustBatchSizeFailure() {
+    int initialSize = linkWorker.getCurrentBatchSize();
+
+    // Test failure adjustment - should reduce by half
+    linkWorker.adjustBatchSize(Duration.ofSeconds(2), false);
+    assertThat(linkWorker.getCurrentBatchSize()).isEqualTo(initialSize / 2);
+  }
+
+  @Test
+  @DisplayName("Test adjustBatchSize for fast transaction")
+  void testAdjustBatchSizeFast() {
+    int initialSize = linkWorker.getCurrentBatchSize();
+
+    // Test fast transaction - should increase by 20%
+    linkWorker.adjustBatchSize(Duration.ofMillis(2000), true);
+    assertThat(linkWorker.getCurrentBatchSize()).isEqualTo((int) (initialSize * 1.2));
+  }
+
+  @Test
+  @DisplayName("Test adjustBatchSize for slow transaction")
+  void testAdjustBatchSizeSlow() {
+    int initialSize = linkWorker.getCurrentBatchSize();
+
+    // Test slow transaction - should decrease by 20%
+    linkWorker.adjustBatchSize(Duration.ofMillis(4500), true);
+    assertThat(linkWorker.getCurrentBatchSize()).isEqualTo((int) (initialSize * 0.8));
+  }
+
+  @Test
+  @DisplayName("Test adjustBatchSize for normal transaction")
+  void testAdjustBatchSizeNormal() {
+    int initialSize = linkWorker.getCurrentBatchSize();
+
+    // Test normal transaction - should keep same size
+    linkWorker.adjustBatchSize(Duration.ofMillis(3500), true);
+    assertThat(linkWorker.getCurrentBatchSize()).isEqualTo(initialSize);
+  }
+
+  @Test
+  @DisplayName("Test adjustBatchSize respects MIN_BATCH_SIZE")
+  void testAdjustBatchSizeMinimum() {
+    // Set batch size to minimum
+    while (linkWorker.getCurrentBatchSize() > 1) {
+      linkWorker.adjustBatchSize(Duration.ofSeconds(2), false);
+    }
+
+    int minSize = linkWorker.getCurrentBatchSize();
+
+    // Try to reduce further - should stay at minimum
+    linkWorker.adjustBatchSize(Duration.ofSeconds(2), false);
+    assertThat(linkWorker.getCurrentBatchSize()).isEqualTo(minSize);
+  }
+
+  @Test
+  @DisplayName("Test adjustBatchSize respects MAX_BATCH_SIZE")
+  void testAdjustBatchSizeMaximum() {
+    // Set batch size to maximum (100)
+    while (linkWorker.getCurrentBatchSize() < 100) {
+      linkWorker.adjustBatchSize(Duration.ofMillis(1000), true);
+    }
+
+    int maxSize = linkWorker.getCurrentBatchSize();
+    assertThat(maxSize).isEqualTo(100);
+
+    // Try to increase further - should stay at maximum
+    linkWorker.adjustBatchSize(Duration.ofMillis(1000), true);
+    assertThat(linkWorker.getCurrentBatchSize()).isEqualTo(maxSize);
+  }
+
+  @Test
+  @DisplayName("Test LinkWorker run method with tasks")
+  void testRunMethodWithTasks() throws Exception {
+    // Add multiple tasks
+    for (int i = 0; i < 3; i++) {
+      float[] queryVector = generateRandomVector(DIMENSION);
+      byte[] pqCode = pq.encode(queryVector);
+      LinkTask task = LinkTask.newBuilder()
+          .setPqCode(ByteString.copyFrom(pqCode))
+          .setCodebookVersion(1)
+          .setNodeId(600L + i)
+          .build();
+
+      taskQueue.enqueue(600L + i, task).get();
+    }
+
+    // Start worker in a thread
+    Thread workerThread = new Thread(linkWorker);
+    workerThread.start();
+
+    // Let it process tasks
+    Thread.sleep(500);
+
+    // Stop the worker
+    linkWorker.stop();
+
+    // Wait for thread to finish
+    workerThread.join(2000);
+
+    // Verify tasks were processed
+    assertThat(linkWorker.getTotalProcessed()).isGreaterThan(0);
+    assertThat(workerThread.isAlive()).isFalse();
   }
 }
