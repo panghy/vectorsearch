@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch.workers;
 
+import static java.util.Objects.requireNonNullElseGet;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
@@ -128,7 +129,7 @@ public class LinkWorker implements Runnable {
   /**
    * Creates a new link worker.
    *
-   * @param database              FDB database instance
+   * @param database             FDB database instance
    * @param taskQueue            task queue for link operations
    * @param keys                 vector index keys helper
    * @param pqBlockStorage       storage for PQ blocks
@@ -136,10 +137,10 @@ public class LinkWorker implements Runnable {
    * @param entryPointStorage    storage for entry points
    * @param codebookStorage      storage for codebooks
    * @param searchEngine         beam search engine for neighbor discovery
-   * @param graphDegree         maximum neighbors per node
-   * @param maxSearchVisits     maximum nodes to visit during search
-   * @param pruningAlpha        alpha parameter for robust pruning
-   * @param instantSource       time source
+   * @param graphDegree          maximum neighbors per node
+   * @param maxSearchVisits      maximum nodes to visit during search
+   * @param pruningAlpha         alpha parameter for robust pruning
+   * @param instantSource        time source
    */
   public LinkWorker(
       Database database,
@@ -181,13 +182,6 @@ public class LinkWorker implements Runnable {
         break;
       } catch (Exception e) {
         LOGGER.log(Level.SEVERE, "Error processing batch", e);
-        // Continue processing after error
-        try {
-          Thread.sleep(1000); // Brief pause after error
-        } catch (InterruptedException ie) {
-          Thread.currentThread().interrupt();
-          break;
-        }
       }
     }
 
@@ -198,7 +192,7 @@ public class LinkWorker implements Runnable {
   /**
    * Processes a batch of link tasks.
    */
-  private void processBatch() throws InterruptedException {
+  void processBatch() throws InterruptedException {
     Span span = TRACER.spanBuilder("LinkWorker.processBatch")
         .setSpanKind(SpanKind.INTERNAL)
         .startSpan();
@@ -215,22 +209,20 @@ public class LinkWorker implements Runnable {
       BATCH_SIZE.record(claims.size());
       span.setAttribute("batch.size", claims.size());
 
-      // Phase 2: Process tasks in a single transaction
+      // Phase 2: Process tasks using common logic
       Instant startTime = instantSource.instant();
-      boolean success = processTasksInTransaction(claims);
+      boolean success = processClaimedTasks(claims);
       Duration transactionDuration = Duration.between(startTime, instantSource.instant());
 
       TRANSACTION_DURATION.record(transactionDuration.toMillis());
       span.setAttribute("transaction.duration_ms", transactionDuration.toMillis());
 
-      // Phase 3: Complete or fail tasks based on result
+      // Phase 3: Update metrics and adjust batch size
       if (success) {
-        completeTasks(claims);
         totalProcessed.addAndGet(claims.size());
         adjustBatchSize(transactionDuration, true);
         span.setStatus(StatusCode.OK);
       } else {
-        failTasks(claims);
         totalFailed.addAndGet(claims.size());
         adjustBatchSize(transactionDuration, false);
         span.setStatus(StatusCode.ERROR, "Transaction failed");
@@ -244,7 +236,7 @@ public class LinkWorker implements Runnable {
   /**
    * Claims multiple tasks up to the current batch size.
    */
-  private List<TaskClaim<Long, LinkTask>> claimTasks() throws InterruptedException {
+  List<TaskClaim<Long, LinkTask>> claimTasks() {
     List<TaskClaim<Long, LinkTask>> claims = new ArrayList<>();
     Instant claimDeadline = instantSource.instant().plus(CLAIM_BUDGET);
     int targetSize = currentBatchSize.get();
@@ -275,6 +267,22 @@ public class LinkWorker implements Runnable {
 
     LOGGER.fine("Claimed " + claims.size() + " tasks");
     return claims;
+  }
+
+  /**
+   * Common method to process claimed tasks.
+   * Handles the transaction, completion/failure, and returns the success status.
+   */
+  private boolean processClaimedTasks(List<TaskClaim<Long, LinkTask>> claims) {
+    boolean success = processTasksInTransaction(claims);
+
+    if (success) {
+      completeTasks(claims);
+    } else {
+      failTasks(claims);
+    }
+
+    return success;
   }
 
   /**
@@ -337,35 +345,45 @@ public class LinkWorker implements Runnable {
     final int codebookVersion =
         claims.isEmpty() ? 1 : (int) claims.get(0).task().getCodebookVersion();
 
-    // Step 1: Persist PQ codes for all nodes in this block
-    List<CompletableFuture<Void>> persistFutures = new ArrayList<>();
-    for (TaskClaim<Long, LinkTask> claim : claims) {
-      LinkTask task = claim.task();
-      persistFutures.add(pqBlockStorage.storePqCode(
-          tr, claim.taskKey(), task.getPqCode().toByteArray(), (int) task.getCodebookVersion()));
-    }
-
-    return allOf(persistFutures.toArray(CompletableFuture[]::new)).thenCompose(v -> {
-      // Step 2: Discover neighbors for all nodes
-      List<CompletableFuture<List<Long>>> neighborFutures = new ArrayList<>();
-
-      for (TaskClaim<Long, LinkTask> claim : claims) {
-        neighborFutures.add(discoverNeighbors(tr, claim.taskKey(), claim.task()));
+    // Validate that the codebook version exists
+    return codebookStorage.loadCodebooks(codebookVersion).thenCompose(codebooks -> {
+      if (codebooks == null) {
+        // Codebook version doesn't exist, fail the transaction
+        return CompletableFuture.failedFuture(
+            new IllegalArgumentException("Codebook version " + codebookVersion + " does not exist"));
       }
 
-      return allOf(neighborFutures.toArray(CompletableFuture[]::new)).thenCompose($ -> {
-        // Step 3: Update adjacency lists with back-links
-        List<CompletableFuture<Void>> updateFutures = new ArrayList<>();
+      // Step 1: Persist PQ codes for all nodes in this block
+      List<CompletableFuture<Void>> persistFutures = new ArrayList<>();
+      for (TaskClaim<Long, LinkTask> claim : claims) {
+        LinkTask task = claim.task();
+        persistFutures.add(pqBlockStorage.storePqCode(
+            tr, claim.taskKey(), task.getPqCode().toByteArray(), (int) task.getCodebookVersion()));
+      }
 
-        for (int i = 0; i < claims.size(); i++) {
-          TaskClaim<Long, LinkTask> claim = claims.get(i);
-          List<Long> neighbors = neighborFutures.get(i).join();
+      return allOf(persistFutures.toArray(CompletableFuture[]::new)).thenCompose(v -> {
+        // Step 2: Discover neighbors for all nodes
+        List<CompletableFuture<List<Long>>> neighborFutures = new ArrayList<>();
 
-          updateFutures.add(updateAdjacencyWithBacklinks(tr, claim.taskKey(), neighbors, codebookVersion));
+        for (TaskClaim<Long, LinkTask> claim : claims) {
+          neighborFutures.add(discoverNeighbors(tr, claim.taskKey(), claim.task()));
         }
-        return allOf(updateFutures.toArray(CompletableFuture[]::new));
+
+        return allOf(neighborFutures.toArray(CompletableFuture[]::new)).thenCompose($ -> {
+          // Step 3: Update adjacency lists with back-links
+          List<CompletableFuture<Void>> updateFutures = new ArrayList<>();
+
+          for (int i = 0; i < claims.size(); i++) {
+            TaskClaim<Long, LinkTask> claim = claims.get(i);
+            List<Long> neighbors = neighborFutures.get(i).join();
+
+            updateFutures.add(
+                updateAdjacencyWithBacklinks(tr, claim.taskKey(), neighbors, codebookVersion));
+          }
+          return allOf(updateFutures.toArray(CompletableFuture[]::new));
+        });
       });
-    });
+    }); // Close codebook validation block
   }
 
   /**
@@ -502,15 +520,11 @@ public class LinkWorker implements Runnable {
   private CompletableFuture<Void> addBackLink(Transaction tr, long neighborId, long nodeId, int codebookVersion) {
     return nodeAdjacencyStorage.getNodeAdjacency(tr, neighborId).thenCompose(existingNode -> {
       final NodeAdjacency existing;
-      if (existingNode == null) {
-        // Neighbor doesn't exist yet, create empty adjacency
-        existing = NodeAdjacency.newBuilder()
-            .setNodeId(neighborId)
-            .setState(NodeAdjacency.State.ACTIVE)
-            .build();
-      } else {
-        existing = existingNode;
-      }
+      // Neighbor doesn't exist yet, create empty adjacency
+      existing = requireNonNullElseGet(existingNode, () -> NodeAdjacency.newBuilder()
+          .setNodeId(neighborId)
+          .setState(NodeAdjacency.State.ACTIVE)
+          .build());
 
       Set<Long> neighbors = new HashSet<>(existing.getNeighborsList());
       if (neighbors.contains(nodeId)) {
@@ -607,7 +621,7 @@ public class LinkWorker implements Runnable {
   /**
    * Adjusts batch size based on transaction performance.
    */
-  private void adjustBatchSize(Duration transactionDuration, boolean success) {
+  void adjustBatchSize(Duration transactionDuration, boolean success) {
     int currentSize = currentBatchSize.get();
     int newSize;
 
@@ -675,18 +689,16 @@ public class LinkWorker implements Runnable {
       TASKS_CLAIMED.add(1);
       List<TaskClaim<Long, LinkTask>> claims = List.of(claim);
 
-      // Process the single task
-      boolean success = processTasksInTransaction(claims);
+      // Use common processing logic
+      boolean success = processClaimedTasks(claims);
 
       if (success) {
-        completeTasks(claims);
         totalProcessed.incrementAndGet();
-        return completedFuture(true);
       } else {
-        failTasks(claims);
         totalFailed.incrementAndGet();
-        return completedFuture(false);
       }
+
+      return completedFuture(success);
     } catch (TimeoutException e) {
       // No task available within timeout
       return completedFuture(false);
@@ -704,17 +716,18 @@ public class LinkWorker implements Runnable {
    * @return CompletableFuture with the number of tasks processed
    */
   public CompletableFuture<Integer> processAllAvailableTasks(int maxTasks) {
-    return processTasksRecursively(0, maxTasks);
+    return processTasksRecursively(new AtomicInteger(0), maxTasks);
   }
 
   /**
    * Helper method for iterative task processing to avoid stack overflow.
    */
-  private CompletableFuture<Integer> processTasksRecursively(int processedCount, int maxTasks) {
+  private CompletableFuture<Integer> processTasksRecursively(AtomicInteger processedCount, int maxTasks) {
     CompletableFuture<Integer> result = new CompletableFuture<>();
 
     class TaskLoop {
-      void next(int count) {
+      void next() {
+        int count = processedCount.get();
         if (maxTasks > 0 && count >= maxTasks) {
           result.complete(count);
           return;
@@ -723,9 +736,10 @@ public class LinkWorker implements Runnable {
             .thenAccept(processed -> {
               if (!processed) {
                 // No more tasks available
-                result.complete(count);
+                result.complete(processedCount.get());
               } else {
-                next(count + 1);
+                processedCount.incrementAndGet();
+                next();
               }
             })
             .exceptionally(ex -> {
@@ -734,7 +748,7 @@ public class LinkWorker implements Runnable {
             });
       }
     }
-    new TaskLoop().next(processedCount);
+    new TaskLoop().next();
     return result;
   }
 }
