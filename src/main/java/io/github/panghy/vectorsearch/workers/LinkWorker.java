@@ -7,9 +7,13 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
 import io.github.panghy.taskqueue.TaskClaim;
 import io.github.panghy.taskqueue.TaskQueue;
+import io.github.panghy.vectorsearch.graph.RobustPruning;
+import io.github.panghy.vectorsearch.graph.RobustPruning.Candidate;
+import io.github.panghy.vectorsearch.graph.RobustPruning.PruningConfig;
 import io.github.panghy.vectorsearch.proto.LinkTask;
 import io.github.panghy.vectorsearch.proto.NodeAdjacency;
 import io.github.panghy.vectorsearch.search.BeamSearchEngine;
+import io.github.panghy.vectorsearch.search.SearchResult;
 import io.github.panghy.vectorsearch.storage.CodebookStorage;
 import io.github.panghy.vectorsearch.storage.EntryPointStorage;
 import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
@@ -363,7 +367,6 @@ public class LinkWorker implements Runnable {
    * Discovers neighbors for a node using beam search.
    */
   private CompletableFuture<List<Long>> discoverNeighbors(Transaction tr, long nodeId, LinkTask task) {
-
     // Load entry points
     return entryPointStorage.getEntryPoints(tr).thenCompose(entryPoints -> {
       if (entryPoints.isEmpty()) {
@@ -372,9 +375,6 @@ public class LinkWorker implements Runnable {
       }
 
       // Use beam search to find neighbors
-      // Note: This is a simplified version. The actual implementation
-      // would need to reconstruct the vector from PQ codes or use
-      // the vector_prefix if available
       return searchEngine
           .searchForNeighbors(
               tr,
@@ -384,10 +384,23 @@ public class LinkWorker implements Runnable {
               entryPoints,
               graphDegree * 2, // Search for more candidates
               maxSearchVisits)
-          .thenApply(candidates -> {
-            // Apply robust pruning to select final neighbors
-            // Note: candidates is already a List<Long> from searchForNeighbors
-            return nodeAdjacencyStorage.robustPruneSimple(candidates, graphDegree, pruningAlpha);
+          .thenApply(searchResults -> {
+            // Convert SearchResults to RobustPruning.Candidates
+            List<Candidate> candidates = new ArrayList<>();
+            for (SearchResult result : searchResults) {
+              candidates.add(Candidate.builder()
+                  .nodeId(result.getNodeId())
+                  .distanceToQuery(result.getDistance())
+                  .build());
+            }
+
+            // Apply proper robust pruning with distances
+            PruningConfig config = PruningConfig.builder()
+                .maxDegree(graphDegree)
+                .alpha(pruningAlpha)
+                .build();
+
+            return RobustPruning.prune(candidates, config);
           });
     });
   }
@@ -408,8 +421,12 @@ public class LinkWorker implements Runnable {
       // Prune to degree limit if needed
       final List<Long> prunedNeighbors;
       if (currentNeighbors.size() > graphDegree) {
-        prunedNeighbors = nodeAdjacencyStorage.robustPruneSimple(
-            new ArrayList<>(currentNeighbors), graphDegree, pruningAlpha);
+        // For existing neighbors without distances, fall back to simple pruning
+        // This could be improved by computing distances for all neighbors
+        prunedNeighbors = new ArrayList<>(currentNeighbors);
+        if (prunedNeighbors.size() > graphDegree) {
+          prunedNeighbors.subList(graphDegree, prunedNeighbors.size()).clear();
+        }
       } else {
         prunedNeighbors = new ArrayList<>(currentNeighbors);
       }
@@ -459,8 +476,12 @@ public class LinkWorker implements Runnable {
       // Prune if over degree limit
       final List<Long> prunedNeighbors;
       if (neighbors.size() > graphDegree) {
-        prunedNeighbors =
-            nodeAdjacencyStorage.robustPruneSimple(new ArrayList<>(neighbors), graphDegree, pruningAlpha);
+        // For back-links without distances, use simple pruning
+        // This could be improved by computing distances for all neighbors
+        prunedNeighbors = new ArrayList<>(neighbors);
+        if (prunedNeighbors.size() > graphDegree) {
+          prunedNeighbors.subList(graphDegree, prunedNeighbors.size()).clear();
+        }
       } else {
         prunedNeighbors = new ArrayList<>(neighbors);
       }
@@ -619,17 +640,19 @@ public class LinkWorker implements Runnable {
           result.complete(count);
           return;
         }
-        processOneTask().thenAccept(processed -> {
-          if (!processed) {
-            // No more tasks available
-            result.complete(count);
-          } else {
-            next(count + 1);
-          }
-        }).exceptionally(ex -> {
-          result.completeExceptionally(ex);
-          return null;
-        });
+        processOneTask()
+            .thenAccept(processed -> {
+              if (!processed) {
+                // No more tasks available
+                result.complete(count);
+              } else {
+                next(count + 1);
+              }
+            })
+            .exceptionally(ex -> {
+              result.completeExceptionally(ex);
+              return null;
+            });
       }
     }
     new TaskLoop().next(processedCount);

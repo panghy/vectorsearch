@@ -16,6 +16,7 @@ import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 /**
  * Implements beam search algorithm for approximate nearest neighbor search
@@ -109,9 +110,9 @@ public class BeamSearchEngine {
    * @param entryPoints     entry points to start search from
    * @param candidateSize   number of candidates to find
    * @param maxVisits       maximum nodes to visit
-   * @return future containing candidate neighbor node IDs
+   * @return future containing candidate neighbor results with distances
    */
-  public CompletableFuture<List<Long>> searchForNeighbors(
+  public CompletableFuture<List<SearchResult>> searchForNeighbors(
       Transaction tx,
       long nodeId,
       byte[] pqCode,
@@ -136,14 +137,10 @@ public class BeamSearchEngine {
               candidateSize,
               maxVisits)
           .thenApply(results -> {
-            // Convert search results to node IDs, excluding self
-            List<Long> neighbors = new ArrayList<>();
-            for (SearchResult result : results) {
-              if (result.getNodeId() != nodeId) {
-                neighbors.add(result.getNodeId());
-              }
-            }
-            return neighbors;
+            // Filter out self from results
+            return results.stream()
+                .filter(result -> result.getNodeId() != nodeId)
+                .collect(Collectors.toList());
           });
     });
   }

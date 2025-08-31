@@ -461,25 +461,6 @@ public class NodeAdjacencyStorage {
   }
 
   /**
-   * Simple robust prune for nodes without distance information.
-   * Falls back to keeping the first maxDegree nodes.
-   *
-   * @param candidateIds list of node IDs
-   * @param maxDegree    maximum neighbors to keep
-   * @param alpha        diversity vs proximity trade-off (unused without distances)
-   * @return pruned list of node IDs
-   */
-  public List<Long> robustPruneSimple(List<Long> candidateIds, int maxDegree, double alpha) {
-    if (candidateIds.size() <= maxDegree) {
-      return new ArrayList<>(candidateIds);
-    }
-    // Without distance information, just keep first maxDegree
-    // Note: alpha parameter is kept for API consistency with full robust pruning
-    // which would use it for diversity control if distance information was available
-    return candidateIds.subList(0, maxDegree);
-  }
-
-  /**
    * Merges new neighbors with existing ones and prunes to degree limit.
    * Simple version without distance information.
    *
