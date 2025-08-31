@@ -50,13 +50,13 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 
 ---
 
-## 📋 **Phase 3: Online Operations** (PLANNED)
+## 📋 **Phase 3: Online Operations** (IN PROGRESS)
 
 ### Upsert System
-- [ ] **Transactional Queue Integration** - Link worker task management
-- [ ] **Link Worker Implementation** - Neighbor discovery and graph linking
-- [ ] **PQ Code Persistence** - Block-level RMW operations
-- [ ] **Batch Processing** - Efficient handling of bulk upserts
+- [x] **Transactional Queue Integration** - Link worker task management (COMPLETED)
+- [x] **Link Worker Implementation** - Neighbor discovery and graph linking (COMPLETED)
+- [x] **PQ Code Persistence** - Block-level RMW operations (COMPLETED)
+- [x] **Batch Processing** - Efficient handling of bulk upserts with adaptive sizing (COMPLETED)
 
 ### Delete System  
 - [ ] **Unlink Worker** - Remove nodes and back-links
@@ -130,27 +130,26 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 - **Distance metrics**: L2, IP, COSINE supported
 
 ### **Test Coverage Standards**
-- **Line coverage**: 94% achieved (target: >90%)
-- **Branch coverage**: 87% achieved (target: >75%) 
+- **Line coverage**: 91% achieved (target: >90%)
+- **Branch coverage**: 82% achieved (target: >75%) 
 - **Integration**: Real FDB connections, no mocks
 - **Patterns**: Follow existing test structure
-- **Search components**: Comprehensive tests with mocking for BeamSearchEngine
 
 ---
 
-## 🎯 **Next Milestone: Online Operations**
+## 🎯 **Next Milestone: Delete Operations & Background Workers**
 
 **Priority Items:**
-1. **Transactional Queue Integration** - Link worker task management
-2. **Link Worker Implementation** - Neighbor discovery and graph linking
-3. **Unlink Worker** - Safe node removal with back-link cleanup
-4. **Batch Processing** - Efficient handling of bulk upserts
+1. **Unlink Worker** - Safe node removal with back-link cleanup
+2. **Orphan Detection** - Identify disconnected nodes after deletions
+3. **Graph Repair** - Reconnect components to maintain connectivity
+4. **Entry List Maintenance** - Keep search entry points fresh
 
 **Success Criteria:**
-- Upsert throughput >1000 vectors/second
 - Delete operations maintain graph connectivity
 - No orphaned nodes after deletions
-- Conflict-free concurrent operations
+- Automatic repair of disconnected components
+- Entry points remain optimal for search performance
 
 ---
 
