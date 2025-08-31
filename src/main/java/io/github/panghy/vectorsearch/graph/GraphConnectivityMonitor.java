@@ -548,11 +548,16 @@ public class GraphConnectivityMonitor {
       double avgReachability = 0;
       int maxReachability = Integer.MIN_VALUE;
 
-      for (int count : reachCounts) {
-        avgReachability = avgReachability + count;
-        maxReachability = Math.max(maxReachability, count);
+      if (reachCounts.isEmpty()) {
+        avgReachability = 0;
+        maxReachability = 0;
+      } else {
+        for (int count : reachCounts) {
+          avgReachability = avgReachability + count;
+          maxReachability = Math.max(maxReachability, count);
+        }
+        avgReachability = avgReachability / reachCounts.size();
       }
-      avgReachability = avgReachability / reachCounts.size();
 
       // Better estimation: use actual sample size for small graphs
       long estimatedTotal;
@@ -689,7 +694,7 @@ public class GraphConnectivityMonitor {
         throw new IllegalArgumentException("Invalid range: " + min + " > " + max);
       }
       if (min < 0) {
-        throw new IllegalArgumentException("Invalid range: " + min + " or " + max + " is negative");
+        throw new IllegalArgumentException("Invalid range: min (" + min + ") is negative");
       }
       this.min = min;
       this.max = max;
