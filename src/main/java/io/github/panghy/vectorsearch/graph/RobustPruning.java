@@ -275,13 +275,11 @@ public class RobustPruning {
    * <p>This ensures bidirectional consistency in the graph. When node A removes
    * node B from its neighbor list, node B should also remove A from its list.
    *
-   * @param nodeId The node whose neighbors changed
    * @param oldNeighbors Previous neighbor list
    * @param newNeighbors New neighbor list after pruning
    * @return List of nodes that need their back-links updated
    */
-  public static List<Long> getBackLinksToRemove(long nodeId, List<Long> oldNeighbors, List<Long> newNeighbors) {
-
+  public static List<Long> getBackLinksToRemove(List<Long> oldNeighbors, List<Long> newNeighbors) {
     Set<Long> oldSet = new HashSet<>(oldNeighbors);
     Set<Long> newSet = new HashSet<>(newNeighbors);
 
@@ -302,13 +300,11 @@ public class RobustPruning {
    * <p>When node A adds node B as a neighbor, node B should add A as well
    * (subject to its own degree constraints).
    *
-   * @param nodeId The node whose neighbors changed
    * @param oldNeighbors Previous neighbor list
    * @param newNeighbors New neighbor list after pruning
    * @return List of nodes that need new back-links added
    */
-  public static List<Long> getBackLinksToAdd(long nodeId, List<Long> oldNeighbors, List<Long> newNeighbors) {
-
+  public static List<Long> getBackLinksToAdd(List<Long> oldNeighbors, List<Long> newNeighbors) {
     Set<Long> oldSet = new HashSet<>(oldNeighbors);
     Set<Long> newSet = new HashSet<>(newNeighbors);
 
