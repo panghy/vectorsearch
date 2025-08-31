@@ -231,7 +231,7 @@ class RobustPruningTest {
     List<Long> oldNeighbors = Arrays.asList(1L, 2L, 3L, 4L);
     List<Long> newNeighbors = Arrays.asList(1L, 3L, 5L); // Removed 2 and 4, added 5
 
-    List<Long> toRemove = RobustPruning.getBackLinksToRemove(10L, oldNeighbors, newNeighbors);
+    List<Long> toRemove = RobustPruning.getBackLinksToRemove(oldNeighbors, newNeighbors);
 
     assertThat(toRemove).containsExactlyInAnyOrder(2L, 4L);
   }
@@ -241,7 +241,7 @@ class RobustPruningTest {
     List<Long> oldNeighbors = Arrays.asList(1L, 2L, 3L);
     List<Long> newNeighbors = Arrays.asList(1L, 3L, 4L, 5L); // Added 4 and 5
 
-    List<Long> toAdd = RobustPruning.getBackLinksToAdd(10L, oldNeighbors, newNeighbors);
+    List<Long> toAdd = RobustPruning.getBackLinksToAdd(oldNeighbors, newNeighbors);
 
     assertThat(toAdd).containsExactlyInAnyOrder(4L, 5L);
   }
@@ -250,8 +250,8 @@ class RobustPruningTest {
   void testGetBackLinksNoChanges() {
     List<Long> neighbors = Arrays.asList(1L, 2L, 3L);
 
-    List<Long> toRemove = RobustPruning.getBackLinksToRemove(10L, neighbors, neighbors);
-    List<Long> toAdd = RobustPruning.getBackLinksToAdd(10L, neighbors, neighbors);
+    List<Long> toRemove = RobustPruning.getBackLinksToRemove(neighbors, neighbors);
+    List<Long> toAdd = RobustPruning.getBackLinksToAdd(neighbors, neighbors);
 
     assertThat(toRemove).isEmpty();
     assertThat(toAdd).isEmpty();

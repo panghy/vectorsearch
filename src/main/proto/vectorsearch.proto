@@ -126,7 +126,7 @@ message PqCodesBlock {
   bytes codes = 3;
   
   // Codebook version these codes were encoded with
-  uint32 codebook_version = 4;
+  uint64 codebook_version = 4;
   
   // Block version for optimistic concurrency control
   uint32 block_version = 5;
@@ -195,7 +195,7 @@ message EntryList {
   
   // Metadata for entry point quality monitoring
   google.protobuf.Timestamp updated_at = 4;
-  uint32 version = 5;
+  uint64 version = 5;
   
   // Statistics from last refresh
   optional double avg_degree = 6;           // Average degree of primary entries
@@ -265,7 +265,7 @@ message VectorSketch {
   optional bytes sketch_params = 4;
   
   // Metadata
-  uint32 version = 5;
+  uint64 version = 5;
   google.protobuf.Timestamp created_at = 6;
   
   // Quality metrics (populated during sketch creation)
@@ -289,7 +289,7 @@ message LinkTask {
   bytes pq_code = 3;
   
   // Codebook version used for encoding
-  uint32 codebook_version = 4;
+  uint64 codebook_version = 4;
   
   // Task metadata
   google.protobuf.Timestamp enqueued_at = 5;
@@ -350,7 +350,7 @@ message CodebookRotationRequest {
   string collection = 1;
   
   // New codebook version to create
-  uint32 new_version = 2;
+  uint64 new_version = 2;
   
   // Training parameters
   uint32 training_samples = 3;     // Number of vectors to sample for training

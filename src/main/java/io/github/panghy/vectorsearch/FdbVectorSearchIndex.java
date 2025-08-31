@@ -19,12 +19,20 @@ import com.google.protobuf.Parser;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.TaskQueues;
+import io.github.panghy.vectorsearch.graph.GraphConnectivityMonitor;
+import io.github.panghy.vectorsearch.pq.ProductQuantizer;
 import io.github.panghy.vectorsearch.proto.CodebookSub;
 import io.github.panghy.vectorsearch.proto.Config;
 import io.github.panghy.vectorsearch.proto.LinkTask;
 import io.github.panghy.vectorsearch.proto.NodeAdjacency;
 import io.github.panghy.vectorsearch.proto.PqCodesBlock;
 import io.github.panghy.vectorsearch.proto.UnlinkTask;
+import io.github.panghy.vectorsearch.storage.CodebookStorage;
+import io.github.panghy.vectorsearch.storage.EntryPointStorage;
+import io.github.panghy.vectorsearch.storage.GraphMetaStorage;
+import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
+import io.github.panghy.vectorsearch.storage.PqBlockStorage;
+import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.LongHistogram;
@@ -219,6 +227,48 @@ public class FdbVectorSearchIndex {
    */
   private final InstantSource instantSource;
 
+  // ============= Storage Components =============
+
+  /**
+   * Storage for PQ codebooks
+   */
+  private CodebookStorage codebookStorage;
+
+  /**
+   * Storage for PQ code blocks
+   */
+  private PqBlockStorage pqBlockStorage;
+
+  /**
+   * Storage for node adjacency lists
+   */
+  private NodeAdjacencyStorage nodeAdjacencyStorage;
+
+  /**
+   * Storage for entry points
+   */
+  private EntryPointStorage entryPointStorage;
+
+  /**
+   * Storage for graph metadata
+   */
+  private GraphMetaStorage graphMetaStorage;
+
+  /**
+   * Graph connectivity monitor
+   */
+  private GraphConnectivityMonitor connectivityMonitor;
+
+  /**
+   * Product quantizer for distance computation
+   */
+  private ProductQuantizer productQuantizer;
+
+  /**
+   * Vector index keys helper
+   */
+  private VectorIndexKeys vectorIndexKeys;
+
   // ============= Runtime State =============
 
   /**
@@ -304,6 +354,72 @@ public class FdbVectorSearchIndex {
       t.setDaemon(true);
       return t;
     });
+
+    // Storage components will be initialized after index creation
+    this.vectorIndexKeys = null;
+    this.codebookStorage = null;
+    this.pqBlockStorage = null;
+    this.nodeAdjacencyStorage = null;
+    this.entryPointStorage = null;
+    this.graphMetaStorage = null;
+    this.productQuantizer = null;
+    this.connectivityMonitor = null;
+  }
+
+  /**
+   * Initializes storage components after the index is created.
+   * Must be called before using any storage operations.
+   */
+  private void initializeStorageComponents() {
+    // Get collection name from directory path (use last component)
+    List<String> path = rootDirectory.getPath();
+    String collectionName = path.isEmpty() ? "default" : path.get(path.size() - 1);
+
+    // Use metaSubspace as the collection subspace since all our subspaces are under the same root
+    // The VectorIndexKeys will handle the proper key paths
+    DirectorySubspace collectionSubspace = metaSubspace;
+
+    // Initialize storage components
+    this.vectorIndexKeys = new VectorIndexKeys(collectionSubspace, collectionName);
+    this.codebookStorage = new CodebookStorage(database, vectorIndexKeys);
+
+    // Get PQ configuration from stored config or use defaults
+    int subVectors = storedConfig != null && storedConfig.getPqSubvectors() > 0
+        ? storedConfig.getPqSubvectors()
+        : config.getDimension() / 2;
+    int blockSize = 256; // Default block size
+
+    this.pqBlockStorage = new PqBlockStorage(
+        database,
+        vectorIndexKeys,
+        subVectors,
+        blockSize,
+        instantSource,
+        config.getAdjacencyCacheSize(),
+        Duration.ofMinutes(5));
+    this.nodeAdjacencyStorage = new NodeAdjacencyStorage(
+        database,
+        vectorIndexKeys,
+        config.getGraphDegree(),
+        instantSource,
+        config.getAdjacencyCacheSize(),
+        Duration.ofMinutes(5));
+    this.entryPointStorage = new EntryPointStorage(collectionSubspace, collectionName, instantSource);
+    this.graphMetaStorage = new GraphMetaStorage(vectorIndexKeys, instantSource);
+
+    // TODO: Initialize product quantizer from codebook storage
+    // For now, create a placeholder that will be loaded when needed
+    this.productQuantizer = null;
+
+    // Initialize connectivity monitor (will handle null PQ gracefully)
+    this.connectivityMonitor = new GraphConnectivityMonitor(
+        database,
+        vectorIndexKeys,
+        graphMetaStorage,
+        nodeAdjacencyStorage,
+        pqBlockStorage,
+        entryPointStorage,
+        productQuantizer);
   }
 
   /**
@@ -396,6 +512,9 @@ public class FdbVectorSearchIndex {
 
             // Initialize or validate configuration
             return index.initializeOrValidateConfig(context).thenApply(__ -> {
+              // Initialize storage components
+              index.initializeStorageComponents();
+
               // Schedule maintenance tasks if configured
               if (config.isAutoRepairEnabled()) {
                 index.scheduleMaintenanceTasks();
@@ -478,15 +597,56 @@ public class FdbVectorSearchIndex {
     }
   }
 
-  // Placeholder methods for maintenance tasks
+  // Maintenance task implementations
   private void refreshEntryPoints() {
-    // TODO: Implement entry point refresh logic
-    LOGGER.fine("Refreshing entry points...");
+    if (connectivityMonitor == null) {
+      LOGGER.warning("Cannot refresh entry points: storage not initialized");
+      return;
+    }
+
+    LOGGER.info("Starting entry point refresh");
+
+    database.runAsync(tx -> connectivityMonitor.refreshEntryPoints(tx).thenAccept(v -> {
+          LOGGER.info("Entry points refreshed successfully");
+          // Clear cached entry points to force reload
+          cachedEntryPoints.set(null);
+        }))
+        .exceptionally(e -> {
+          LOGGER.severe("Failed to refresh entry points: " + e.getMessage());
+          return null;
+        });
   }
 
   private void checkAndRepairConnectivity() {
-    // TODO: Implement graph connectivity check and repair
-    LOGGER.fine("Checking graph connectivity...");
+    if (connectivityMonitor == null || graphMetaStorage == null) {
+      LOGGER.warning("Cannot check connectivity: storage not initialized");
+      return;
+    }
+
+    LOGGER.info("Starting graph connectivity check and repair");
+
+    // Get active codebook version for distance calculations
+    int codebookVersion = activeCodebookVersion.get();
+
+    // Check if analysis is needed (default: every 6 hours)
+    database.runAsync(tx -> {
+          long maxAgeSeconds = config.getGraphRepairInterval().getSeconds();
+          return graphMetaStorage.isAnalysisNeeded(tx, maxAgeSeconds);
+        })
+        .thenCompose(needsAnalysis -> {
+          if (needsAnalysis) {
+            return connectivityMonitor
+                .analyzeAndRepair(codebookVersion)
+                .thenAccept(v -> LOGGER.info("Graph connectivity check completed"));
+          } else {
+            LOGGER.fine("Graph connectivity check skipped - analysis still fresh");
+            return completedFuture(null);
+          }
+        })
+        .exceptionally(e -> {
+          LOGGER.severe("Failed to check/repair graph connectivity: " + e.getMessage());
+          return null;
+        });
   }
 
   /**
