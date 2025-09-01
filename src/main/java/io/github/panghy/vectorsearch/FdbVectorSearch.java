@@ -1,6 +1,5 @@
 package io.github.panghy.vectorsearch;
 
-import static com.apple.foundationdb.async.AsyncUtil.whileTrue;
 import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
 import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
 import static java.util.concurrent.CompletableFuture.allOf;
@@ -19,6 +18,8 @@ import com.github.benmanes.caffeine.cache.Weigher;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
+import com.ibm.asyncutil.locks.AsyncSemaphore;
+import com.ibm.asyncutil.locks.FairAsyncSemaphore;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.TaskQueues;
@@ -47,7 +48,6 @@ import io.opentelemetry.api.metrics.LongHistogram;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Tracer;
 import java.time.Duration;
-import java.time.Instant;
 import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -59,7 +59,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
@@ -315,9 +314,9 @@ public class FdbVectorSearch implements VectorSearch {
   private volatile Config storedConfig;
 
   /**
-   * Counter for generating unique node IDs
+   * Semaphore to ensure only one thread is loading codebooks at a time
    */
-  private final AtomicLong nodeIdCounter = new AtomicLong();
+  private final AsyncSemaphore codeBooksLoadingSemaphore = new FairAsyncSemaphore(1);
 
   /**
    * Private constructor. Use {@link #createOrOpen(VectorSearchConfig, TransactionContext)} to create an instance.
@@ -459,27 +458,6 @@ public class FdbVectorSearch implements VectorSearch {
     // Initialize beam search engine
     this.beamSearchEngine =
         new BeamSearchEngine(nodeAdjacencyStorage, pqBlockStorage, entryPointStorage, productQuantizer);
-
-    // Initialize link worker
-    this.linkWorker = new LinkWorker(
-        database,
-        linkTaskQueue,
-        vectorIndexKeys,
-        pqBlockStorage,
-        nodeAdjacencyStorage,
-        entryPointStorage,
-        codebookStorage,
-        beamSearchEngine,
-        config.getGraphDegree(),
-        1000, // maxSearchVisits - reasonable default
-        1.2, // pruningAlpha - standard value for DiskANN
-        instantSource);
-
-    // Start link worker thread
-    this.linkWorkerThread = new Thread(linkWorker, "VectorSearch-LinkWorker");
-    this.linkWorkerThread.setDaemon(true);
-    this.linkWorkerThread.start();
-    LOGGER.info("Started LinkWorker thread for processing graph construction tasks");
   }
 
   /**
@@ -952,37 +930,33 @@ public class FdbVectorSearch implements VectorSearch {
         return completedFuture(true);
       }
 
-      // Need to load the new version - use synchronized block to prevent duplicate loading
-      return CompletableFuture.supplyAsync(() -> {
-            synchronized (this) {
-              // Double-check inside synchronized block
-              if (cachedCodebookVersion.get() == latestVersion) {
-                return completedFuture(true);
-              }
-
-              // Load codebooks from storage
-              return codebookStorage
-                  .loadCodebooks(latestVersion)
-                  .thenApply(codebooks -> {
-                    if (codebooks == null) {
-                      LOGGER.warning("Failed to load codebooks for version " + latestVersion);
-                      return false;
-                    }
-
-                    // Load into ProductQuantizer
-                    productQuantizer.loadCodebooks(codebooks);
-                    cachedCodebookVersion.set(latestVersion);
-                    LOGGER.fine(
-                        "Loaded codebooks version " + latestVersion + " into ProductQuantizer");
-                    return true;
-                  })
-                  .exceptionally(ex -> {
-                    LOGGER.severe("Error loading codebooks: " + ex.getMessage());
-                    return false;
-                  });
+      return codeBooksLoadingSemaphore
+          .acquire()
+          .thenCompose($ -> {
+            // Double-check after acquiring the lock
+            if (cachedCodebookVersion.get() == latestVersion) {
+              return completedFuture(true);
             }
+            return codebookStorage
+                .loadCodebooks(latestVersion)
+                .thenApply(codebooks -> {
+                  if (codebooks == null) {
+                    LOGGER.warning("Failed to load codebooks for version " + latestVersion);
+                    return false;
+                  }
+
+                  // Load into ProductQuantizer
+                  productQuantizer.loadCodebooks(codebooks);
+                  cachedCodebookVersion.set(latestVersion);
+                  LOGGER.fine("Loaded codebooks version " + latestVersion + " into ProductQuantizer");
+                  return true;
+                })
+                .exceptionally(ex -> {
+                  LOGGER.severe("Error loading codebooks: " + ex.getMessage());
+                  return false;
+                });
           })
-          .thenCompose(future -> future);
+          .whenComplete((v, ex) -> codeBooksLoadingSemaphore.release());
     });
   }
 
@@ -995,7 +969,6 @@ public class FdbVectorSearch implements VectorSearch {
 
   @Override
   public CompletableFuture<List<SearchResult>> search(float[] queryVector, int k, int searchList, int maxVisits) {
-
     if (!initialized) {
       return failedFuture(new IllegalStateException("Index not initialized"));
     }
@@ -1074,33 +1047,35 @@ public class FdbVectorSearch implements VectorSearch {
       return failedFuture(new IllegalStateException("Index not initialized"));
     }
 
-    Instant startTime = Instant.now();
-
     LOGGER.info("Waiting for indexing to complete");
 
-    return whileTrue(() -> {
-      CompletableFuture<Boolean> linkQueueEmpty = linkTaskQueue.isEmpty();
-      CompletableFuture<Boolean> unlinkQueueEmpty = unlinkTaskQueue.isEmpty();
-      return allOf(linkQueueEmpty, unlinkQueueEmpty)
-          .thenApply($ -> {
-            if (Instant.now().isAfter(startTime.plus(maxWait))) {
-              return false;
-            }
-            if (!linkQueueEmpty.join() || !unlinkQueueEmpty.join()) {
-              LOGGER.info("Indexing not complete, waiting...");
-            } else {
-              LOGGER.info("Indexing complete");
-            }
-            return !linkQueueEmpty.join() || !unlinkQueueEmpty.join();
-          })
-          .thenCompose(shouldLoop -> {
-            if (shouldLoop) {
-              CompletableFuture<Boolean> toReturn = new CompletableFuture<>();
-              return toReturn.completeOnTimeout(true, 1, TimeUnit.SECONDS);
-            }
-            return completedFuture(false);
-          });
-    });
+    return completedFuture(null);
+
+    // TODO actually wait when LinkWorker is hooked up.
+    //    Instant startTime = Instant.now();
+    //    return whileTrue(() -> {
+    //      CompletableFuture<Boolean> linkQueueEmpty = linkTaskQueue.isEmpty();
+    //      CompletableFuture<Boolean> unlinkQueueEmpty = unlinkTaskQueue.isEmpty();
+    //      return allOf(linkQueueEmpty, unlinkQueueEmpty)
+    //          .thenApply($ -> {
+    //            if (Instant.now().isAfter(startTime.plus(maxWait))) {
+    //              return false;
+    //            }
+    //            if (!linkQueueEmpty.join() || !unlinkQueueEmpty.join()) {
+    //              LOGGER.info("Indexing not complete, waiting...");
+    //            } else {
+    //              LOGGER.info("Indexing complete");
+    //            }
+    //            return !linkQueueEmpty.join() || !unlinkQueueEmpty.join();
+    //          })
+    //          .thenCompose(shouldLoop -> {
+    //            if (shouldLoop) {
+    //              CompletableFuture<Boolean> toReturn = new CompletableFuture<>();
+    //              return toReturn.completeOnTimeout(true, 1, TimeUnit.SECONDS);
+    //            }
+    //            return completedFuture(false);
+    //          });
+    //    });
   }
 
   // Helper classes for cache keys
