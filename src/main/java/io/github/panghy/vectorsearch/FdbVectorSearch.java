@@ -857,60 +857,46 @@ public class FdbVectorSearch implements VectorSearch {
    * Internal upsert implementation that runs within a transaction.
    */
   private CompletableFuture<Void> upsertInternal(Transaction tr, Map<Long, float[]> vectors) {
-    // Read active codebook version from database for transactional consistency
-    return readActiveCodebookVersion(tr).thenCompose(cbv -> {
-      // Load codebooks if available
-      CompletableFuture<ProductQuantizer> pqFuture;
-      if (cbv > 0) {
-        // Ensure codebooks are loaded
-        pqFuture = ensureCodebooksLoaded(cbv).thenApply(loaded -> {
-          if (loaded) {
-            return productQuantizer;
-          } else {
-            return null;
-          }
-        });
-      } else {
-        pqFuture = completedFuture(null);
-      }
+    // Ensure latest codebooks are loaded
+    return ensureLatestCodebooksLoaded(tr).thenCompose(loaded -> {
+      // Get the PQ if codebooks are loaded
+      ProductQuantizer pq = loaded ? productQuantizer : null;
+      int cbv = loaded ? cachedCodebookVersion.get() : 0;
 
-      return pqFuture.thenCompose(pq -> {
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
+      List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-        for (Map.Entry<Long, float[]> entry : vectors.entrySet()) {
-          long nodeId = entry.getKey();
-          float[] vector = entry.getValue();
+      for (Map.Entry<Long, float[]> entry : vectors.entrySet()) {
+        long nodeId = entry.getKey();
+        float[] vector = entry.getValue();
 
-          // Ensure node adjacency exists
-          CompletableFuture<Void> adjFuture = nodeAdjacencyStorage.storeAdjacency(tr, nodeId, List.of());
+        // Ensure node adjacency exists
+        CompletableFuture<Void> adjFuture = nodeAdjacencyStorage.storeAdjacency(tr, nodeId, List.of());
 
-          // Create link task
-          LinkTask.Builder taskBuilder =
-              LinkTask.newBuilder().setNodeId(nodeId).setCodebookVersion(cbv);
+        // Create link task
+        LinkTask.Builder taskBuilder =
+            LinkTask.newBuilder().setNodeId(nodeId).setCodebookVersion(cbv);
 
-          // Encode vector if PQ is available
-          if (pq != null) {
-            byte[] pqCode = pq.encode(vector);
-            taskBuilder.setPqCode(ByteString.copyFrom(pqCode));
-          }
-
-          // Store vector sketch for future codebook retraining
-          CompletableFuture<Void> sketchFuture = vectorSketchStorage.storeVectorSketch(tr, nodeId, vector);
-
-          // Enqueue link task
-          CompletableFuture<Void> enqueueFuture = linkTaskQueue
-              .enqueue(tr, nodeId, taskBuilder.build())
-              .thenApply(metadata -> null);
-
-          // Combine all operations for this vector
-          futures.add(allOf(adjFuture, sketchFuture, enqueueFuture));
+        // Encode vector if PQ is available
+        if (pq != null) {
+          byte[] pqCode = pq.encode(vector);
+          taskBuilder.setPqCode(ByteString.copyFrom(pqCode));
         }
 
-        // Update metrics
-        VECTORS_INSERTED.add(vectors.size());
+        // Store vector sketch for future codebook retraining
+        CompletableFuture<Void> sketchFuture = vectorSketchStorage.storeVectorSketch(tr, nodeId, vector);
 
-        return allOf(futures.toArray(new CompletableFuture[0]));
-      });
+        // Enqueue link task
+        CompletableFuture<Void> enqueueFuture =
+            linkTaskQueue.enqueue(tr, nodeId, taskBuilder.build()).thenApply(metadata -> null);
+
+        // Combine all operations for this vector
+        futures.add(allOf(adjFuture, sketchFuture, enqueueFuture));
+      }
+
+      // Update metrics
+      VECTORS_INSERTED.add(vectors.size());
+
+      return allOf(futures.toArray(new CompletableFuture[0]));
     });
   }
 
@@ -943,36 +929,61 @@ public class FdbVectorSearch implements VectorSearch {
   }
 
   /**
-   * Ensures that codebooks for the given version are loaded into the ProductQuantizer.
+   * Ensures the latest codebooks are loaded into the ProductQuantizer.
+   * This method checks if we already have the latest version loaded to minimize contention.
+   * If a transaction is provided, it reads the version within that transaction for consistency.
    *
-   * @param codebookVersion version to load
+   * @param tr transaction for reading the latest version
    * @return future containing true if successfully loaded, false otherwise
    */
-  private synchronized CompletableFuture<Boolean> ensureCodebooksLoaded(int codebookVersion) {
-    // Check if we already have the right version loaded
-    if (cachedCodebookVersion.get() == codebookVersion) {
-      return completedFuture(true);
-    }
+  private CompletableFuture<Boolean> ensureLatestCodebooksLoaded(Transaction tr) {
+    // First check if we might already have the latest version loaded (optimistic check)
+    int currentCached = cachedCodebookVersion.get();
 
-    // Load codebooks from storage
-    return codebookStorage
-        .loadCodebooks(codebookVersion)
-        .thenApply(codebooks -> {
-          if (codebooks == null) {
-            LOGGER.warning("Failed to load codebooks for version " + codebookVersion);
-            return false;
-          }
+    // Read the active codebook version within the transaction
+    return readActiveCodebookVersion(tr).thenCompose(latestVersion -> {
+      if (latestVersion == 0) {
+        // No codebooks exist yet
+        return completedFuture(false);
+      }
 
-          // Load into ProductQuantizer
-          productQuantizer.loadCodebooks(codebooks);
-          cachedCodebookVersion.set(codebookVersion);
-          LOGGER.fine("Loaded codebooks version " + codebookVersion + " into ProductQuantizer");
-          return true;
-        })
-        .exceptionally(ex -> {
-          LOGGER.severe("Error loading codebooks: " + ex.getMessage());
-          return false;
-        });
+      // Check if we already have the latest version loaded (contention-free path)
+      if (currentCached == latestVersion) {
+        return completedFuture(true);
+      }
+
+      // Need to load the new version - use synchronized block to prevent duplicate loading
+      return CompletableFuture.supplyAsync(() -> {
+            synchronized (this) {
+              // Double-check inside synchronized block
+              if (cachedCodebookVersion.get() == latestVersion) {
+                return completedFuture(true);
+              }
+
+              // Load codebooks from storage
+              return codebookStorage
+                  .loadCodebooks(latestVersion)
+                  .thenApply(codebooks -> {
+                    if (codebooks == null) {
+                      LOGGER.warning("Failed to load codebooks for version " + latestVersion);
+                      return false;
+                    }
+
+                    // Load into ProductQuantizer
+                    productQuantizer.loadCodebooks(codebooks);
+                    cachedCodebookVersion.set(latestVersion);
+                    LOGGER.fine(
+                        "Loaded codebooks version " + latestVersion + " into ProductQuantizer");
+                    return true;
+                  })
+                  .exceptionally(ex -> {
+                    LOGGER.severe("Error loading codebooks: " + ex.getMessage());
+                    return false;
+                  });
+            }
+          })
+          .thenCompose(future -> future);
+    });
   }
 
   @Override
@@ -998,23 +1009,16 @@ public class FdbVectorSearch implements VectorSearch {
 
     // Use snapshot read for consistent search results
     return database.runAsync(tr -> {
-      // Get active codebook version
-      return readActiveCodebookVersion(tr).thenCompose(codebookVersion -> {
-        if (codebookVersion == 0) {
-          // No codebooks yet, return empty results
+      // Ensure latest codebooks are loaded and perform search
+      return ensureLatestCodebooksLoaded(tr).thenCompose(loaded -> {
+        if (!loaded) {
+          // No codebooks available or failed to load
           return completedFuture(List.of());
         }
 
-        // Ensure codebooks are loaded into the ProductQuantizer
-        return ensureCodebooksLoaded(codebookVersion).thenCompose(loaded -> {
-          if (!loaded) {
-            // Failed to load codebooks
-            return completedFuture(List.of());
-          }
-
-          // Perform beam search
-          return beamSearchEngine.search(tr, queryVector, k, searchList, maxVisits, codebookVersion);
-        });
+        // Perform beam search with the loaded codebook version
+        int codebookVersion = cachedCodebookVersion.get();
+        return beamSearchEngine.search(tr, queryVector, k, searchList, maxVisits, codebookVersion);
       });
     });
   }
