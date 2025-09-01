@@ -41,7 +41,6 @@ import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
 import io.github.panghy.vectorsearch.storage.VectorSketchStorage;
-import io.github.panghy.vectorsearch.workers.LinkWorker;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.LongHistogram;
@@ -233,16 +232,6 @@ public class FdbVectorSearch implements VectorSearch {
    * Scheduler for periodic maintenance tasks
    */
   private final ScheduledExecutorService maintenanceScheduler;
-
-  /**
-   * Worker thread for processing link tasks
-   */
-  private Thread linkWorkerThread;
-
-  /**
-   * Link worker instance
-   */
-  private LinkWorker linkWorker;
 
   /**
    * Time source for consistent time operations
@@ -708,24 +697,6 @@ public class FdbVectorSearch implements VectorSearch {
    */
   public boolean shutdown(boolean awaitTermination, long timeout, TimeUnit unit) {
     LOGGER.info("Shutting down vector search index");
-
-    // Stop the link worker
-    if (linkWorker != null) {
-      linkWorker.stop();
-    }
-    if (linkWorkerThread != null) {
-      try {
-        // Give the worker thread time to finish current task
-        linkWorkerThread.join(awaitTermination ? unit.toMillis(timeout) : 1000);
-        if (linkWorkerThread.isAlive()) {
-          LOGGER.warning("LinkWorker thread did not terminate gracefully, interrupting");
-          linkWorkerThread.interrupt();
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        LOGGER.warning("Interrupted while waiting for LinkWorker to terminate");
-      }
-    }
 
     // Stop the maintenance scheduler
     maintenanceScheduler.shutdown();
