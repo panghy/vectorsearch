@@ -46,6 +46,8 @@ dependencies {
   // TaskQueue
   implementation 'io.github.panghy:taskqueue:0.4.0'
 
+  implementation 'com.ibm.async:asyncutil:0.1.0'
+
   // Protobuf
   implementation 'com.google.protobuf:protobuf-java:4.28.2'
 
