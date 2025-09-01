@@ -1,5 +1,12 @@
 package io.github.panghy.vectorsearch;
 
+import static com.apple.foundationdb.async.AsyncUtil.whileTrue;
+import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
+import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
+import static java.util.concurrent.CompletableFuture.allOf;
+import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.CompletableFuture.failedFuture;
+
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.TransactionContext;
@@ -33,13 +40,14 @@ import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
 import io.github.panghy.vectorsearch.storage.VectorSketchStorage;
+import io.github.panghy.vectorsearch.workers.LinkWorker;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.LongHistogram;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Tracer;
-
 import java.time.Duration;
+import java.time.Instant;
 import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -54,12 +62,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
-
-import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
-import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
-import static java.util.concurrent.CompletableFuture.allOf;
-import static java.util.concurrent.CompletableFuture.completedFuture;
-import static java.util.concurrent.CompletableFuture.failedFuture;
 
 /**
  * FoundationDB-backed vector search index implementing DiskANN-style graph traversal
@@ -232,6 +234,16 @@ public class FdbVectorSearch implements VectorSearch {
    * Scheduler for periodic maintenance tasks
    */
   private final ScheduledExecutorService maintenanceScheduler;
+
+  /**
+   * Worker thread for processing link tasks
+   */
+  private Thread linkWorkerThread;
+
+  /**
+   * Link worker instance
+   */
+  private LinkWorker linkWorker;
 
   /**
    * Time source for consistent time operations
@@ -447,6 +459,27 @@ public class FdbVectorSearch implements VectorSearch {
     // Initialize beam search engine
     this.beamSearchEngine =
         new BeamSearchEngine(nodeAdjacencyStorage, pqBlockStorage, entryPointStorage, productQuantizer);
+
+    // Initialize link worker
+    this.linkWorker = new LinkWorker(
+        database,
+        linkTaskQueue,
+        vectorIndexKeys,
+        pqBlockStorage,
+        nodeAdjacencyStorage,
+        entryPointStorage,
+        codebookStorage,
+        beamSearchEngine,
+        config.getGraphDegree(),
+        1000, // maxSearchVisits - reasonable default
+        1.2, // pruningAlpha - standard value for DiskANN
+        instantSource);
+
+    // Start link worker thread
+    this.linkWorkerThread = new Thread(linkWorker, "VectorSearch-LinkWorker");
+    this.linkWorkerThread.setDaemon(true);
+    this.linkWorkerThread.start();
+    LOGGER.info("Started LinkWorker thread for processing graph construction tasks");
   }
 
   /**
@@ -480,15 +513,15 @@ public class FdbVectorSearch implements VectorSearch {
 
     // Wait for all subspaces to be created first
     return allOf(
-        metaFuture,
-        codebookFuture,
-        pqBlockFuture,
-        graphNodeFuture,
-        graphMetaFuture,
-        sketchFuture,
-        entryFuture,
-        linkQueueDirFuture,
-        unlinkQueueDirFuture)
+            metaFuture,
+            codebookFuture,
+            pqBlockFuture,
+            graphNodeFuture,
+            graphMetaFuture,
+            sketchFuture,
+            entryFuture,
+            linkQueueDirFuture,
+            unlinkQueueDirFuture)
         .thenCompose(v -> {
           // Now create the task queues with their own configs
           var linkQueueConfig = TaskQueueConfig.builder(
@@ -698,6 +731,24 @@ public class FdbVectorSearch implements VectorSearch {
   public boolean shutdown(boolean awaitTermination, long timeout, TimeUnit unit) {
     LOGGER.info("Shutting down vector search index");
 
+    // Stop the link worker
+    if (linkWorker != null) {
+      linkWorker.stop();
+    }
+    if (linkWorkerThread != null) {
+      try {
+        // Give the worker thread time to finish current task
+        linkWorkerThread.join(awaitTermination ? unit.toMillis(timeout) : 1000);
+        if (linkWorkerThread.isAlive()) {
+          LOGGER.warning("LinkWorker thread did not terminate gracefully, interrupting");
+          linkWorkerThread.interrupt();
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        LOGGER.warning("Interrupted while waiting for LinkWorker to terminate");
+      }
+    }
+
     // Stop the maintenance scheduler
     maintenanceScheduler.shutdown();
 
@@ -794,8 +845,8 @@ public class FdbVectorSearch implements VectorSearch {
     for (Map.Entry<Long, float[]> entry : vectors.entrySet()) {
       if (entry.getValue().length != config.getDimension()) {
         return failedFuture(new IllegalArgumentException("Vector dimension mismatch for ID " + entry.getKey()
-                                                         + ": expected " + config.getDimension()
-                                                         + " but got " + entry.getValue().length));
+            + ": expected " + config.getDimension()
+            + " but got " + entry.getValue().length));
       }
     }
 
@@ -940,7 +991,7 @@ public class FdbVectorSearch implements VectorSearch {
 
     if (queryVector.length != config.getDimension()) {
       return failedFuture(new IllegalArgumentException("Query vector dimension mismatch: expected "
-                                                       + config.getDimension() + " but got " + queryVector.length));
+          + config.getDimension() + " but got " + queryVector.length));
     }
 
     SEARCHES_PERFORMED.add(1);
@@ -1011,62 +1062,47 @@ public class FdbVectorSearch implements VectorSearch {
    * <p>Note: This method provides a best-effort wait. In production, consider using
    * eventual consistency patterns rather than blocking on indexing completion.
    *
-   * @param maxWaitMs maximum time to wait in milliseconds
+   * @param maxWait maximum time to wait in milliseconds
    * @return future that completes when indexing is likely complete or timeout is reached
    */
-  CompletableFuture<Void> waitForIndexing(long maxWaitMs) {
+  public CompletableFuture<Void> waitForIndexing(Duration maxWait) {
     if (!initialized) {
       return failedFuture(new IllegalStateException("Index not initialized"));
     }
 
-    // Since we can't directly query TaskQueue depth, we use a heuristic:
-    // Insert a marker task and wait for it to be processed
-    long markerId = Long.MAX_VALUE - System.currentTimeMillis();
+    Instant startTime = Instant.now();
 
-    return database.runAsync(tr -> {
-          // Create a no-op link task as a marker
-          LinkTask markerTask = LinkTask.newBuilder()
-              .setNodeId(markerId)
-              .setCodebookVersion(0) // No actual linking needed
-              .build();
+    LOGGER.info("Waiting for indexing to complete");
 
-          // Enqueue the marker
-          return linkTaskQueue.enqueue(tr, markerId, markerTask);
-        })
-        .thenCompose(metadata -> {
-          // Now poll until the marker task is processed or timeout
-          long startTime = System.currentTimeMillis();
-
-          return CompletableFuture.runAsync(() -> {
-            while (System.currentTimeMillis() - startTime < maxWaitMs) {
-              try {
-                Thread.sleep(100);
-                // In a real implementation, we would check if the marker task was processed
-                // For now, we just wait a reasonable amount of time
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-              }
+    return whileTrue(() -> {
+      CompletableFuture<Boolean> linkQueueEmpty = linkTaskQueue.isEmpty();
+      CompletableFuture<Boolean> unlinkQueueEmpty = unlinkTaskQueue.isEmpty();
+      return allOf(linkQueueEmpty, unlinkQueueEmpty)
+          .thenApply($ -> {
+            if (Instant.now().isAfter(startTime.plus(maxWait))) {
+              return false;
             }
+            if (!linkQueueEmpty.join() || !unlinkQueueEmpty.join()) {
+              LOGGER.info("Indexing not complete, waiting...");
+            } else {
+              LOGGER.info("Indexing complete");
+            }
+            return !linkQueueEmpty.join() || !unlinkQueueEmpty.join();
+          })
+          .thenCompose(shouldLoop -> {
+            if (shouldLoop) {
+              CompletableFuture<Boolean> toReturn = new CompletableFuture<>();
+              return toReturn.completeOnTimeout(true, 1, TimeUnit.SECONDS);
+            }
+            return completedFuture(false);
           });
-        })
-        .thenCompose(v -> {
-          // Clean up the marker task if it exists
-          return database.<Void>runAsync(tr -> {
-                // Remove the marker node if it was created
-                nodeAdjacencyStorage.deleteNode(tr, markerId);
-                return CompletableFuture.<Void>completedFuture(null);
-              })
-              .exceptionally(ex -> null); // Ignore cleanup errors
-        });
+    });
   }
 
   // Helper classes for cache keys
-  record CodebookCacheKey(int version, int subspace) {
-  }
+  record CodebookCacheKey(int version, int subspace) {}
 
-  record PqBlockCacheKey(int version, long blockNumber) {
-  }
+  record PqBlockCacheKey(int version, long blockNumber) {}
 
   // Serializers for task queues
   static class LongSerializer implements TaskQueueConfig.TaskSerializer<Long> {

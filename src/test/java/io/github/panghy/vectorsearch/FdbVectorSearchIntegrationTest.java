@@ -7,6 +7,7 @@ import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
 import io.github.panghy.vectorsearch.search.SearchResult;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -77,7 +78,7 @@ class FdbVectorSearchIntegrationTest {
   @Test
   @DisplayName("Should handle large-scale vector insertion and search with clustering")
   @Timeout(value = 60, unit = TimeUnit.SECONDS)
-  void testLargeScaleVectorSearchWithClustering() throws Exception {
+  void testLargeScaleVectorSearchWithClustering() {
     // Create index with specific configuration for testing
     VectorSearchConfig config = VectorSearchConfig.builder(db, testDir)
         .dimension(DIMENSION)
@@ -181,7 +182,7 @@ class FdbVectorSearchIntegrationTest {
   @Test
   @DisplayName("Should handle vector updates and deletions correctly")
   @Timeout(value = 30, unit = TimeUnit.SECONDS)
-  void testVectorUpdatesAndDeletions() throws Exception {
+  void testVectorUpdatesAndDeletions() {
     VectorSearchConfig config = VectorSearchConfig.builder(db, testDir)
         .dimension(DIMENSION)
         .distanceMetric(VectorSearchConfig.DistanceMetric.COSINE)
@@ -230,7 +231,7 @@ class FdbVectorSearchIntegrationTest {
   @Test
   @DisplayName("Should maintain graph connectivity during incremental insertions")
   @Timeout(value = 30, unit = TimeUnit.SECONDS)
-  void testIncrementalInsertionsWithConnectivity() throws Exception {
+  void testIncrementalInsertionsWithConnectivity() {
     VectorSearchConfig config = VectorSearchConfig.builder(db, testDir)
         .dimension(DIMENSION)
         .distanceMetric(VectorSearchConfig.DistanceMetric.INNER_PRODUCT)
@@ -250,8 +251,7 @@ class FdbVectorSearchIntegrationTest {
       List<Long> batchIds = vectorSearch.insert(batchVectors).join();
       assertThat(batchIds).hasSize(50);
 
-      // Give some time for indexing between batches
-      Thread.sleep(100);
+      vectorSearch.waitForIndexing(Duration.ofSeconds(10)).join();
 
       // Perform searches to verify index remains queryable
       float[] queryVector = generateNormalizedVector(DIMENSION, random);
@@ -360,8 +360,8 @@ class FdbVectorSearchIntegrationTest {
   /**
    * Waits for indexing operations to complete using the built-in wait method.
    */
-  private void waitForIndexingCompletion() throws Exception {
+  private void waitForIndexingCompletion() {
     // Wait up to 5 seconds for indexing to complete
-    vectorSearch.waitForIndexing(5000).join();
+    vectorSearch.waitForIndexing(Duration.ofSeconds(5)).join();
   }
 }

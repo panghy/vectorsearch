@@ -44,7 +44,7 @@ dependencies {
   implementation 'io.opentelemetry:opentelemetry-context:1.40.0'
 
   // TaskQueue
-  implementation 'io.github.panghy:taskqueue:0.1.0'
+  implementation 'io.github.panghy:taskqueue:0.4.0'
 
   // Protobuf
   implementation 'com.google.protobuf:protobuf-java:4.28.2'
