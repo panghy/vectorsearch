@@ -61,7 +61,7 @@ class BeamSearchEngineTest {
         }
       }
     }
-    pq.setCodebooks(codebooks);
+    pq.loadCodebooks(codebooks);
     searchEngine = new BeamSearchEngine(adjacencyStorage, pqBlockStorage, entryPointStorage, pq);
   }
 
