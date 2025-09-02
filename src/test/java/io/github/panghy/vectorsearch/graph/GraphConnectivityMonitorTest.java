@@ -5,12 +5,16 @@ import static java.util.Collections.singletonList;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
 import io.github.panghy.vectorsearch.graph.GraphConnectivityMonitor.ConnectivityAnalysis;
+import io.github.panghy.vectorsearch.storage.CodebookStorage;
 import io.github.panghy.vectorsearch.storage.EntryPointStorage;
 import io.github.panghy.vectorsearch.storage.GraphMetaStorage;
 import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
@@ -34,6 +38,7 @@ class GraphConnectivityMonitorTest {
   private NodeAdjacencyStorage adjacencyStorage;
   private PqBlockStorage pqBlockStorage;
   private EntryPointStorage entryPointStorage;
+  private CodebookStorage codebookStorage;
   private GraphConnectivityMonitor monitor;
   private String testCollectionName;
 
@@ -58,9 +63,13 @@ class GraphConnectivityMonitorTest {
     pqBlockStorage = new PqBlockStorage(db, keys, 1000, 16, clock, 10000, Duration.ofMinutes(5));
     entryPointStorage = new EntryPointStorage(testSpace, clock);
 
-    // Create monitor without PQ for simplicity in tests
+    // Create mock CodebookStorage for tests
+    codebookStorage = mock(CodebookStorage.class);
+    when(codebookStorage.getProductQuantizer(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
+
+    // Create monitor with mock CodebookStorage
     monitor = new GraphConnectivityMonitor(
-        db, keys, metaStorage, adjacencyStorage, pqBlockStorage, entryPointStorage, null);
+        db, keys, metaStorage, adjacencyStorage, pqBlockStorage, entryPointStorage, codebookStorage);
   }
 
   @AfterEach
@@ -300,9 +309,13 @@ class GraphConnectivityMonitorTest {
 
   @Test
   void testAnalyzeWithNullPq() {
-    // Create monitor without PQ to test null PQ path
+    // Create mock CodebookStorage that returns null for PQ
+    CodebookStorage nullPqCodebookStorage = mock(CodebookStorage.class);
+    when(nullPqCodebookStorage.getProductQuantizer(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
+
+    // Create monitor with CodebookStorage that returns null PQ
     GraphConnectivityMonitor monitorNoPq = new GraphConnectivityMonitor(
-        db, keys, metaStorage, adjacencyStorage, pqBlockStorage, entryPointStorage, null);
+        db, keys, metaStorage, adjacencyStorage, pqBlockStorage, entryPointStorage, nullPqCodebookStorage);
 
     // Create some nodes
     db.runAsync(tx -> allOf(
@@ -431,9 +444,13 @@ class GraphConnectivityMonitorTest {
 
   @Test
   void testComputePqDistanceWithNullPq() {
+    // Create mock CodebookStorage that returns null for PQ
+    CodebookStorage nullPqCodebookStorage = mock(CodebookStorage.class);
+    when(nullPqCodebookStorage.getProductQuantizer(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
+
     // Test PQ distance computation with null PQ
     GraphConnectivityMonitor monitorNoPq = new GraphConnectivityMonitor(
-        db, keys, metaStorage, adjacencyStorage, pqBlockStorage, entryPointStorage, null);
+        db, keys, metaStorage, adjacencyStorage, pqBlockStorage, entryPointStorage, nullPqCodebookStorage);
 
     CompletableFuture<Float> future = db.runAsync(tx -> monitorNoPq.computePqDistance(tx, 1L, 2L, 1));
 

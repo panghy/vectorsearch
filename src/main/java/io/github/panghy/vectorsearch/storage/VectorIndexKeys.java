@@ -212,6 +212,17 @@ public class VectorIndexKeys {
     return collectionSubspace.pack(Tuple.from(SKETCH));
   }
 
+  /**
+   * Range for all vector sketches.
+   * Path: /C/{collection}/sketch/
+   *
+   * @return Range for scanning all vector sketches
+   */
+  public com.apple.foundationdb.Range vectorSketchRange() {
+    byte[] prefix = allSketchesPrefix();
+    return new com.apple.foundationdb.Range(prefix, com.apple.foundationdb.tuple.ByteArrayUtil.strinc(prefix));
+  }
+
   // ==================== Range Keys ====================
 
   /**

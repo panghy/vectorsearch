@@ -515,7 +515,7 @@ public class VectorSearchConfig {
         .setDimension(dimension)
         .setMetric(
             distanceMetric == DistanceMetric.INNER_PRODUCT
-                ? "IP"
+                ? "INNER_PRODUCT"
                 : distanceMetric == DistanceMetric.COSINE ? "COSINE" : "L2")
         .setGraphDegree(graphDegree)
         .setCodesPerBlock(codesPerBlock);

@@ -21,7 +21,7 @@ message Config {
   uint32 dimension = 1;
   
   // Distance metric used for similarity computation.
-  // Supported values: "L2" (Euclidean), "IP" (Inner Product), "COSINE"
+  // Supported values: "L2" (Euclidean), "INNER_PRODUCT", "COSINE"
   // Note: COSINE is implemented as normalized IP for efficiency
   string metric = 2;
   
@@ -276,6 +276,21 @@ message VectorSketch {
 // TASK QUEUE MESSAGES
 // ========================================================================================
 
+// PQ-encoded vector data
+message PqEncodedVector {
+  // PQ-encoded vector (already compressed, pq_subvectors bytes)
+  bytes pq_code = 1;
+  
+  // Codebook version used for encoding
+  uint64 codebook_version = 2;
+}
+
+// Raw vector data
+message RawVector {
+  // The original vector values
+  repeated float values = 1;
+}
+
 // Task payload for link operations (graph construction).
 // Enqueued during upsert operations for async processing.
 message LinkTask {
@@ -285,11 +300,11 @@ message LinkTask {
   // Node ID to link into the graph
   uint64 node_id = 2;
   
-  // PQ-encoded vector (already compressed, pq_subvectors bytes)
-  bytes pq_code = 3;
-  
-  // Codebook version used for encoding
-  uint64 codebook_version = 4;
+  // Either PQ-encoded or raw vector
+  oneof vector_data {
+    PqEncodedVector pq_encoded = 3;
+    RawVector raw_vector = 4;
+  }
   
   // Task metadata
   google.protobuf.Timestamp enqueued_at = 5;

@@ -6,7 +6,7 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.KeySelector;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.tuple.ByteArrayUtil;
-import io.github.panghy.vectorsearch.pq.ProductQuantizer;
+import io.github.panghy.vectorsearch.storage.CodebookStorage;
 import io.github.panghy.vectorsearch.storage.EntryPointStorage;
 import io.github.panghy.vectorsearch.storage.GraphMetaStorage;
 import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
@@ -55,7 +55,7 @@ public class GraphConnectivityMonitor {
   private final NodeAdjacencyStorage adjacencyStorage;
   private final PqBlockStorage pqBlockStorage;
   private final EntryPointStorage entryPointStorage;
-  private final ProductQuantizer pq;
+  private final CodebookStorage codebookStorage;
   private final Random random;
 
   /**
@@ -67,7 +67,7 @@ public class GraphConnectivityMonitor {
    * @param adjacencyStorage  storage for node adjacency lists
    * @param pqBlockStorage    storage for PQ codes
    * @param entryPointStorage storage for entry points
-   * @param pq                product quantizer for distance computation
+   * @param codebookStorage   storage for codebooks and ProductQuantizers
    */
   public GraphConnectivityMonitor(
       Database db,
@@ -76,14 +76,14 @@ public class GraphConnectivityMonitor {
       NodeAdjacencyStorage adjacencyStorage,
       PqBlockStorage pqBlockStorage,
       EntryPointStorage entryPointStorage,
-      ProductQuantizer pq) {
+      CodebookStorage codebookStorage) {
     this.db = db;
     this.keys = keys;
     this.metaStorage = metaStorage;
     this.adjacencyStorage = adjacencyStorage;
     this.pqBlockStorage = pqBlockStorage;
     this.entryPointStorage = entryPointStorage;
-    this.pq = pq;
+    this.codebookStorage = codebookStorage;
     this.random = new Random();
   }
 
@@ -239,38 +239,33 @@ public class GraphConnectivityMonitor {
    */
   CompletableFuture<Float> computePqDistance(Transaction tx, Long nodeId1, Long nodeId2, int codebookVersion) {
 
-    // Check if PQ is available
-    if (pq == null) {
-      // Return a fixed distance when PQ is not available
-      return completedFuture(1.0f);
-    }
-
-    // Build lookup table for node1's codes (treating as query)
-    CompletableFuture<byte[]> codes1Future = pqBlockStorage.loadPqCode(nodeId1, codebookVersion);
-
-    return codes1Future.thenCompose(codes1 -> {
-      if (codes1 == null) {
-        return completedFuture(Float.MAX_VALUE);
+    // Get the ProductQuantizer for this codebook version
+    return codebookStorage.getProductQuantizer(codebookVersion).thenCompose(pq -> {
+      if (pq == null) {
+        // Return a fixed distance when PQ is not available
+        return completedFuture(1.0f);
       }
 
-      // Convert codes1 to float vector (simplified - normally would reconstruct from codebook)
-      // For now, create a dummy query vector
-      float[] queryVector = new float[codes1.length * 8]; // Assuming 8 dimensions per subvector
-      for (int i = 0; i < codes1.length; i++) {
-        queryVector[i * 8] = codes1[i] & 0xFF;
-      }
+      // Build lookup table for node1's codes (treating as query)
+      CompletableFuture<byte[]> codes1Future = pqBlockStorage.loadPqCode(nodeId1, codebookVersion);
 
-      // Build lookup table
-      float[][] lookupTable = pq.buildLookupTable(queryVector);
-
-      // Load codes for node2
-      return pqBlockStorage.loadPqCode(nodeId2, codebookVersion).thenApply(codes2 -> {
-        if (codes2 == null) {
-          return Float.MAX_VALUE;
+      return codes1Future.thenCompose(codes1 -> {
+        if (codes1 == null) {
+          return completedFuture(Float.MAX_VALUE);
         }
 
-        // Compute distance using lookup table
-        return pq.computeDistance(codes2, lookupTable);
+        // Use the ProductQuantizer to build lookup table from PQ codes
+        float[][] lookupTable = pq.buildLookupTableFromPqCode(codes1);
+
+        // Load codes for node2
+        return pqBlockStorage.loadPqCode(nodeId2, codebookVersion).thenApply(codes2 -> {
+          if (codes2 == null) {
+            return Float.MAX_VALUE;
+          }
+
+          // Compute distance using lookup table
+          return pq.computeDistance(codes2, lookupTable);
+        });
       });
     });
   }

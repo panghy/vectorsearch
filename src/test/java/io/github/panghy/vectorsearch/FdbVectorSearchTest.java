@@ -6,6 +6,7 @@ import static com.apple.foundationdb.tuple.Tuple.from;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -564,11 +565,13 @@ class FdbVectorSearchTest {
     FdbVectorSearch.ProtoSerializer<io.github.panghy.vectorsearch.proto.LinkTask> serializer =
         new FdbVectorSearch.ProtoSerializer<>(io.github.panghy.vectorsearch.proto.LinkTask.parser());
 
-    // Create a test LinkTask
+    // Create a test LinkTask with PQ encoded vector
     io.github.panghy.vectorsearch.proto.LinkTask task = io.github.panghy.vectorsearch.proto.LinkTask.newBuilder()
         .setNodeId(12345L)
-        .setCodebookVersion(1)
-        .setPqCode(com.google.protobuf.ByteString.copyFrom(new byte[] {1, 2, 3, 4, 5}))
+        .setPqEncoded(io.github.panghy.vectorsearch.proto.PqEncodedVector.newBuilder()
+            .setCodebookVersion(1)
+            .setPqCode(com.google.protobuf.ByteString.copyFrom(new byte[] {1, 2, 3, 4, 5}))
+            .build())
         .build();
 
     // Serialize
@@ -580,8 +583,12 @@ class FdbVectorSearchTest {
     io.github.panghy.vectorsearch.proto.LinkTask deserialized = serializer.deserialize(serialized);
     assertNotNull(deserialized);
     assertEquals(task.getNodeId(), deserialized.getNodeId());
-    assertEquals(task.getCodebookVersion(), deserialized.getCodebookVersion());
-    assertEquals(task.getPqCode(), deserialized.getPqCode());
+    assertTrue(deserialized.hasPqEncoded());
+    assertEquals(
+        task.getPqEncoded().getCodebookVersion(),
+        deserialized.getPqEncoded().getCodebookVersion());
+    assertEquals(
+        task.getPqEncoded().getPqCode(), deserialized.getPqEncoded().getPqCode());
   }
 
   @Test
@@ -612,7 +619,8 @@ class FdbVectorSearchTest {
     assertNotNull(deserialized);
     // Should have default values
     assertEquals(0, deserialized.getNodeId());
-    assertEquals(0, deserialized.getCodebookVersion());
+    assertFalse(deserialized.hasPqEncoded());
+    assertFalse(deserialized.hasRawVector());
   }
 
   @Test
@@ -1049,6 +1057,110 @@ class FdbVectorSearchTest {
     index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
 
     index.delete(123L).join();
+    // Should complete successfully
+  }
+
+  @Test
+  @DisplayName("Should handle close operation properly")
+  void testCloseOperation() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Insert some vectors first (128 dimensions to match config)
+    List<float[]> vectors = new java.util.ArrayList<>();
+    for (int i = 0; i < 2; i++) {
+      float[] vector = new float[128];
+      for (int j = 0; j < 128; j++) {
+        vector[j] = i * 128 + j;
+      }
+      vectors.add(vector);
+    }
+    index.insert(vectors).join();
+
+    // Now close the index
+    index.close();
+
+    // Should not throw any exceptions
+  }
+
+  @Test
+  @DisplayName("Should handle shutdown with timeout")
+  void testShutdownWithTimeout() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Insert some vectors (128 dimensions to match config)
+    List<float[]> vectors = new java.util.ArrayList<>();
+    for (int i = 0; i < 2; i++) {
+      float[] vector = new float[128];
+      for (int j = 0; j < 128; j++) {
+        vector[j] = i * 128 + j;
+      }
+      vectors.add(vector);
+    }
+    index.insert(vectors).join();
+
+    // Shutdown with wait for tasks and timeout
+    index.shutdown(true, 5, TimeUnit.SECONDS);
+
+    // Should complete successfully
+  }
+
+  @Test
+  @DisplayName("Should handle search with empty results when no codebooks loaded")
+  void testSearchWithNoCodebooks() throws Exception {
+    // Create a new index with different collection
+    String newCollection =
+        "test_no_codebooks_" + UUID.randomUUID().toString().substring(0, 8);
+    DirectorySubspace newDirectory = db.runAsync(tr -> {
+          DirectoryLayer layer = DirectoryLayer.getDefault();
+          return layer.createOrOpen(tr, Arrays.asList("test", newCollection));
+        })
+        .get(5, TimeUnit.SECONDS);
+
+    VectorSearchConfig newConfig = VectorSearchConfig.builder(db, newDirectory)
+        .dimension(4)
+        .distanceMetric(VectorSearchConfig.DistanceMetric.L2)
+        .graphDegree(16)
+        .build();
+
+    FdbVectorSearch newIndex = FdbVectorSearch.createOrOpen(newConfig, db).get(10, TimeUnit.SECONDS);
+
+    // Try searching without any codebooks
+    float[] queryVector = new float[] {1.0f, 2.0f, 3.0f, 4.0f};
+    List<io.github.panghy.vectorsearch.search.SearchResult> results =
+        newIndex.search(queryVector, 10).join();
+
+    // Should return empty results
+    assertThat(results).isEmpty();
+
+    // Clean up
+    newIndex.shutdown();
+    db.runAsync(tr -> {
+          DirectoryLayer layer = DirectoryLayer.getDefault();
+          return layer.removeIfExists(tr, newDirectory.getPath());
+        })
+        .get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  @DisplayName("Should handle multiple shutdown calls")
+  void testMultipleShutdownCalls() throws Exception {
+    index = FdbVectorSearch.createOrOpen(config, db).get(10, TimeUnit.SECONDS);
+
+    // Insert some vectors (128 dimensions to match config)
+    List<float[]> vectors = new java.util.ArrayList<>();
+    for (int i = 0; i < 2; i++) {
+      float[] vector = new float[128];
+      for (int j = 0; j < 128; j++) {
+        vector[j] = i * 128 + j;
+      }
+      vectors.add(vector);
+    }
+    index.insert(vectors).join();
+
+    // Shutdown multiple times should not throw
+    index.shutdown();
+    index.shutdown(); // Second call should be safe
+
     // Should complete successfully
   }
 }

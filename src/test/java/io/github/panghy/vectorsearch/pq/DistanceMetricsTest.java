@@ -179,4 +179,79 @@ class DistanceMetricsTest {
     distance = DistanceMetrics.cosineDistance(large1, large2);
     assertThat(distance).isCloseTo(0.0f, within(0.01f)); // Same direction
   }
+
+  @Test
+  void testDistanceMetricsNormalize() {
+    float[] vector = {3.0f, 4.0f};
+    float[] normalized = DistanceMetrics.normalize(vector);
+
+    // Should be unit length
+    float norm = 0;
+    for (float v : normalized) {
+      norm += v * v;
+    }
+    assertThat(Math.abs(norm - 1.0)).isLessThan(0.001);
+
+    // Test with zero vector
+    float[] zeroVector = {0.0f, 0.0f};
+    float[] normalizedZero = DistanceMetrics.normalize(zeroVector);
+    assertThat(normalizedZero).containsExactly(0.0f, 0.0f);
+  }
+
+  @Test
+  void testDistanceMetricsNorm() {
+    float[] vector = {3.0f, 4.0f};
+    float norm = DistanceMetrics.norm(vector);
+    assertThat(norm).isEqualTo(5.0f);
+  }
+
+  @Test
+  void testDistanceMetricsAllMetrics() {
+    float[] a = {1.0f, 2.0f, 3.0f};
+    float[] b = {4.0f, 5.0f, 6.0f};
+
+    // Test L2 distance
+    float l2 = DistanceMetrics.l2Distance(a, b);
+    assertThat(l2).isGreaterThan(0);
+
+    // Test inner product
+    float ip = DistanceMetrics.innerProduct(a, b);
+    assertThat(ip).isNotNull();
+
+    // Test cosine distance
+    float cosine = DistanceMetrics.cosineDistance(a, b);
+    assertThat(cosine).isBetween(0.0f, 2.0f);
+
+    // Test generic distance method with each metric
+    float l2Via = DistanceMetrics.distance(a, b, DistanceMetrics.Metric.L2);
+    assertThat(l2Via).isEqualTo(l2);
+
+    float ipVia = DistanceMetrics.distance(a, b, DistanceMetrics.Metric.INNER_PRODUCT);
+    assertThat(ipVia).isEqualTo(ip);
+
+    float cosineVia = DistanceMetrics.distance(a, b, DistanceMetrics.Metric.COSINE);
+    assertThat(cosineVia).isEqualTo(cosine);
+  }
+
+  @Test
+  void testDistanceMetricsEdgeCases() {
+    float[] v1 = {1, 2, 3};
+    float[] v2 = {4, 5, 6};
+
+    // Test innerProduct with different sized vectors
+    float[] v3 = {1, 2, 3, 4};
+    assertThatThrownBy(() -> DistanceMetrics.innerProduct(v1, v3))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Vectors must have the same dimension");
+
+    // Test cosineDistance with different sized vectors
+    assertThatThrownBy(() -> DistanceMetrics.cosineDistance(v1, v3))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Vectors must have the same dimension");
+
+    // Test normalizeInPlace with zero vector
+    float[] zeroVector = {0, 0, 0};
+    DistanceMetrics.normalizeInPlace(zeroVector);
+    assertThat(zeroVector).containsExactly(0, 0, 0);
+  }
 }

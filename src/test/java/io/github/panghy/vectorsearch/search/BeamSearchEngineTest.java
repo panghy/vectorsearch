@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -13,6 +14,7 @@ import com.apple.foundationdb.Transaction;
 import io.github.panghy.vectorsearch.pq.DistanceMetrics;
 import io.github.panghy.vectorsearch.pq.ProductQuantizer;
 import io.github.panghy.vectorsearch.proto.NodeAdjacency;
+import io.github.panghy.vectorsearch.storage.CodebookStorage;
 import io.github.panghy.vectorsearch.storage.EntryPointStorage;
 import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
@@ -39,6 +41,9 @@ class BeamSearchEngineTest {
   private EntryPointStorage entryPointStorage;
 
   @Mock
+  private CodebookStorage codebookStorage;
+
+  @Mock
   private Transaction tx;
 
   private ProductQuantizer pq;
@@ -49,10 +54,7 @@ class BeamSearchEngineTest {
 
   @BeforeEach
   void setUp() {
-    // Create a real ProductQuantizer with trained codebooks
-    pq = new ProductQuantizer(VECTOR_DIM, PQ_SUBVECTORS, DistanceMetrics.Metric.L2);
-
-    // Manually set codebooks for testing (bypassing training)
+    // Manually create codebooks for testing (bypassing training)
     float[][][] codebooks = new float[PQ_SUBVECTORS][256][VECTOR_DIM / PQ_SUBVECTORS];
     for (int s = 0; s < PQ_SUBVECTORS; s++) {
       for (int c = 0; c < 256; c++) {
@@ -61,8 +63,15 @@ class BeamSearchEngineTest {
         }
       }
     }
-    pq.loadCodebooks(codebooks);
-    searchEngine = new BeamSearchEngine(adjacencyStorage, pqBlockStorage, entryPointStorage, pq);
+
+    // Create a ProductQuantizer with the trained codebooks
+    pq = new ProductQuantizer(VECTOR_DIM, PQ_SUBVECTORS, DistanceMetrics.Metric.L2, 1, codebooks);
+
+    // Mock the CodebookStorage to return our ProductQuantizer
+    // Use lenient stubbing since not all tests need this mock
+    lenient().when(codebookStorage.getProductQuantizer(1L)).thenReturn(CompletableFuture.completedFuture(pq));
+
+    searchEngine = new BeamSearchEngine(adjacencyStorage, pqBlockStorage, entryPointStorage, codebookStorage);
   }
 
   @Test
@@ -76,7 +85,7 @@ class BeamSearchEngineTest {
 
     // When
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 5, 10, 100, 1).join();
+        searchEngine.search(tx, queryVector, 5, 10, 100, pq).join();
 
     // Then
     assertThat(results).isEmpty();
@@ -105,7 +114,7 @@ class BeamSearchEngineTest {
 
     // When
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 5, 10, 100, 1).join();
+        searchEngine.search(tx, queryVector, 5, 10, 100, pq).join();
 
     // Then
     assertThat(results).hasSize(1);
@@ -161,7 +170,7 @@ class BeamSearchEngineTest {
 
     // When
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 2, 10, 100, 1).join();
+        searchEngine.search(tx, queryVector, 2, 10, 100, pq).join();
 
     // Then
     assertThat(results).hasSize(2);
@@ -199,7 +208,7 @@ class BeamSearchEngineTest {
 
     // When - search with visit limit of 1
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 5, 10, 1, 1).join();
+        searchEngine.search(tx, queryVector, 5, 10, 1, pq).join();
 
     // Then
     assertThat(results).hasSizeLessThanOrEqualTo(1);
@@ -223,7 +232,7 @@ class BeamSearchEngineTest {
 
     // When - search with searchListSize = 0 (should default to max(16, topK))
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 5, 0, 100, 1).join();
+        searchEngine.search(tx, queryVector, 5, 0, 100, pq).join();
 
     // Then
     assertThat(results).isNotNull();
@@ -247,7 +256,7 @@ class BeamSearchEngineTest {
 
     // When - search with topK = 50, searchListSize = 0
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 50, 0, 100, 1).join();
+        searchEngine.search(tx, queryVector, 50, 0, 100, pq).join();
 
     // Then
     assertThat(results).isNotNull();
@@ -279,7 +288,7 @@ class BeamSearchEngineTest {
 
     // When
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 2, 10, 100, 1).join();
+        searchEngine.search(tx, queryVector, 2, 10, 100, pq).join();
 
     // Then
     assertThat(results).hasSize(2);
@@ -325,7 +334,7 @@ class BeamSearchEngineTest {
 
     // When
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 3, 10, 100, 1).join();
+        searchEngine.search(tx, queryVector, 3, 10, 100, pq).join();
 
     // Then - should handle cycle correctly without infinite loop
     assertThat(results).hasSize(3);
@@ -353,7 +362,7 @@ class BeamSearchEngineTest {
 
     // When
     List<SearchResult> results =
-        searchEngine.search(tx, queryVector, 5, 10, 100, 1).join();
+        searchEngine.search(tx, queryVector, 5, 10, 100, pq).join();
 
     // Then
     assertThat(results).hasSize(1);
@@ -379,7 +388,7 @@ class BeamSearchEngineTest {
 
     // When
     List<SearchResult> results = searchEngine
-        .search(tx, queryVector, topK, searchListSize, 100, 1)
+        .search(tx, queryVector, topK, searchListSize, 100, pq)
         .join();
 
     // Then

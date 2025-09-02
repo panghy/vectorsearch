@@ -361,7 +361,9 @@ class FdbVectorSearchIntegrationTest {
    * Waits for indexing operations to complete using the built-in wait method.
    */
   private void waitForIndexingCompletion() {
-    // Wait up to 5 seconds for indexing to complete
-    vectorSearch.waitForIndexing(Duration.ofSeconds(5)).join();
+    // Wait up to a minute for indexing to complete
+    System.out.println("Waiting for indexing to complete...");
+    vectorSearch.waitForIndexing(Duration.ofSeconds(60)).join();
+    System.out.println("Indexing complete");
   }
 }

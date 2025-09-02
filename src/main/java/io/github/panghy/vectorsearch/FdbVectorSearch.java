@@ -9,6 +9,7 @@ import static java.util.concurrent.CompletableFuture.failedFuture;
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.TransactionContext;
+import com.apple.foundationdb.async.AsyncUtil;
 import com.apple.foundationdb.directory.Directory;
 import com.apple.foundationdb.directory.DirectorySubspace;
 import com.apple.foundationdb.tuple.Tuple;
@@ -31,6 +32,8 @@ import io.github.panghy.vectorsearch.proto.Config;
 import io.github.panghy.vectorsearch.proto.LinkTask;
 import io.github.panghy.vectorsearch.proto.NodeAdjacency;
 import io.github.panghy.vectorsearch.proto.PqCodesBlock;
+import io.github.panghy.vectorsearch.proto.PqEncodedVector;
+import io.github.panghy.vectorsearch.proto.RawVector;
 import io.github.panghy.vectorsearch.proto.UnlinkTask;
 import io.github.panghy.vectorsearch.search.BeamSearchEngine;
 import io.github.panghy.vectorsearch.search.SearchResult;
@@ -41,12 +44,14 @@ import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
 import io.github.panghy.vectorsearch.storage.VectorSketchStorage;
+import io.github.panghy.vectorsearch.workers.LinkWorker;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.LongHistogram;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Tracer;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -57,7 +62,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
@@ -98,7 +102,7 @@ import java.util.logging.Logger;
  * List<SearchResult> results = index.search(queryVector, topK).join();
  * }</pre>
  */
-public class FdbVectorSearch implements VectorSearch {
+public class FdbVectorSearch implements VectorSearch, AutoCloseable {
 
   private static final Logger LOGGER = Logger.getLogger(FdbVectorSearch.class.getName());
 
@@ -206,12 +210,6 @@ public class FdbVectorSearch implements VectorSearch {
   private final Cache<Long, NodeAdjacency> adjacencyCache;
 
   /**
-   * Currently active codebook version - cached for read-only operations
-   * For transactional consistency, always read from database within transactions
-   */
-  private final AtomicInteger cachedCodebookVersion;
-
-  /**
    * Cached entry points for search initialization
    */
   private final AtomicReference<List<Long>> cachedEntryPoints;
@@ -276,11 +274,6 @@ public class FdbVectorSearch implements VectorSearch {
   private GraphConnectivityMonitor connectivityMonitor;
 
   /**
-   * Product quantizer for distance computation
-   */
-  private ProductQuantizer productQuantizer;
-
-  /**
    * Beam search engine for graph traversal
    */
   private BeamSearchEngine beamSearchEngine;
@@ -289,6 +282,16 @@ public class FdbVectorSearch implements VectorSearch {
    * Vector index keys helper
    */
   private VectorIndexKeys vectorIndexKeys;
+
+  /**
+   * Link worker thread for processing link tasks
+   */
+  private LinkWorker linkWorker;
+
+  /**
+   * Thread running the link worker
+   */
+  private Thread linkWorkerThread;
 
   // ============= Runtime State =============
 
@@ -369,7 +372,6 @@ public class FdbVectorSearch implements VectorSearch {
         .build();
 
     // Initialize state
-    this.cachedCodebookVersion = new AtomicInteger(0);
     this.cachedEntryPoints = new AtomicReference<>(List.of());
     this.initialized = false;
     this.storedConfig = null;
@@ -388,7 +390,6 @@ public class FdbVectorSearch implements VectorSearch {
     this.nodeAdjacencyStorage = null;
     this.entryPointStorage = null;
     this.graphMetaStorage = null;
-    this.productQuantizer = null;
     this.connectivityMonitor = null;
   }
 
@@ -403,19 +404,24 @@ public class FdbVectorSearch implements VectorSearch {
 
     // Initialize storage components
     this.vectorIndexKeys = new VectorIndexKeys(collectionSubspace);
-    this.codebookStorage = new CodebookStorage(database, vectorIndexKeys);
 
-    // Get PQ configuration from stored config or use defaults
+    // Get metric and subvectors for CodebookStorage
+    DistanceMetrics.Metric metric = storedConfig != null
+        ? DistanceMetrics.Metric.valueOf(storedConfig.getMetric())
+        : convertDistanceMetric(config.getDistanceMetric());
     int subVectors = storedConfig != null && storedConfig.getPqSubvectors() > 0
         ? storedConfig.getPqSubvectors()
-        : config.getDimension() / 2;
-    int blockSize = 256; // Default block size
+        : config.getPqSubvectors();
+
+    int dimension = storedConfig != null ? storedConfig.getDimension() : config.getDimension();
+
+    this.codebookStorage = new CodebookStorage(database, vectorIndexKeys, dimension, subVectors, metric);
 
     this.pqBlockStorage = new PqBlockStorage(
         database,
         vectorIndexKeys,
+        config.getCodesPerBlock(),
         subVectors,
-        blockSize,
         instantSource,
         config.getAdjacencyCacheSize(),
         Duration.ofMinutes(5));
@@ -428,11 +434,7 @@ public class FdbVectorSearch implements VectorSearch {
         Duration.ofMinutes(5));
     this.entryPointStorage = new EntryPointStorage(collectionSubspace, instantSource);
     this.graphMetaStorage = new GraphMetaStorage(vectorIndexKeys, instantSource);
-    this.vectorSketchStorage = new VectorSketchStorage(vectorIndexKeys);
-
-    // Initialize product quantizer
-    DistanceMetrics.Metric metric = convertDistanceMetric(config.getDistanceMetric());
-    this.productQuantizer = new ProductQuantizer(config.getDimension(), subVectors, metric);
+    this.vectorSketchStorage = new VectorSketchStorage(vectorIndexKeys, dimension);
 
     // Initialize connectivity monitor
     this.connectivityMonitor = new GraphConnectivityMonitor(
@@ -442,11 +444,26 @@ public class FdbVectorSearch implements VectorSearch {
         nodeAdjacencyStorage,
         pqBlockStorage,
         entryPointStorage,
-        productQuantizer);
+        codebookStorage);
 
     // Initialize beam search engine
     this.beamSearchEngine =
-        new BeamSearchEngine(nodeAdjacencyStorage, pqBlockStorage, entryPointStorage, productQuantizer);
+        new BeamSearchEngine(nodeAdjacencyStorage, pqBlockStorage, entryPointStorage, codebookStorage);
+
+    // Initialize link worker
+    this.linkWorker = new LinkWorker(
+        database,
+        linkTaskQueue,
+        vectorIndexKeys,
+        pqBlockStorage,
+        nodeAdjacencyStorage,
+        entryPointStorage,
+        codebookStorage,
+        beamSearchEngine,
+        config.getGraphDegree(),
+        config.getMaxSearchVisits(),
+        1.2, // pruning alpha - typical DiskANN value
+        instantSource);
   }
 
   /**
@@ -542,6 +559,9 @@ public class FdbVectorSearch implements VectorSearch {
               // Initialize storage components
               index.initializeStorageComponents();
 
+              // Start link worker thread
+              index.startLinkWorker();
+
               // Schedule maintenance tasks if configured
               if (config.isAutoRepairEnabled()) {
                 index.scheduleMaintenanceTasks();
@@ -571,7 +591,6 @@ public class FdbVectorSearch implements VectorSearch {
           tr.set(cbvKey, encodeInt(0));
 
           this.storedConfig = protoConfig;
-          this.cachedCodebookVersion.set(0);
           this.initialized = true;
 
           LOGGER.info("Created new vector search index with dimension=" + config.getDimension());
@@ -589,7 +608,6 @@ public class FdbVectorSearch implements VectorSearch {
             return tr.get(cbvKey).thenAccept(cbvBytes -> {
               if (cbvBytes != null) {
                 int cbv = (int) decodeInt(cbvBytes);
-                this.cachedCodebookVersion.set(cbv);
               }
 
               this.initialized = true;
@@ -621,6 +639,46 @@ public class FdbVectorSearch implements VectorSearch {
       long repairIntervalMs = config.getGraphRepairInterval().toMillis();
       maintenanceScheduler.scheduleWithFixedDelay(
           this::checkAndRepairConnectivity, repairIntervalMs, repairIntervalMs, TimeUnit.MILLISECONDS);
+    }
+  }
+
+  /**
+   * Starts the link worker thread for processing link tasks.
+   * Only starts if codebooks exist.
+   */
+  private void startLinkWorker() {
+    // Check if we have codebooks available
+    CompletableFuture<Integer> versionFuture = codebookStorage.getActiveVersion();
+    int activeVersion = versionFuture.join();
+    if (linkWorker != null && linkWorkerThread == null && activeVersion > 0) {
+      linkWorkerThread = new Thread(linkWorker, "LinkWorker");
+      linkWorkerThread.setDaemon(true);
+      linkWorkerThread.start();
+      LOGGER.info("Started LinkWorker thread with codebook version " + activeVersion);
+    } else if (activeVersion <= 0) {
+      LOGGER.info("Not starting LinkWorker - no codebooks available yet");
+    }
+  }
+
+  /**
+   * Stops the link worker thread gracefully.
+   */
+  private void stopLinkWorker() {
+    if (linkWorker != null) {
+      linkWorker.stop();
+    }
+    if (linkWorkerThread != null) {
+      try {
+        linkWorkerThread.join(5000); // Wait up to 5 seconds
+        if (linkWorkerThread.isAlive()) {
+          LOGGER.warning("LinkWorker thread did not stop gracefully");
+          linkWorkerThread.interrupt();
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        LOGGER.warning("Interrupted while waiting for LinkWorker to stop");
+      }
+      linkWorkerThread = null;
     }
   }
 
@@ -656,7 +714,9 @@ public class FdbVectorSearch implements VectorSearch {
 
     // Get active codebook version for distance calculations
     // Using cached version for read-only operation (non-transactional)
-    int codebookVersion = cachedCodebookVersion.get();
+    // Get the latest ProductQuantizer
+    ProductQuantizer pq = codebookStorage.getLatestProductQuantizer().join();
+    int codebookVersion = pq != null ? pq.getCodebookVersion() : 0;
 
     // Check if analysis is needed (default: every 6 hours)
     return database.runAsync(tx -> {
@@ -808,45 +868,181 @@ public class FdbVectorSearch implements VectorSearch {
   private CompletableFuture<Void> upsertInternal(Transaction tr, Map<Long, float[]> vectors) {
     // Ensure latest codebooks are loaded
     return ensureLatestCodebooksLoaded(tr).thenCompose(loaded -> {
-      // Get the PQ if codebooks are loaded
-      ProductQuantizer pq = loaded ? productQuantizer : null;
-      int cbv = loaded ? cachedCodebookVersion.get() : 0;
-
-      List<CompletableFuture<Void>> futures = new ArrayList<>();
-
-      for (Map.Entry<Long, float[]> entry : vectors.entrySet()) {
-        long nodeId = entry.getKey();
-        float[] vector = entry.getValue();
-
-        // Ensure node adjacency exists
-        CompletableFuture<Void> adjFuture = nodeAdjacencyStorage.storeAdjacency(tr, nodeId, List.of());
-
-        // Create link task
-        LinkTask.Builder taskBuilder =
-            LinkTask.newBuilder().setNodeId(nodeId).setCodebookVersion(cbv);
-
-        // Encode vector if PQ is available
-        if (pq != null) {
-          byte[] pqCode = pq.encode(vector);
-          taskBuilder.setPqCode(ByteString.copyFrom(pqCode));
-        }
-
-        // Store vector sketch for future codebook retraining
-        CompletableFuture<Void> sketchFuture = vectorSketchStorage.storeVectorSketch(tr, nodeId, vector);
-
-        // Enqueue link task
-        CompletableFuture<Void> enqueueFuture =
-            linkTaskQueue.enqueue(tr, nodeId, taskBuilder.build()).thenApply(metadata -> null);
-
-        // Combine all operations for this vector
-        futures.add(allOf(adjFuture, sketchFuture, enqueueFuture));
+      // If no codebooks exist, check if we should train initial codebooks
+      ProductQuantizer currentPq =
+          codebookStorage.getLatestProductQuantizer().join();
+      if (!loaded && (currentPq == null || currentPq.getCodebookVersion() == 0)) {
+        return maybeTrainInitialCodebooks(tr, vectors).thenCompose(trained -> {
+          if (trained) {
+            // Retry loading after training
+            return ensureLatestCodebooksLoaded(tr)
+                .thenCompose(reloaded -> processUpsertWithCodebooks(tr, vectors, reloaded));
+          } else {
+            // Continue without codebooks
+            return processUpsertWithCodebooks(tr, vectors, false);
+          }
+        });
       }
 
-      // Update metrics
-      VECTORS_INSERTED.add(vectors.size());
-
-      return allOf(futures.toArray(new CompletableFuture[0]));
+      // Codebooks already exist or loaded
+      return processUpsertWithCodebooks(tr, vectors, loaded);
     });
+  }
+
+  /**
+   * Process the actual upsert operations with or without codebooks.
+   */
+  private CompletableFuture<Void> processUpsertWithCodebooks(
+      Transaction tr, Map<Long, float[]> vectors, boolean loaded) {
+    // Get the PQ if codebooks are loaded
+    ProductQuantizer pq =
+        loaded ? codebookStorage.getLatestProductQuantizer().join() : null;
+    int cbv = loaded && pq != null ? pq.getCodebookVersion() : 0;
+
+    List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+    for (Map.Entry<Long, float[]> entry : vectors.entrySet()) {
+      long nodeId = entry.getKey();
+      float[] vector = entry.getValue();
+
+      // Ensure node adjacency exists
+      CompletableFuture<Void> adjFuture = nodeAdjacencyStorage.storeAdjacency(tr, nodeId, List.of());
+
+      // Create link task with either PQ-encoded or raw vector
+      LinkTask.Builder taskBuilder = LinkTask.newBuilder().setNodeId(nodeId);
+
+      if (pq != null && cbv > 0) {
+        // Encode vector with PQ
+        byte[] pqCode = pq.encode(vector);
+        PqEncodedVector pqEncoded = PqEncodedVector.newBuilder()
+            .setPqCode(ByteString.copyFrom(pqCode))
+            .setCodebookVersion(cbv)
+            .build();
+        taskBuilder.setPqEncoded(pqEncoded);
+      } else {
+        // Store raw vector for later encoding
+        RawVector.Builder rawVectorBuilder = RawVector.newBuilder();
+        for (float value : vector) {
+          rawVectorBuilder.addValues(value);
+        }
+        taskBuilder.setRawVector(rawVectorBuilder.build());
+      }
+
+      // Store vector sketch for future codebook retraining
+      CompletableFuture<Void> sketchFuture = vectorSketchStorage.storeVectorSketch(tr, nodeId, vector);
+
+      // Enqueue link task
+      CompletableFuture<Void> enqueueFuture =
+          linkTaskQueue.enqueue(tr, nodeId, taskBuilder.build()).thenApply(metadata -> null);
+
+      // Combine all operations for this vector
+      futures.add(allOf(adjFuture, sketchFuture, enqueueFuture));
+    }
+
+    // Update metrics
+    VECTORS_INSERTED.add(vectors.size());
+
+    return allOf(futures.toArray(CompletableFuture[]::new));
+  }
+
+  /**
+   * Check if we should train initial codebooks and do so if needed.
+   * This is called when no codebooks exist and vectors are being inserted.
+   *
+   * @param tr the transaction to use
+   * @param currentVectors the vectors being inserted in this batch
+   * @return true if codebooks were trained and stored
+   */
+  private CompletableFuture<Boolean> maybeTrainInitialCodebooks(Transaction tr, Map<Long, float[]> currentVectors) {
+    // Check if we have enough vectors to train
+    // We need at least some vectors for training, but we'll also check if there are existing sketches
+
+    return vectorSketchStorage.countVectorSketches(tr).thenCompose(existingCount -> {
+      int totalVectors = existingCount + currentVectors.size();
+
+      // We need at least 100 vectors to train meaningful codebooks
+      // This threshold can be adjusted based on requirements
+      if (totalVectors < 100) {
+        LOGGER.info("Not enough vectors for training codebooks. Have " + totalVectors + ", need at least 100");
+        return completedFuture(false);
+      }
+
+      LOGGER.info("Training initial codebooks with " + totalVectors + " vectors");
+
+      // Collect training vectors: current batch + sample of existing sketches
+      List<float[]> trainingVectors = new ArrayList<>(currentVectors.values());
+
+      // If we have existing sketches, load a sample of them
+      if (existingCount > 0) {
+        int sampleSize = Math.min(existingCount, 1000 - currentVectors.size());
+        return vectorSketchStorage.sampleVectorSketches(tr, sampleSize).thenCompose(sketches -> {
+          trainingVectors.addAll(sketches);
+          return trainAndStoreCodebooks(tr, trainingVectors);
+        });
+      } else {
+        return trainAndStoreCodebooks(tr, trainingVectors);
+      }
+    });
+  }
+
+  /**
+   * Train codebooks and store them in the database.
+   *
+   * @param tr the transaction to use
+   * @param trainingVectors the vectors to use for training
+   * @return true if successful
+   */
+  private CompletableFuture<Boolean> trainAndStoreCodebooks(Transaction tr, List<float[]> trainingVectors) {
+    // Train the product quantizer
+    // Get metrics and parameters from config
+    int dimension = config.getDimension();
+    int numSubvectors = config.getPqSubvectors();
+    DistanceMetrics.Metric metric = convertDistanceMetric(config.getDistanceMetric());
+
+    return ProductQuantizer.train(dimension, numSubvectors, metric, trainingVectors)
+        .thenCompose(codebooks -> {
+          // Get the trained codebooks
+
+          if (codebooks == null) {
+            LOGGER.severe("Failed to train codebooks");
+            return completedFuture(false);
+          }
+
+          // Get the next available codebook version
+          return codebookStorage.listVersions().thenCompose(versions -> {
+            int nextVersion = versions.isEmpty()
+                ? 1
+                : versions.stream().max(Integer::compare).get() + 1;
+
+            CodebookStorage.TrainingStats stats =
+                new CodebookStorage.TrainingStats(trainingVectors.size(), null);
+
+            // Store codebooks with the next available version
+            return codebookStorage
+                .storeCodebooks(nextVersion, codebooks, stats)
+                .thenCompose(storeResult -> {
+                  // Update active codebook version in both database and CodebookStorage
+                  byte[] cbvKey = vectorIndexKeys.activeCodebookVersionKey();
+                  tr.set(cbvKey, encodeInt(nextVersion));
+
+                  // Also update the active version in CodebookStorage
+                  return codebookStorage.setActiveVersion(nextVersion);
+                })
+                .thenApply(v -> {
+                  LOGGER.info("Successfully trained and stored initial codebooks (version "
+                      + nextVersion + ")");
+
+                  // Start LinkWorker now that we have codebooks
+                  startLinkWorker();
+
+                  return true;
+                });
+          });
+        })
+        .exceptionally(ex -> {
+          LOGGER.severe("Error training codebooks: " + ex.getMessage());
+          return false;
+        });
   }
 
   /**
@@ -855,14 +1051,14 @@ public class FdbVectorSearch implements VectorSearch {
    * @param tr the transaction to use
    * @return the active codebook version, or 0 if not set
    */
-  private CompletableFuture<Integer> readActiveCodebookVersion(Transaction tr) {
+  private CompletableFuture<Long> readActiveCodebookVersion(Transaction tr) {
     // Construct the active codebook version key using metaSubspace
     byte[] key = metaSubspace.pack(Tuple.from("cbv", "active"));
     return tr.get(key).thenApply(value -> {
       if (value == null) {
-        return 0;
+        return 0L;
       }
-      return (int) decodeInt(value);
+      return decodeInt(value);
     });
   }
 
@@ -886,9 +1082,6 @@ public class FdbVectorSearch implements VectorSearch {
    * @return future containing true if successfully loaded, false otherwise
    */
   private CompletableFuture<Boolean> ensureLatestCodebooksLoaded(Transaction tr) {
-    // First check if we might already have the latest version loaded (optimistic check)
-    int currentCached = cachedCodebookVersion.get();
-
     // Read the active codebook version within the transaction
     return readActiveCodebookVersion(tr).thenCompose(latestVersion -> {
       if (latestVersion == 0) {
@@ -896,16 +1089,15 @@ public class FdbVectorSearch implements VectorSearch {
         return completedFuture(false);
       }
 
-      // Check if we already have the latest version loaded (contention-free path)
-      if (currentCached == latestVersion) {
-        return completedFuture(true);
-      }
-
+      // Use semaphore to prevent concurrent loading of the same version
       return codeBooksLoadingSemaphore
           .acquire()
           .thenCompose($ -> {
             // Double-check after acquiring the lock
-            if (cachedCodebookVersion.get() == latestVersion) {
+            ProductQuantizer cachedPq = codebookStorage
+                .getProductQuantizer(latestVersion)
+                .join();
+            if (cachedPq != null && cachedPq.getCodebookVersion() == latestVersion) {
               return completedFuture(true);
             }
             return codebookStorage
@@ -917,8 +1109,7 @@ public class FdbVectorSearch implements VectorSearch {
                   }
 
                   // Load into ProductQuantizer
-                  productQuantizer.loadCodebooks(codebooks);
-                  cachedCodebookVersion.set(latestVersion);
+                  // Codebooks are now loaded via cache
                   LOGGER.fine("Loaded codebooks version " + latestVersion + " into ProductQuantizer");
                   return true;
                 })
@@ -960,9 +1151,14 @@ public class FdbVectorSearch implements VectorSearch {
           return completedFuture(List.of());
         }
 
-        // Perform beam search with the loaded codebook version
-        int codebookVersion = cachedCodebookVersion.get();
-        return beamSearchEngine.search(tr, queryVector, k, searchList, maxVisits, codebookVersion);
+        // Get ProductQuantizer and perform beam search
+        return codebookStorage.getLatestProductQuantizer().thenCompose(pq -> {
+          if (pq == null) {
+            LOGGER.warning("No ProductQuantizer available for search");
+            return completedFuture(List.of());
+          }
+          return beamSearchEngine.search(tr, queryVector, k, searchList, maxVisits, pq);
+        });
       });
     });
   }
@@ -1003,6 +1199,35 @@ public class FdbVectorSearch implements VectorSearch {
     return completedFuture(initialized && database != null);
   }
 
+  @Override
+  public void close() {
+    LOGGER.info("Closing FdbVectorSearch index");
+
+    // Stop the link worker thread
+    stopLinkWorker();
+
+    // Shutdown maintenance scheduler
+    if (maintenanceScheduler != null && !maintenanceScheduler.isShutdown()) {
+      maintenanceScheduler.shutdown();
+      try {
+        if (!maintenanceScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+          maintenanceScheduler.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        maintenanceScheduler.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
+    }
+
+    // Clear caches
+    if (codebookCache != null) {
+      codebookCache.clear();
+    }
+    // PqBlockStorage cache will be cleared when the storage is garbage collected
+
+    LOGGER.info("FdbVectorSearch index closed");
+  }
+
   /**
    * Waits for pending indexing operations to complete by checking task queue status.
    * This is primarily useful for testing to ensure vectors are indexed before searching.
@@ -1020,33 +1245,37 @@ public class FdbVectorSearch implements VectorSearch {
 
     LOGGER.info("Waiting for indexing to complete");
 
-    return completedFuture(null);
+    // Check if LinkWorker is connected and queues are available
+    if (linkTaskQueue == null || unlinkTaskQueue == null) {
+      // If queues are not available, just return immediately
+      return completedFuture(null);
+    }
 
-    // TODO actually wait when LinkWorker is hooked up.
-    //    Instant startTime = Instant.now();
-    //    return whileTrue(() -> {
-    //      CompletableFuture<Boolean> linkQueueEmpty = linkTaskQueue.isEmpty();
-    //      CompletableFuture<Boolean> unlinkQueueEmpty = unlinkTaskQueue.isEmpty();
-    //      return allOf(linkQueueEmpty, unlinkQueueEmpty)
-    //          .thenApply($ -> {
-    //            if (Instant.now().isAfter(startTime.plus(maxWait))) {
-    //              return false;
-    //            }
-    //            if (!linkQueueEmpty.join() || !unlinkQueueEmpty.join()) {
-    //              LOGGER.info("Indexing not complete, waiting...");
-    //            } else {
-    //              LOGGER.info("Indexing complete");
-    //            }
-    //            return !linkQueueEmpty.join() || !unlinkQueueEmpty.join();
-    //          })
-    //          .thenCompose(shouldLoop -> {
-    //            if (shouldLoop) {
-    //              CompletableFuture<Boolean> toReturn = new CompletableFuture<>();
-    //              return toReturn.completeOnTimeout(true, 1, TimeUnit.SECONDS);
-    //            }
-    //            return completedFuture(false);
-    //          });
-    //    });
+    Instant startTime = Instant.now();
+    return AsyncUtil.whileTrue(() -> {
+      CompletableFuture<Boolean> linkQueueEmpty = linkTaskQueue.isEmpty();
+      CompletableFuture<Boolean> unlinkQueueEmpty = unlinkTaskQueue.isEmpty();
+      return allOf(linkQueueEmpty, unlinkQueueEmpty)
+          .thenApply($ -> {
+            if (Instant.now().isAfter(startTime.plus(maxWait))) {
+              return false;
+            }
+            if (!linkQueueEmpty.join() || !unlinkQueueEmpty.join()) {
+              LOGGER.info("Waiting for indexing to complete. link_queue is_empty: "
+                  + linkQueueEmpty.join() + ", unlink_queue is_empty: " + unlinkQueueEmpty.join());
+            } else {
+              LOGGER.info("Indexing complete");
+            }
+            return !linkQueueEmpty.join() || !unlinkQueueEmpty.join();
+          })
+          .thenCompose(shouldLoop -> {
+            if (shouldLoop) {
+              CompletableFuture<Boolean> toReturn = new CompletableFuture<>();
+              return toReturn.completeOnTimeout(true, 1, TimeUnit.SECONDS);
+            }
+            return completedFuture(false);
+          });
+    });
   }
 
   // Helper classes for cache keys
