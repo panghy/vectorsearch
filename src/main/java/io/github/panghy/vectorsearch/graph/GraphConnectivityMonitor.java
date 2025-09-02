@@ -23,8 +23,9 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiFunction;
-import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Monitors and repairs graph connectivity in the vector search index.
@@ -42,7 +43,7 @@ import java.util.stream.Collectors;
  * in the main connected component.
  */
 public class GraphConnectivityMonitor {
-  private static final Logger LOGGER = Logger.getLogger(GraphConnectivityMonitor.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(GraphConnectivityMonitor.class);
 
   private static final int SAMPLE_SIZE = 10000; // Number of random nodes to sample for analysis
   private static final int MAX_BFS_VISITS = 1000; // Max nodes to visit per BFS
@@ -99,7 +100,7 @@ public class GraphConnectivityMonitor {
         LOGGER.info("Graph needs repair, starting repair process");
         return repairConnectivity(tx, analysisResult, codebookVersion);
       } else {
-        LOGGER.fine("Graph connectivity is healthy");
+        LOGGER.debug("Graph connectivity is healthy");
         return completedFuture(null);
       }
     }));
@@ -138,7 +139,7 @@ public class GraphConnectivityMonitor {
       return completedFuture(null);
     }
 
-    LOGGER.info(String.format("Repairing %d orphaned nodes", orphanedNodes.size()));
+    LOGGER.info("Repairing {} orphaned nodes", orphanedNodes.size());
 
     // Create distance function for finding nearest neighbors
     BiFunction<Long, Long, CompletableFuture<Float>> distanceFunction =
@@ -168,7 +169,7 @@ public class GraphConnectivityMonitor {
     return findNearestInMainComponent(tx, orphanId, analysis, REPAIR_NEIGHBORS, distanceFunction)
         .thenCompose(nearestNeighbors -> {
           if (nearestNeighbors.isEmpty()) {
-            LOGGER.warning("Could not find neighbors for orphan " + orphanId);
+            LOGGER.warn("Could not find neighbors for orphan {}", orphanId);
             return completedFuture(null);
           }
 
@@ -391,7 +392,7 @@ public class GraphConnectivityMonitor {
     // Generate random probe point within range
     long probeId = selectedRange.min + (long) (random.nextDouble() * (selectedRange.max - selectedRange.min + 1));
 
-    LOGGER.info("Probing range " + selectedRange.min + " - " + selectedRange.max + " at " + probeId);
+    LOGGER.info("Probing range {} - {} at {}", selectedRange.min, selectedRange.max, probeId);
 
     // Probe for node
     byte[] searchKey = keys.nodeAdjacencyKey(probeId);
@@ -402,7 +403,7 @@ public class GraphConnectivityMonitor {
       long foundId = extractNodeIdFromKey(foundKey);
 
       if (foundId >= selectedRange.min && foundId <= selectedRange.max) {
-        LOGGER.info("Found node " + foundId + " in range " + selectedRange.min + " - " + selectedRange.max);
+        LOGGER.info("Found node {} in range {} - {}", foundId, selectedRange.min, selectedRange.max);
         // Hit - found a node in the range
         boolean isNewNode = sampledIds.add(foundId);
 
@@ -436,7 +437,7 @@ public class GraphConnectivityMonitor {
         return sampleWithRanges(tx, ranges, sampledIds, targetSize, !useForward);
 
       } else {
-        LOGGER.info("Missed node in range " + selectedRange.min + " - " + selectedRange.max + " at " + probeId);
+        LOGGER.info("Missed node in range {} - {} at {}", selectedRange.min, selectedRange.max, probeId);
         // Miss - split the range
         List<SamplingRange> newRanges = new ArrayList<>(ranges);
         newRanges.remove(selectedRange);

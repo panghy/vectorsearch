@@ -12,7 +12,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Storage layer for managing search entry points in the vector index.
@@ -29,7 +30,7 @@ import java.util.logging.Logger;
  * transaction boundaries and batch operations efficiently.
  */
 public class EntryPointStorage {
-  private static final Logger LOGGER = Logger.getLogger(EntryPointStorage.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(EntryPointStorage.class);
 
   private final VectorIndexKeys keys;
   private final InstantSource instantSource;
@@ -87,11 +88,11 @@ public class EntryPointStorage {
       }
 
       tx.set(key, builder.build().toByteArray());
-      LOGGER.fine(String.format(
-          "Stored entry list with %d primary, %d random, %d high-degree entries",
+      LOGGER.debug(
+          "Stored entry list with {} primary, {} random, {} high-degree entries",
           primaryEntries != null ? primaryEntries.size() : 0,
           randomEntries != null ? randomEntries.size() : 0,
-          highDegreeEntries != null ? highDegreeEntries.size() : 0));
+          highDegreeEntries != null ? highDegreeEntries.size() : 0);
 
       return null;
     });
