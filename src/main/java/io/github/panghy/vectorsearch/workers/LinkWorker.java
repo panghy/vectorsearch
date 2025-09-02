@@ -6,6 +6,7 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
+import com.apple.foundationdb.async.AsyncUtil;
 import io.github.panghy.taskqueue.TaskClaim;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.vectorsearch.graph.RobustPruning;
@@ -13,6 +14,8 @@ import io.github.panghy.vectorsearch.graph.RobustPruning.Candidate;
 import io.github.panghy.vectorsearch.graph.RobustPruning.PruningConfig;
 import io.github.panghy.vectorsearch.proto.LinkTask;
 import io.github.panghy.vectorsearch.proto.NodeAdjacency;
+import io.github.panghy.vectorsearch.proto.PqEncodedVector;
+import io.github.panghy.vectorsearch.proto.RawVector;
 import io.github.panghy.vectorsearch.search.BeamSearchEngine;
 import io.github.panghy.vectorsearch.search.SearchResult;
 import io.github.panghy.vectorsearch.storage.CodebookStorage;
@@ -101,7 +104,7 @@ public class LinkWorker implements Runnable {
   private static final Duration CLAIM_BUDGET = Duration.ofMillis(500);
   private static final Duration TRANSACTION_BUDGET = Duration.ofSeconds(4);
   private static final int MIN_BATCH_SIZE = 1;
-  private static final int MAX_BATCH_SIZE = 100;
+  private static final int MAX_BATCH_SIZE = 10000;
   private static final int INITIAL_BATCH_SIZE = 10;
 
   // Dependencies
@@ -173,151 +176,168 @@ public class LinkWorker implements Runnable {
   public void run() {
     LOGGER.info("Link worker started");
 
-    while (running.get()) {
-      try {
-        processBatch();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        LOGGER.info("Link worker interrupted");
-        break;
-      } catch (Exception e) {
-        LOGGER.log(Level.SEVERE, "Error processing batch", e);
-      }
-    }
+    // Use AsyncUtil.whileTrue for the main loop
+    AsyncUtil.whileTrue(() -> {
+          if (!running.get()) {
+            return completedFuture(false);
+          }
+
+          return processBatchAsync().thenApply(v -> running.get()).exceptionally(e -> {
+            if (e.getCause() instanceof InterruptedException) {
+              Thread.currentThread().interrupt();
+              LOGGER.info("Link worker interrupted");
+              return false;
+            }
+            LOGGER.log(Level.SEVERE, "Error processing batch", e);
+            return running.get();
+          });
+        })
+        .join();
 
     LOGGER.info(String.format(
         "Link worker stopped. Processed: %d, Failed: %d", totalProcessed.get(), totalFailed.get()));
   }
 
   /**
-   * Processes a batch of link tasks.
+   * Processes a batch of link tasks asynchronously.
    */
-  void processBatch() throws InterruptedException {
+  CompletableFuture<Void> processBatchAsync() {
     Span span = TRACER.spanBuilder("LinkWorker.processBatch")
         .setSpanKind(SpanKind.INTERNAL)
         .startSpan();
 
-    try {
-      // Phase 1: Claim tasks
-      List<TaskClaim<Long, LinkTask>> claims = claimTasks();
-      if (claims.isEmpty()) {
-        // No tasks available, wait a bit
-        Thread.sleep(100);
-        return;
-      }
+    // Phase 1: Claim tasks
+    return claimTasksAsync()
+        .thenCompose(claims -> {
+          if (claims.isEmpty()) {
+            // No tasks available, wait a bit
+            CompletableFuture<Void> delay = new CompletableFuture<>();
+            return delay.completeOnTimeout(null, 100, TimeUnit.MILLISECONDS);
+          }
 
-      BATCH_SIZE.record(claims.size());
-      span.setAttribute("batch.size", claims.size());
+          BATCH_SIZE.record(claims.size());
+          span.setAttribute("batch.size", claims.size());
 
-      // Phase 2: Process tasks using common logic
-      Instant startTime = instantSource.instant();
-      boolean success = processClaimedTasks(claims);
-      Duration transactionDuration = Duration.between(startTime, instantSource.instant());
+          // Phase 2: Process tasks using common logic
+          Instant startTime = instantSource.instant();
+          return processClaimedTasksAsync(claims).thenAccept(success -> {
+            Duration transactionDuration = Duration.between(startTime, instantSource.instant());
+            TRANSACTION_DURATION.record(transactionDuration.toMillis());
+            span.setAttribute("transaction.duration_ms", transactionDuration.toMillis());
 
-      TRANSACTION_DURATION.record(transactionDuration.toMillis());
-      span.setAttribute("transaction.duration_ms", transactionDuration.toMillis());
-
-      // Phase 3: Update metrics and adjust batch size
-      if (success) {
-        totalProcessed.addAndGet(claims.size());
-        adjustBatchSize(transactionDuration, true);
-        span.setStatus(StatusCode.OK);
-      } else {
-        totalFailed.addAndGet(claims.size());
-        adjustBatchSize(transactionDuration, false);
-        span.setStatus(StatusCode.ERROR, "Transaction failed");
-      }
-
-    } finally {
-      span.end();
-    }
+            // Phase 3: Update metrics and adjust batch size
+            if (success) {
+              totalProcessed.addAndGet(claims.size());
+              adjustBatchSize(transactionDuration, true);
+              span.setStatus(StatusCode.OK);
+            } else {
+              totalFailed.addAndGet(claims.size());
+              adjustBatchSize(transactionDuration, false);
+              span.setStatus(StatusCode.ERROR, "Transaction failed");
+            }
+          });
+        })
+        .whenComplete((v, e) -> span.end());
   }
 
   /**
-   * Claims multiple tasks up to the current batch size.
+   * Claims multiple tasks up to the current batch size asynchronously.
    */
-  List<TaskClaim<Long, LinkTask>> claimTasks() {
+  CompletableFuture<List<TaskClaim<Long, LinkTask>>> claimTasksAsync() {
     List<TaskClaim<Long, LinkTask>> claims = new ArrayList<>();
     Instant claimDeadline = instantSource.instant().plus(CLAIM_BUDGET);
     int targetSize = currentBatchSize.get();
 
-    for (int i = 0; i < targetSize; i++) {
-      if (instantSource.instant().isAfter(claimDeadline)) {
-        LOGGER.fine("Claim budget exhausted after " + i + " claims");
-        break;
-      }
-
-      try {
-        CompletableFuture<TaskClaim<Long, LinkTask>> claimFuture = taskQueue.awaitAndClaimTask(database);
-
-        TaskClaim<Long, LinkTask> claim = claimFuture.get(CLAIM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-
-        claims.add(claim);
-        TASKS_CLAIMED.add(1);
-
-      } catch (TimeoutException e) {
-        // No more tasks immediately available
-        LOGGER.fine("No task available within timeout");
-        break;
-      } catch (Exception e) {
-        LOGGER.log(Level.WARNING, "Failed to claim task", e);
-        break;
-      }
-    }
-
-    LOGGER.fine("Claimed " + claims.size() + " tasks");
-    return claims;
+    return claimTasksRecursive(claims, targetSize, claimDeadline, 0);
   }
 
   /**
-   * Common method to process claimed tasks.
+   * Recursively claims tasks until batch size is reached or deadline expires.
+   */
+  private CompletableFuture<List<TaskClaim<Long, LinkTask>>> claimTasksRecursive(
+      List<TaskClaim<Long, LinkTask>> claims, int targetSize, Instant claimDeadline, int index) {
+
+    if (index >= targetSize || instantSource.instant().isAfter(claimDeadline)) {
+      if (index < targetSize) {
+        LOGGER.fine("Claim budget exhausted after " + index + " claims");
+      }
+      LOGGER.fine("Claimed " + claims.size() + " tasks");
+      return completedFuture(claims);
+    }
+
+    CompletableFuture<TaskClaim<Long, LinkTask>> claimFuture = taskQueue.awaitAndClaimTask(database);
+
+    // Add timeout to the claim future
+    CompletableFuture<TaskClaim<Long, LinkTask>> timeoutFuture = new CompletableFuture<>();
+    claimFuture.orTimeout(CLAIM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).whenComplete((claim, error) -> {
+      if (error != null) {
+        if (error instanceof TimeoutException) {
+          LOGGER.info("No task available within timeout");
+        } else {
+          LOGGER.log(Level.WARNING, "Failed to claim task", error);
+        }
+        timeoutFuture.complete(null);
+      } else {
+        timeoutFuture.complete(claim);
+      }
+    });
+
+    return timeoutFuture.thenCompose(claim -> {
+      if (claim == null) {
+        // No more tasks or error occurred, return what we have
+        LOGGER.info("Claimed " + claims.size() + " tasks");
+        return completedFuture(claims);
+      }
+
+      claims.add(claim);
+      TASKS_CLAIMED.add(1);
+      return claimTasksRecursive(claims, targetSize, claimDeadline, index + 1);
+    });
+  }
+
+  /**
+   * Common method to process claimed tasks asynchronously.
    * Handles the transaction, completion/failure, and returns the success status.
    */
-  private boolean processClaimedTasks(List<TaskClaim<Long, LinkTask>> claims) {
-    boolean success = processTasksInTransaction(claims);
-
-    if (success) {
-      completeTasks(claims);
-    } else {
-      failTasks(claims);
-    }
-
-    return success;
+  private CompletableFuture<Boolean> processClaimedTasksAsync(List<TaskClaim<Long, LinkTask>> claims) {
+    return processTasksInTransactionAsync(claims).thenCompose(success -> {
+      if (success) {
+        LOGGER.info("Processed " + claims.size() + " tasks");
+        return completeTasksAsync(claims).thenApply(v -> success);
+      } else {
+        LOGGER.warning("Failed to process " + claims.size() + " tasks");
+        return failTasksAsync(claims).thenApply(v -> success);
+      }
+    });
   }
 
   /**
-   * Processes all claimed tasks in a single transaction.
+   * Processes all claimed tasks in a single transaction asynchronously.
    */
-  private boolean processTasksInTransaction(List<TaskClaim<Long, LinkTask>> claims) {
-    try {
-      return database.runAsync(tr -> {
-            Instant deadline = instantSource.instant().plus(TRANSACTION_BUDGET);
+  private CompletableFuture<Boolean> processTasksInTransactionAsync(List<TaskClaim<Long, LinkTask>> claims) {
+    LOGGER.info("Claimed " + claims.size() + " tasks");
+    return database.runAsync(tr -> {
+          // Group tasks by PQ block for efficient updates
+          Map<Long, List<TaskClaim<Long, LinkTask>>> tasksByBlock = groupTasksByBlock(claims);
 
-            // Group tasks by PQ block for efficient updates
-            Map<Long, List<TaskClaim<Long, LinkTask>>> tasksByBlock = groupTasksByBlock(claims);
+          // Process each group
+          List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-            // Process each group
-            List<CompletableFuture<Void>> futures = new ArrayList<>();
+          for (Map.Entry<Long, List<TaskClaim<Long, LinkTask>>> entry : tasksByBlock.entrySet()) {
+            futures.add(processBlockGroup(tr, entry.getValue()));
+          }
 
-            for (Map.Entry<Long, List<TaskClaim<Long, LinkTask>>> entry : tasksByBlock.entrySet()) {
-              futures.add(processBlockGroup(tr, entry.getKey(), entry.getValue(), deadline));
-            }
-
-            // Wait for all operations to complete
-            return allOf(futures.toArray(CompletableFuture[]::new)).thenApply(v -> {
-              // Check if we're still within time budget
-              if (instantSource.instant().isAfter(deadline)) {
-                throw new RuntimeException("Transaction exceeded time budget");
-              }
-              return true;
-            });
-          })
-          .get(TRANSACTION_BUDGET.toSeconds() + 1, TimeUnit.SECONDS);
-
-    } catch (Exception e) {
-      LOGGER.log(Level.WARNING, "Transaction failed", e);
-      return false;
-    }
+          // Wait for all operations to complete
+          return allOf(futures.toArray(CompletableFuture[]::new)).thenApply($ -> true);
+        })
+        .orTimeout(TRANSACTION_BUDGET.toSeconds() + 1, TimeUnit.SECONDS)
+        .handle((success, error) -> {
+          if (error != null) {
+            LOGGER.log(Level.WARNING, "Transaction failed", error);
+            return false;
+          }
+          return success;
+        });
   }
 
   /**
@@ -338,58 +358,137 @@ public class LinkWorker implements Runnable {
   /**
    * Processes all tasks in a single PQ block group.
    */
-  private CompletableFuture<Void> processBlockGroup(
-      Transaction tr, long blockNumber, List<TaskClaim<Long, LinkTask>> claims, Instant deadline) {
+  private CompletableFuture<Void> processBlockGroup(Transaction tr, List<TaskClaim<Long, LinkTask>> claims) {
 
-    // Get codebook version from first task (all tasks in a batch should have same version)
-    final int codebookVersion =
-        claims.isEmpty() ? 1 : (int) claims.get(0).task().getCodebookVersion();
+    // First, process any raw vectors to encode them
+    List<CompletableFuture<PqEncodedData>> encodingFutures = new ArrayList<>();
+    for (TaskClaim<Long, LinkTask> claim : claims) {
+      LinkTask task = claim.task();
+      encodingFutures.add(getOrEncodeVector(task));
+    }
 
-    // Validate that the codebook version exists
-    return codebookStorage.loadCodebooks(codebookVersion).thenCompose(codebooks -> {
-      if (codebooks == null) {
-        // Codebook version doesn't exist, fail the transaction
-        return CompletableFuture.failedFuture(
-            new IllegalArgumentException("Codebook version " + codebookVersion + " does not exist"));
-      }
+    return allOf(encodingFutures.toArray(CompletableFuture[]::new)).thenCompose(v -> {
+      // Now all tasks have PQ-encoded data
+      List<PqEncodedData> encodedData =
+          encodingFutures.stream().map(CompletableFuture::join).collect(Collectors.toList());
 
-      // Step 1: Persist PQ codes for all nodes in this block
-      List<CompletableFuture<Void>> persistFutures = new ArrayList<>();
-      for (TaskClaim<Long, LinkTask> claim : claims) {
-        LinkTask task = claim.task();
-        persistFutures.add(pqBlockStorage.storePqCode(
-            tr, claim.taskKey(), task.getPqCode().toByteArray(), (int) task.getCodebookVersion()));
-      }
+      // Get the codebook version (all should be the same after encoding)
+      final int codebookVersion = encodedData.isEmpty() ? 1 : encodedData.get(0).codebookVersion;
 
-      return allOf(persistFutures.toArray(CompletableFuture[]::new)).thenCompose(v -> {
-        // Step 2: Discover neighbors for all nodes
-        List<CompletableFuture<List<Long>>> neighborFutures = new ArrayList<>();
-
-        for (TaskClaim<Long, LinkTask> claim : claims) {
-          neighborFutures.add(discoverNeighbors(tr, claim.taskKey(), claim.task()));
+      // Validate that the codebook version exists
+      return codebookStorage.loadCodebooks(codebookVersion).thenCompose(codebooks -> {
+        if (codebooks == null) {
+          throw new IllegalArgumentException("Codebook version " + codebookVersion + " does not exist");
         }
 
-        return allOf(neighborFutures.toArray(CompletableFuture[]::new)).thenCompose($ -> {
-          // Step 3: Update adjacency lists with back-links
-          List<CompletableFuture<Void>> updateFutures = new ArrayList<>();
+        // Step 1: Persist PQ codes for all nodes in this block
+        List<CompletableFuture<Void>> persistFutures = new ArrayList<>();
+        for (int i = 0; i < claims.size(); i++) {
+          TaskClaim<Long, LinkTask> claim = claims.get(i);
+          PqEncodedData encoded = encodedData.get(i);
+          if (encoded.pqCode != null) {
+            persistFutures.add(pqBlockStorage.storePqCode(
+                tr, claim.taskKey(), encoded.pqCode, encoded.codebookVersion));
+          }
+        }
+
+        return allOf(persistFutures.toArray(CompletableFuture[]::new)).thenCompose($ -> {
+          // Step 2: Discover neighbors for all nodes
+          List<CompletableFuture<List<Long>>> neighborFutures = new ArrayList<>();
 
           for (int i = 0; i < claims.size(); i++) {
             TaskClaim<Long, LinkTask> claim = claims.get(i);
-            List<Long> neighbors = neighborFutures.get(i).join();
-
-            updateFutures.add(
-                updateAdjacencyWithBacklinks(tr, claim.taskKey(), neighbors, codebookVersion));
+            PqEncodedData encoded = encodedData.get(i);
+            neighborFutures.add(discoverNeighborsWithEncoded(
+                tr, claim.taskKey(), encoded.pqCode, encoded.codebookVersion));
           }
-          return allOf(updateFutures.toArray(CompletableFuture[]::new));
+
+          return allOf(neighborFutures.toArray(CompletableFuture[]::new))
+              .thenCompose($$ -> {
+                // Step 3: Update adjacency lists with back-links
+                List<CompletableFuture<Void>> updateFutures = new ArrayList<>();
+
+                for (int i = 0; i < claims.size(); i++) {
+                  TaskClaim<Long, LinkTask> claim = claims.get(i);
+                  List<Long> neighbors =
+                      neighborFutures.get(i).join();
+
+                  updateFutures.add(updateAdjacencyWithBacklinks(
+                      tr, claim.taskKey(), neighbors, codebookVersion));
+                }
+                return allOf(updateFutures.toArray(CompletableFuture[]::new));
+              });
         });
       });
-    }); // Close codebook validation block
+    });
   }
 
   /**
-   * Discovers neighbors for a node using beam search.
+   * Helper class to hold PQ-encoded data.
    */
-  private CompletableFuture<List<Long>> discoverNeighbors(Transaction tr, long nodeId, LinkTask task) {
+  private static class PqEncodedData {
+    final byte[] pqCode;
+    final int codebookVersion;
+
+    PqEncodedData(byte[] pqCode, int codebookVersion) {
+      this.pqCode = pqCode;
+      this.codebookVersion = codebookVersion;
+    }
+  }
+
+  /**
+   * Gets PQ-encoded data from task or encodes raw vector.
+   */
+  private CompletableFuture<PqEncodedData> getOrEncodeVector(LinkTask task) {
+    switch (task.getVectorDataCase()) {
+      case PQ_ENCODED:
+        // Already encoded
+        PqEncodedVector pqEncoded = task.getPqEncoded();
+        return completedFuture(
+            new PqEncodedData(pqEncoded.getPqCode().toByteArray(), (int) pqEncoded.getCodebookVersion()));
+
+      case RAW_VECTOR:
+        // Need to encode with current codebooks
+        RawVector rawVector = task.getRawVector();
+        float[] vector = new float[rawVector.getValuesCount()];
+        for (int i = 0; i < vector.length; i++) {
+          vector[i] = rawVector.getValues(i);
+        }
+
+        // Get the active codebook version and ProductQuantizer from storage
+        return codebookStorage.getActiveVersion().thenCompose(cbv -> {
+          if (cbv < 0) {
+            return CompletableFuture.failedFuture(
+                new IllegalStateException("No active codebook version available"));
+          }
+          return codebookStorage.getProductQuantizer(cbv).thenApply(pq -> {
+            if (pq == null) {
+              throw new IllegalStateException(
+                  "Cannot encode vector - ProductQuantizer not available for version " + cbv);
+            }
+            // Encode the vector
+            byte[] pqCode = pq.encode(vector);
+            return new PqEncodedData(pqCode, cbv);
+          });
+        });
+
+      case VECTORDATA_NOT_SET:
+      default:
+        // No vector data, can't process
+        return CompletableFuture.failedFuture(new IllegalArgumentException("LinkTask has no vector data"));
+    }
+  }
+
+  /**
+   * Discovers neighbors for a node using beam search with encoded data.
+   */
+  private CompletableFuture<List<Long>> discoverNeighborsWithEncoded(
+      Transaction tr, long nodeId, byte[] pqCode, int codebookVersion) {
+    // If no PQ code, can't search for neighbors
+    if (pqCode == null) {
+      return completedFuture(new ArrayList<>());
+    }
+
     // Load entry points
     return entryPointStorage.getEntryPoints(tr).thenCompose(entryPoints -> {
       if (entryPoints.isEmpty()) {
@@ -402,8 +501,8 @@ public class LinkWorker implements Runnable {
           .searchForNeighbors(
               tr,
               nodeId,
-              task.getPqCode().toByteArray(),
-              (int) task.getCodebookVersion(),
+              pqCode,
+              codebookVersion,
               entryPoints,
               graphDegree * 2, // Search for more candidates
               maxSearchVisits)
@@ -590,32 +689,44 @@ public class LinkWorker implements Runnable {
   }
 
   /**
-   * Marks all tasks as completed.
+   * Marks all tasks as completed asynchronously.
    */
-  private void completeTasks(List<TaskClaim<Long, LinkTask>> claims) {
+  private CompletableFuture<Void> completeTasksAsync(List<TaskClaim<Long, LinkTask>> claims) {
+    List<CompletableFuture<Void>> futures = new ArrayList<>();
+
     for (TaskClaim<Long, LinkTask> claim : claims) {
-      try {
-        claim.complete().get(5, TimeUnit.SECONDS);
-        TASKS_COMPLETED.add(1);
-      } catch (Exception e) {
-        LOGGER.log(Level.WARNING, "Failed to complete task " + claim.taskKey(), e);
-        TASKS_FAILED.add(1);
-      }
+      CompletableFuture<Void> completeFuture = claim.complete()
+          .orTimeout(5, TimeUnit.SECONDS)
+          .thenAccept(v -> TASKS_COMPLETED.add(1))
+          .exceptionally(e -> {
+            LOGGER.log(Level.WARNING, "Failed to complete task " + claim.taskKey(), e);
+            TASKS_FAILED.add(1);
+            return null;
+          });
+      futures.add(completeFuture);
     }
+
+    return allOf(futures.toArray(CompletableFuture[]::new));
   }
 
   /**
-   * Marks all tasks as failed for retry.
+   * Marks all tasks as failed for retry asynchronously.
    */
-  private void failTasks(List<TaskClaim<Long, LinkTask>> claims) {
+  private CompletableFuture<Void> failTasksAsync(List<TaskClaim<Long, LinkTask>> claims) {
+    List<CompletableFuture<Void>> futures = new ArrayList<>();
+
     for (TaskClaim<Long, LinkTask> claim : claims) {
-      try {
-        claim.fail().get(5, TimeUnit.SECONDS);
-        TASKS_FAILED.add(1);
-      } catch (Exception e) {
-        LOGGER.log(Level.WARNING, "Failed to fail task " + claim.taskKey(), e);
-      }
+      CompletableFuture<Void> failFuture = claim.fail()
+          .orTimeout(5, TimeUnit.SECONDS)
+          .thenAccept(v -> TASKS_FAILED.add(1))
+          .exceptionally(e -> {
+            LOGGER.log(Level.WARNING, "Failed to fail task " + claim.taskKey(), e);
+            return null;
+          });
+      futures.add(failFuture);
     }
+
+    return allOf(futures.toArray(CompletableFuture[]::new));
   }
 
   /**
@@ -682,30 +793,32 @@ public class LinkWorker implements Runnable {
    */
   public CompletableFuture<Boolean> processOneTask() {
     // Use claimTask with a timeout to avoid indefinite waiting
-    try {
-      CompletableFuture<TaskClaim<Long, LinkTask>> claimFuture = taskQueue.awaitAndClaimTask(database);
-      TaskClaim<Long, LinkTask> claim = claimFuture.get(CLAIM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+    CompletableFuture<TaskClaim<Long, LinkTask>> claimFuture = taskQueue.awaitAndClaimTask(database);
 
-      TASKS_CLAIMED.add(1);
-      List<TaskClaim<Long, LinkTask>> claims = List.of(claim);
+    return claimFuture
+        .orTimeout(CLAIM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+        .thenCompose(claim -> {
+          TASKS_CLAIMED.add(1);
+          List<TaskClaim<Long, LinkTask>> claims = List.of(claim);
 
-      // Use common processing logic
-      boolean success = processClaimedTasks(claims);
-
-      if (success) {
-        totalProcessed.incrementAndGet();
-      } else {
-        totalFailed.incrementAndGet();
-      }
-
-      return completedFuture(success);
-    } catch (TimeoutException e) {
-      // No task available within timeout
-      return completedFuture(false);
-    } catch (Exception e) {
-      LOGGER.log(Level.WARNING, "Failed to process single task", e);
-      return completedFuture(false);
-    }
+          // Use common processing logic
+          return processClaimedTasksAsync(claims).thenApply(success -> {
+            if (success) {
+              totalProcessed.incrementAndGet();
+            } else {
+              totalFailed.incrementAndGet();
+            }
+            return success;
+          });
+        })
+        .exceptionally(e -> {
+          if (e instanceof TimeoutException) {
+            // No task available within timeout
+            return false;
+          }
+          LOGGER.log(Level.WARNING, "Failed to process single task", e);
+          return false;
+        });
   }
 
   /**

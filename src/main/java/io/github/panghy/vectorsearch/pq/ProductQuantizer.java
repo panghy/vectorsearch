@@ -34,18 +34,28 @@ public class ProductQuantizer {
   @Getter
   private final DistanceMetrics.Metric metric;
 
+  @Getter
+  private final int codebookVersion;
+
   // Codebooks: [subvector_index][centroid_index][dimension]
   @Getter
-  private float[][][] codebooks;
+  private final float[][][] codebooks;
 
   /**
-   * Creates a new Product Quantizer.
+   * Creates a Product Quantizer with trained codebooks.
    *
-   * @param dimension     the dimension of input vectors
-   * @param numSubvectors the number of subvectors (m in PQ literature)
-   * @param metric        the distance metric to use
+   * @param dimension        the dimension of input vectors
+   * @param numSubvectors    the number of subvectors (m in PQ literature)
+   * @param metric           the distance metric to use
+   * @param codebookVersion  the version of the codebooks
+   * @param codebooks        the trained codebooks [subvector_index][centroid_index][dimension]
    */
-  public ProductQuantizer(int dimension, int numSubvectors, DistanceMetrics.Metric metric) {
+  public ProductQuantizer(
+      int dimension,
+      int numSubvectors,
+      DistanceMetrics.Metric metric,
+      int codebookVersion,
+      float[][][] codebooks) {
 
     if (dimension <= 0) {
       throw new IllegalArgumentException("Dimension must be positive: " + dimension);
@@ -54,26 +64,40 @@ public class ProductQuantizer {
       throw new IllegalArgumentException(
           "Number of subvectors must be between 1 and " + dimension + ": " + numSubvectors);
     }
+    if (codebooks == null) {
+      throw new IllegalArgumentException("Codebooks cannot be null");
+    }
+    if (codebooks.length != numSubvectors) {
+      throw new IllegalArgumentException(
+          "Codebook count mismatch: expected " + numSubvectors + ", got " + codebooks.length);
+    }
 
     this.dimension = dimension;
     this.numSubvectors = numSubvectors;
     this.numCentroids = 256; // 8-bit quantization
     this.metric = metric;
+    this.codebookVersion = codebookVersion;
+    this.codebooks = codebooks;
   }
 
   /**
-   * Trains the PQ codebooks using k-means clustering on training vectors.
-   * Returns a CompletableFuture that completes when training is done.
+   * Trains PQ codebooks using k-means clustering on training vectors.
+   * This is a static method that returns the trained codebooks.
    *
+   * @param dimension       the dimension of input vectors
+   * @param numSubvectors   the number of subvectors
+   * @param metric          the distance metric to use
    * @param trainingVectors the training data
-   * @return CompletableFuture that completes when training finishes
+   * @return CompletableFuture containing the trained codebooks
    */
-  public CompletableFuture<Void> train(List<float[]> trainingVectors) {
+  public static CompletableFuture<float[][][]> train(
+      int dimension, int numSubvectors, DistanceMetrics.Metric metric, List<float[]> trainingVectors) {
+
     if (trainingVectors.isEmpty()) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("Training set cannot be empty"));
     }
 
-    return CompletableFuture.runAsync(
+    return CompletableFuture.supplyAsync(
         () -> {
           LOGGER.info(
               "Training PQ with {} vectors, {} subvectors, metric={}",
@@ -82,7 +106,7 @@ public class ProductQuantizer {
               metric);
 
           // Pre-process vectors for cosine similarity
-          List<float[]> processedVectors = preprocessVectors(trainingVectors);
+          List<float[]> processedVectors = preprocessVectors(trainingVectors, metric);
 
           // Initialize codebooks
           float[][][] newCodebooks = new float[numSubvectors][][];
@@ -104,7 +128,7 @@ public class ProductQuantizer {
                   }
 
                   // Run k-means clustering
-                  return kmeansCluster(subvectors, numCentroids);
+                  return kmeansCluster(subvectors, 256, metric);
                 },
                 ForkJoinPool.commonPool());
 
@@ -120,9 +144,8 @@ public class ProductQuantizer {
             }
           }
 
-          // Set codebooks atomically after all training completes
-          this.codebooks = newCodebooks;
           LOGGER.info("PQ training completed");
+          return newCodebooks;
         },
         ForkJoinPool.commonPool());
   }
@@ -134,9 +157,6 @@ public class ProductQuantizer {
    * @return byte array of PQ codes
    */
   public byte[] encode(float[] vector) {
-    if (codebooks == null) {
-      throw new IllegalStateException("Product quantizer has not been trained");
-    }
     if (vector.length != dimension) {
       throw new IllegalArgumentException(
           "Vector dimension mismatch: expected " + dimension + ", got " + vector.length);
@@ -175,9 +195,6 @@ public class ProductQuantizer {
    * @return reconstructed vector
    */
   public float[] decode(byte[] codes) {
-    if (codebooks == null) {
-      throw new IllegalStateException("Product quantizer has not been trained");
-    }
     if (codes.length != numSubvectors) {
       throw new IllegalArgumentException(
           "Code length mismatch: expected " + numSubvectors + ", got " + codes.length);
@@ -205,9 +222,6 @@ public class ProductQuantizer {
    * @return lookup table [subvector_index][centroid_index] -> distance
    */
   public float[][] buildLookupTable(float[] query) {
-    if (codebooks == null) {
-      throw new IllegalStateException("Product quantizer has not been trained");
-    }
     if (query.length != dimension) {
       throw new IllegalArgumentException(
           "Query dimension mismatch: expected " + dimension + ", got " + query.length);
@@ -259,9 +273,6 @@ public class ProductQuantizer {
    * @return lookup table [subvector_index][centroid_index] -> distance
    */
   public float[][] buildLookupTableFromPqCode(byte[] pqCode) {
-    if (codebooks == null) {
-      throw new IllegalStateException("Product quantizer has not been trained");
-    }
     if (pqCode.length != numSubvectors) {
       throw new IllegalArgumentException(
           "Code length mismatch: expected " + numSubvectors + ", got " + pqCode.length);
@@ -275,25 +286,10 @@ public class ProductQuantizer {
   }
 
   /**
-   * Loads codebooks from serialized format.
-   *
-   * @param serializedCodebooks codebooks in the format [subvector][centroid][dimension]
-   */
-  public void loadCodebooks(float[][][] serializedCodebooks) {
-    if (serializedCodebooks.length != numSubvectors) {
-      throw new IllegalArgumentException(
-          "Codebook count mismatch: expected " + numSubvectors + ", got " + serializedCodebooks.length);
-    }
-
-    this.codebooks = serializedCodebooks;
-    LOGGER.info("Loading PQ codebooks for {} subvectors", numSubvectors);
-  }
-
-  /**
    * Pre-processes vectors based on the distance metric.
    * For cosine similarity, normalizes vectors to unit length.
    */
-  private List<float[]> preprocessVectors(List<float[]> vectors) {
+  private static List<float[]> preprocessVectors(List<float[]> vectors, DistanceMetrics.Metric metric) {
     if (metric == DistanceMetrics.Metric.COSINE) {
       List<float[]> normalized = new ArrayList<>(vectors.size());
       for (float[] v : vectors) {
@@ -326,13 +322,25 @@ public class ProductQuantizer {
   }
 
   /**
+   * Static version for use in training.
+   */
+  private static float computeSubvectorDistance(float[] a, float[] b, DistanceMetrics.Metric metric) {
+    // For cosine, vectors are already normalized, so use L2
+    if (metric == DistanceMetrics.Metric.COSINE) {
+      return DistanceMetrics.l2Distance(a, b);
+    }
+    return DistanceMetrics.distance(a, b, metric);
+  }
+
+  /**
    * Performs k-means clustering on a set of vectors.
    *
    * @param vectors the input vectors
    * @param k       the number of clusters
+   * @param metric  the distance metric to use
    * @return cluster centroids
    */
-  private float[][] kmeansCluster(float[][] vectors, int k) {
+  private static float[][] kmeansCluster(float[][] vectors, int k, DistanceMetrics.Metric metric) {
     if (vectors.length < k) {
       LOGGER.warn("Training set size {} is less than k={}, duplicating vectors as centroids", vectors.length, k);
       float[][] centroids = new float[k][];
@@ -351,7 +359,7 @@ public class ProductQuantizer {
     // Multiple initialization attempts for better results
     for (int attempt = 0; attempt < KMEANS_INIT_ATTEMPTS; attempt++) {
       // Initialize centroids using k-means++ method
-      float[][] centroids = initializeCentroidsKMeansPlusPlus(vectors, k, random);
+      float[][] centroids = initializeCentroidsKMeansPlusPlus(vectors, k, random, metric);
 
       int[] assignments = new int[vectors.length];
       float prevInertia = Float.POSITIVE_INFINITY;
@@ -364,7 +372,7 @@ public class ProductQuantizer {
           float minDist = Float.POSITIVE_INFINITY;
 
           for (int c = 0; c < k; c++) {
-            float dist = computeSubvectorDistance(vectors[i], centroids[c]);
+            float dist = computeSubvectorDistance(vectors[i], centroids[c], metric);
             if (dist < minDist) {
               minDist = dist;
               nearest = c;
@@ -419,7 +427,8 @@ public class ProductQuantizer {
   /**
    * Initializes k-means centroids using the k-means++ method for better convergence.
    */
-  private float[][] initializeCentroidsKMeansPlusPlus(float[][] vectors, int k, Random random) {
+  private static float[][] initializeCentroidsKMeansPlusPlus(
+      float[][] vectors, int k, Random random, DistanceMetrics.Metric metric) {
     float[][] centroids = new float[k][];
 
     // Choose first centroid randomly
@@ -433,7 +442,7 @@ public class ProductQuantizer {
       for (int i = 0; i < vectors.length; i++) {
         float minDist = Float.POSITIVE_INFINITY;
         for (int j = 0; j < c; j++) {
-          float dist = computeSubvectorDistance(vectors[i], centroids[j]);
+          float dist = computeSubvectorDistance(vectors[i], centroids[j], metric);
           minDist = Math.min(minDist, dist);
         }
         distances[i] = minDist * minDist; // Square for k-means++

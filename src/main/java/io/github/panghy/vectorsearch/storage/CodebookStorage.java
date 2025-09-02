@@ -2,15 +2,20 @@ package io.github.panghy.vectorsearch.storage;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Range;
+import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
+import io.github.panghy.vectorsearch.pq.DistanceMetrics;
+import io.github.panghy.vectorsearch.pq.ProductQuantizer;
 import io.github.panghy.vectorsearch.pq.VectorUtils;
 import io.github.panghy.vectorsearch.proto.CodebookSub;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,12 +28,45 @@ public class CodebookStorage {
 
   private final Database db;
   private final VectorIndexKeys keys;
-  private final Map<Long, float[][][]> codebookCache;
+  private final int dimension;
+  private final int numSubvectors;
+  private final DistanceMetrics.Metric metric;
+  private final AsyncLoadingCache<Long, ProductQuantizer> productQuantizerCache;
 
-  public CodebookStorage(Database db, VectorIndexKeys keys) {
+  public CodebookStorage(
+      Database db, VectorIndexKeys keys, int dimension, int numSubvectors, DistanceMetrics.Metric metric) {
+    this(
+        db,
+        keys,
+        dimension,
+        numSubvectors,
+        metric,
+        100, // Default max cache size
+        Duration.ofMinutes(10), // Default cache expiry
+        ForkJoinPool.commonPool());
+  }
+
+  public CodebookStorage(
+      Database db,
+      VectorIndexKeys keys,
+      int dimension,
+      int numSubvectors,
+      DistanceMetrics.Metric metric,
+      int maxCacheSize,
+      Duration cacheExpiry,
+      Executor executor) {
     this.db = db;
     this.keys = keys;
-    this.codebookCache = new ConcurrentHashMap<>();
+    this.dimension = dimension;
+    this.numSubvectors = numSubvectors;
+    this.metric = metric;
+
+    // Initialize Caffeine cache for ProductQuantizer instances
+    this.productQuantizerCache = Caffeine.newBuilder()
+        .maximumSize(maxCacheSize)
+        .expireAfterAccess(cacheExpiry)
+        .executor(executor)
+        .buildAsync(this::loadProductQuantizer);
   }
 
   /**
@@ -38,37 +76,85 @@ public class CodebookStorage {
    * @param codebooks     array of codebooks [numSubvectors][numCentroids][subDimension]
    * @param trainingStats training statistics (vectors used, error, etc.)
    * @return future completing when all codebooks are stored
+   * @throws IllegalStateException if the version already exists
    */
   public CompletableFuture<Void> storeCodebooks(long version, float[][][] codebooks, TrainingStats trainingStats) {
     return db.runAsync(tx -> {
-      for (int i = 0; i < codebooks.length; i++) {
-        final int subspaceIndex = i;
-        byte[] key = keys.codebookKey(version, subspaceIndex);
-
-        // Convert to fp16 for storage efficiency
-        byte[] fp16Data = VectorUtils.toFloat16Bytes(flatten(codebooks[i]));
-
-        // Build protobuf message
-        CodebookSub.Builder builder = CodebookSub.newBuilder()
-            .setSubspaceIndex(subspaceIndex)
-            .setVersion(version)
-            .setCodewordsFp16(ByteString.copyFrom(fp16Data))
-            .setTrainedOnVectors(trainingStats.trainedOnVectors)
-            .setCreatedAt(currentTimestamp());
-
-        if (trainingStats.quantizationError != null) {
-          builder.setQuantizationError(trainingStats.quantizationError);
+      // First check if this version already exists
+      byte[] firstKey = keys.codebookKey(version, 0);
+      return tx.get(firstKey).thenCompose(existingValue -> {
+        if (existingValue != null) {
+          throw new IllegalStateException(
+              "Codebook version " + version + " already exists. Cannot overwrite existing codebooks.");
         }
 
-        tx.set(key, builder.build().toByteArray());
+        // Store all codebook subspaces
+        for (int i = 0; i < codebooks.length; i++) {
+          byte[] key = keys.codebookKey(version, i);
+
+          // Convert to fp16 for storage efficiency
+          byte[] fp16Data = VectorUtils.toFloat16Bytes(flatten(codebooks[i]));
+
+          // Build protobuf message
+          CodebookSub.Builder builder = CodebookSub.newBuilder()
+              .setSubspaceIndex(i)
+              .setVersion(version)
+              .setCodewordsFp16(ByteString.copyFrom(fp16Data))
+              .setTrainedOnVectors(trainingStats.trainedOnVectors)
+              .setCreatedAt(currentTimestamp());
+
+          if (trainingStats.quantizationError != null) {
+            builder.setQuantizationError(trainingStats.quantizationError);
+          }
+
+          tx.set(key, builder.build().toByteArray());
+        }
+
+        // Invalidate cache for this version to force reload
+        productQuantizerCache.synchronous().invalidate(version);
+
+        LOGGER.info("Stored {} codebook subspaces for version {}", codebooks.length, version);
+
+        return CompletableFuture.completedFuture(null);
+      });
+    });
+  }
+
+  /**
+   * Gets a ProductQuantizer for the specified version.
+   * Uses cache for efficiency.
+   *
+   * @param version codebook version
+   * @return ProductQuantizer instance or null if version doesn't exist
+   */
+  public CompletableFuture<ProductQuantizer> getProductQuantizer(long version) {
+    return productQuantizerCache.get(version);
+  }
+
+  /**
+   * Gets the ProductQuantizer for the latest/active version.
+   *
+   * @return ProductQuantizer for active version or null if no active version
+   */
+  public CompletableFuture<ProductQuantizer> getLatestProductQuantizer() {
+    return getActiveVersion().thenCompose(activeVersion -> {
+      if (activeVersion < 0) {
+        return CompletableFuture.completedFuture(null);
       }
+      return getProductQuantizer(activeVersion);
+    });
+  }
 
-      // Update cache
-      codebookCache.put(version, codebooks);
-
-      LOGGER.info("Stored {} codebook subspaces for version {}", codebooks.length, version);
-
-      return CompletableFuture.completedFuture(null);
+  /**
+   * Loads a ProductQuantizer for a specific version.
+   * This is the cache loader function.
+   */
+  private CompletableFuture<ProductQuantizer> loadProductQuantizer(Long version, Executor executor) {
+    return loadCodebooks(version).thenApply(codebooks -> {
+      if (codebooks == null) {
+        return null;
+      }
+      return new ProductQuantizer(dimension, numSubvectors, metric, version.intValue(), codebooks);
     });
   }
 
@@ -79,11 +165,6 @@ public class CodebookStorage {
    * @return array of codebooks or null if version doesn't exist
    */
   public CompletableFuture<float[][][]> loadCodebooks(long version) {
-    // Check cache first
-    float[][][] cached = codebookCache.get(version);
-    if (cached != null) {
-      return CompletableFuture.completedFuture(cached);
-    }
 
     return db.runAsync(tx -> {
       // Read all codebook subspaces for this version
@@ -118,9 +199,6 @@ public class CodebookStorage {
               codebooks[idx] = reshape(flat, numCentroids, subDimension);
             }
 
-            // Cache for future use
-            codebookCache.put(version, codebooks);
-
             LOGGER.debug("Loaded {} codebook subspaces for version {}", numSubvectors, version);
 
             return codebooks;
@@ -148,17 +226,28 @@ public class CodebookStorage {
 
   /**
    * Sets the active codebook version atomically.
+   * Verifies that the codebook version exists before setting it as active.
    *
    * @param version the version to activate
    * @return future completing when version is set
+   * @throws IllegalArgumentException if the codebook version does not exist
    */
   public CompletableFuture<Void> setActiveVersion(int version) {
     return db.runAsync(tx -> {
-      byte[] key = keys.activeCodebookVersionKey();
-      tx.set(key, intToBytes(version));
+      // First check if the codebook version exists by checking for the first subvector
+      byte[] codebookKey = keys.codebookKey(version, 0);
+      return tx.get(codebookKey).thenCompose(codebookValue -> {
+        if (codebookValue == null) {
+          throw new IllegalArgumentException("Codebook version " + version + " does not exist");
+        }
 
-      LOGGER.info("Set active codebook version to {}", version);
-      return CompletableFuture.completedFuture(null);
+        // Set the active version
+        byte[] key = keys.activeCodebookVersionKey();
+        tx.set(key, intToBytes(version));
+
+        LOGGER.info("Set active codebook version to {}", version);
+        return CompletableFuture.completedFuture(null);
+      });
     });
   }
 
@@ -208,7 +297,7 @@ public class CodebookStorage {
       StorageTransactionUtils.clearRange(tx, range);
 
       // Remove from cache
-      codebookCache.remove(version);
+      productQuantizerCache.synchronous().invalidate(version);
 
       LOGGER.info("Deleted codebook version {}", version);
 
@@ -217,18 +306,30 @@ public class CodebookStorage {
   }
 
   /**
-   * Clears the in-memory codebook cache.
+   * Clears the in-memory ProductQuantizer cache.
    */
   public void clearCache() {
-    codebookCache.clear();
-    LOGGER.debug("Cleared codebook cache");
+    productQuantizerCache.synchronous().invalidateAll();
+    LOGGER.debug("Cleared ProductQuantizer cache");
   }
 
   /**
    * Gets cache statistics.
    */
   public CacheStats getCacheStats() {
-    return new CacheStats(codebookCache.size(), estimateCacheSize());
+    var stats = productQuantizerCache.synchronous().stats();
+    return new CacheStats(
+        (int) productQuantizerCache.synchronous().estimatedSize(),
+        stats.hitCount(),
+        stats.missCount(),
+        stats.hitRate());
+  }
+
+  /**
+   * Gets the ProductQuantizer cache for testing.
+   */
+  AsyncLoadingCache<Long, ProductQuantizer> getProductQuantizerCache() {
+    return productQuantizerCache;
   }
 
   // Helper methods
@@ -292,18 +393,6 @@ public class CodebookStorage {
         .build();
   }
 
-  private long estimateCacheSize() {
-    long size = 0;
-    for (float[][][] codebooks : codebookCache.values()) {
-      for (float[][] codebook : codebooks) {
-        for (float[] centroids : codebook) {
-          size += centroids.length * 4; // 4 bytes per float
-        }
-      }
-    }
-    return size;
-  }
-
   /**
    * Training statistics for codebook creation.
    */
@@ -322,11 +411,15 @@ public class CodebookStorage {
    */
   public static class CacheStats {
     public final int entries;
-    public final long estimatedSizeBytes;
+    public final long hitCount;
+    public final long missCount;
+    public final double hitRate;
 
-    public CacheStats(int entries, long estimatedSizeBytes) {
+    public CacheStats(int entries, long hitCount, long missCount, double hitRate) {
       this.entries = entries;
-      this.estimatedSizeBytes = estimatedSizeBytes;
+      this.hitCount = hitCount;
+      this.missCount = missCount;
+      this.hitRate = hitRate;
     }
   }
 }

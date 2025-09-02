@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -392,7 +393,7 @@ class VectorSearchConfigTest {
         .dimension(128)
         .distanceMetric(VectorSearchConfig.DistanceMetric.INNER_PRODUCT)
         .build();
-    assertEquals("IP", ipConfig.toProtoConfig().getMetric());
+    assertEquals("INNER_PRODUCT", ipConfig.toProtoConfig().getMetric());
 
     // Cosine
     VectorSearchConfig cosineConfig = VectorSearchConfig.builder(db, directory)
@@ -629,5 +630,16 @@ class VectorSearchConfigTest {
     } finally {
       customExecutor.shutdown();
     }
+  }
+
+  @Test
+  void testFdbVectorSearchConfigAccessors() {
+    VectorSearchConfig config = VectorSearchConfig.builder(db, directory)
+        .dimension(128)
+        .distanceMetric(VectorSearchConfig.DistanceMetric.COSINE)
+        .build();
+
+    assertThat(config.getDimension()).isEqualTo(128);
+    assertThat(config.getDistanceMetric()).isEqualTo(VectorSearchConfig.DistanceMetric.COSINE);
   }
 }

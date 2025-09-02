@@ -36,7 +36,7 @@ class VectorSketchStorageTest {
     });
 
     keys = new VectorIndexKeys(testSpace);
-    storage = new VectorSketchStorage(keys);
+    storage = new VectorSketchStorage(keys, 128); // Use dimension 128 for testing
   }
 
   @AfterEach

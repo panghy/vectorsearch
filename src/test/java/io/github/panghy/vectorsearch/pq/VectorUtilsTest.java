@@ -285,4 +285,76 @@ class VectorUtilsTest {
     assertThat(scaled).hasSize(dimension);
     assertThat(decompressed).hasSize(dimension);
   }
+
+  @Test
+  void testVectorUtilsAdd() {
+    float[] a = {1.0f, 2.0f, 3.0f};
+    float[] b = {4.0f, 5.0f, 6.0f};
+    float[] result = VectorUtils.add(a, b);
+    assertThat(result).containsExactly(5.0f, 7.0f, 9.0f);
+  }
+
+  @Test
+  void testVectorUtilsScale() {
+    float[] vector = {1.0f, 2.0f, 3.0f};
+    float[] scaled = VectorUtils.scale(vector, 2.0f);
+    assertThat(scaled).containsExactly(2.0f, 4.0f, 6.0f);
+  }
+
+  @Test
+  void testVectorUtilsMean() {
+    float[][] vectors = {
+      {1.0f, 2.0f},
+      {3.0f, 4.0f},
+      {5.0f, 6.0f}
+    };
+    float[] mean = VectorUtils.mean(vectors);
+    assertThat(mean).containsExactly(3.0f, 4.0f);
+  }
+
+  @Test
+  void testVectorUtilsRandomVector() {
+    Random random = new Random(42);
+    float[] vector = VectorUtils.randomVector(5, random);
+    assertThat(vector).hasSize(5);
+    for (float v : vector) {
+      assertThat(v).isBetween(-1.0f, 1.0f);
+    }
+  }
+
+  @Test
+  void testVectorUtilsRandomUnitVector() {
+    Random random = new Random(42);
+    float[] unitVector = VectorUtils.randomUnitVector(5, random);
+    assertThat(unitVector).hasSize(5);
+
+    // Check it's approximately unit length
+    float norm = 0;
+    for (float v : unitVector) {
+      norm += v * v;
+    }
+    assertThat(Math.abs(norm - 1.0)).isLessThan(0.001);
+  }
+
+  @Test
+  void testVectorUtilsFloat16ConversionSpecialCases() {
+    // Test toFloat16Bytes and fromFloat16Bytes with special values
+    float[] specialValues = {Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY, 0.0f, -0.0f};
+
+    byte[] bytes = VectorUtils.toFloat16Bytes(specialValues);
+    assertThat(bytes).isNotNull();
+    assertThat(bytes.length).isEqualTo(specialValues.length * 2);
+
+    float[] restored = VectorUtils.fromFloat16Bytes(bytes);
+    assertThat(restored.length).isEqualTo(specialValues.length);
+
+    // Check NaN
+    assertThat(Float.isNaN(restored[0])).isTrue();
+    // Check positive infinity
+    assertThat(Float.isInfinite(restored[1])).isTrue();
+    assertThat(restored[1]).isPositive();
+    // Check negative infinity
+    assertThat(Float.isInfinite(restored[2])).isTrue();
+    assertThat(restored[2]).isNegative();
+  }
 }

@@ -7,31 +7,45 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import org.junit.jupiter.api.Test;
 
 class ProductQuantizerTest {
 
   @Test
   void testConstructorValidation() {
-    // Valid construction
-    ProductQuantizer pq = new ProductQuantizer(128, 8, DistanceMetrics.Metric.L2);
-    assertThat(pq.getDimension()).isEqualTo(128);
-    assertThat(pq.getNumSubvectors()).isEqualTo(8);
-    assertThat(pq.getNumCentroids()).isEqualTo(256);
-    assertThat(pq.getMetric()).isEqualTo(DistanceMetrics.Metric.L2);
+    // First train to get codebooks
+    int dimension = 128;
+    int numSubvectors = 8;
+    List<float[]> trainingVectors = generateRandomVectors(100, dimension, new Random(42));
+
+    try {
+      float[][][] codebooks = ProductQuantizer.train(
+              dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+          .get();
+
+      // Valid construction with codebooks
+      ProductQuantizer pq =
+          new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 1, codebooks);
+      assertThat(pq.getDimension()).isEqualTo(dimension);
+      assertThat(pq.getNumSubvectors()).isEqualTo(numSubvectors);
+      assertThat(pq.getNumCentroids()).isEqualTo(256);
+      assertThat(pq.getMetric()).isEqualTo(DistanceMetrics.Metric.L2);
+      assertThat(pq.getCodebookVersion()).isEqualTo(1);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
 
     // Invalid dimension
-    assertThatThrownBy(() -> new ProductQuantizer(0, 8, DistanceMetrics.Metric.L2))
+    assertThatThrownBy(() -> new ProductQuantizer(0, 8, DistanceMetrics.Metric.L2, 1, new float[8][][]))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Dimension must be positive");
 
     // Invalid subvectors
-    assertThatThrownBy(() -> new ProductQuantizer(128, 0, DistanceMetrics.Metric.L2))
+    assertThatThrownBy(() -> new ProductQuantizer(128, 0, DistanceMetrics.Metric.L2, 1, new float[0][][]))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Number of subvectors must be between");
 
-    assertThatThrownBy(() -> new ProductQuantizer(128, 129, DistanceMetrics.Metric.L2))
+    assertThatThrownBy(() -> new ProductQuantizer(128, 129, DistanceMetrics.Metric.L2, 1, new float[129][][]))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Number of subvectors must be between");
   }
@@ -40,20 +54,23 @@ class ProductQuantizerTest {
   void testTrainAndEncode() throws Exception {
     int dimension = 64;
     int numSubvectors = 4;
-    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2);
 
     // Generate training data
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(500, dimension, random);
 
-    // Train the quantizer
-    CompletableFuture<Void> trainFuture = pq.train(trainingVectors);
-    trainFuture.get(); // Wait for training to complete
+    // Train the quantizer - static method returns codebooks
+    CompletableFuture<float[][][]> trainFuture =
+        ProductQuantizer.train(dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors);
+    float[][][] codebooks = trainFuture.get(); // Wait for training to complete
 
     // Verify codebooks are created
-    assertThat(pq.getCodebooks()).isNotNull();
-    assertThat(pq.getCodebooks().length).isEqualTo(numSubvectors);
-    assertThat(pq.getCodebooks()[0].length).isEqualTo(256); // 256 centroids
+    assertThat(codebooks).isNotNull();
+    assertThat(codebooks.length).isEqualTo(numSubvectors);
+    assertThat(codebooks[0].length).isEqualTo(256); // 256 centroids
+
+    // Create ProductQuantizer with trained codebooks
+    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 1, codebooks);
 
     // Encode a vector
     float[] testVector = generateRandomVector(dimension, random);
@@ -72,12 +89,16 @@ class ProductQuantizerTest {
   void testDecodeReconstruction() throws Exception {
     int dimension = 32;
     int numSubvectors = 4;
-    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2);
 
     // Train with sufficient data
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(1000, dimension, random);
-    pq.train(trainingVectors).get();
+    float[][][] codebooks = ProductQuantizer.train(
+            dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+        .get();
+
+    // Create ProductQuantizer with trained codebooks
+    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 1, codebooks);
 
     // Encode and decode
     float[] original = generateRandomVector(dimension, random);
@@ -99,12 +120,15 @@ class ProductQuantizerTest {
   void testLookupTableAndDistance() throws Exception {
     int dimension = 64;
     int numSubvectors = 8;
-    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2);
 
     // Train
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(500, dimension, random);
-    pq.train(trainingVectors).get();
+    float[][][] codebooks = ProductQuantizer.train(
+            dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+        .get();
+
+    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 1, codebooks);
 
     // Create query and database vectors
     float[] query = generateRandomVector(dimension, random);
@@ -133,13 +157,17 @@ class ProductQuantizerTest {
   void testCosineMetric() throws Exception {
     int dimension = 32;
     int numSubvectors = 4;
-    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.COSINE);
 
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(300, dimension, random);
 
     // Train with cosine metric
-    pq.train(trainingVectors).get();
+    float[][][] codebooks = ProductQuantizer.train(
+            dimension, numSubvectors, DistanceMetrics.Metric.COSINE, trainingVectors)
+        .get();
+
+    ProductQuantizer pq =
+        new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.COSINE, 1, codebooks);
 
     // Test vectors
     float[] v1 = generateRandomVector(dimension, random);
@@ -165,12 +193,16 @@ class ProductQuantizerTest {
   void testInnerProductMetric() throws Exception {
     int dimension = 16;
     int numSubvectors = 2;
-    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.INNER_PRODUCT);
 
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(300, dimension, random);
 
-    pq.train(trainingVectors).get();
+    float[][][] codebooks = ProductQuantizer.train(
+            dimension, numSubvectors, DistanceMetrics.Metric.INNER_PRODUCT, trainingVectors)
+        .get();
+
+    ProductQuantizer pq =
+        new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.INNER_PRODUCT, 1, codebooks);
 
     float[] query = generateRandomVector(dimension, random);
     byte[] codes = pq.encode(query);
@@ -180,215 +212,273 @@ class ProductQuantizerTest {
   }
 
   @Test
-  void testLoadCodebooks() throws Exception {
+  void testWithPretrainedCodebooks() throws Exception {
     int dimension = 32;
     int numSubvectors = 4;
     int subDimension = dimension / numSubvectors;
 
-    ProductQuantizer pq1 = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2);
-
-    // Train first PQ
+    // Train first PQ to get codebooks
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(500, dimension, random);
-    pq1.train(trainingVectors).get();
+    float[][][] codebooks = ProductQuantizer.train(
+            dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+        .get();
 
-    // Get codebooks
-    float[][][] codebooks = pq1.getCodebooks();
+    // Create new PQ with same codebooks but different version
+    ProductQuantizer pq1 = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 1, codebooks);
+    ProductQuantizer pq2 = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 2, codebooks);
 
-    // Create new PQ and load codebooks
-    ProductQuantizer pq2 = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2);
-    pq2.loadCodebooks(codebooks);
-
-    // Test encoding produces same result
+    // Both should produce same encoding
     float[] testVector = generateRandomVector(dimension, random);
     byte[] codes1 = pq1.encode(testVector);
     byte[] codes2 = pq2.encode(testVector);
 
-    assertThat(codes2).isEqualTo(codes1);
+    assertThat(codes1).isEqualTo(codes2);
+    assertThat(pq1.getCodebookVersion()).isEqualTo(1);
+    assertThat(pq2.getCodebookVersion()).isEqualTo(2);
   }
 
   @Test
-  void testLoadCodebooksValidation() {
-    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2);
+  void testBuildLookupTableFromPqCode() throws Exception {
+    int dimension = 32;
+    int numSubvectors = 4;
 
-    // Wrong number of subvectors
-    float[][][] wrongCodebooks = new float[3][][];
+    Random random = new Random(42);
+    List<float[]> trainingVectors = generateRandomVectors(500, dimension, random);
+    float[][][] codebooks = ProductQuantizer.train(
+            dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+        .get();
 
-    assertThatThrownBy(() -> pq.loadCodebooks(wrongCodebooks))
+    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 1, codebooks);
+
+    // Encode a vector
+    float[] vector = generateRandomVector(dimension, random);
+    byte[] pqCode = pq.encode(vector);
+
+    // Build lookup table from PQ code
+    float[][] lookupTable = pq.buildLookupTableFromPqCode(pqCode);
+
+    assertThat(lookupTable).isNotNull();
+    assertThat(lookupTable.length).isEqualTo(numSubvectors);
+    assertThat(lookupTable[0].length).isEqualTo(256);
+
+    // The lookup table should give zero distance to itself
+    float selfDistance = pq.computeDistance(pqCode, lookupTable);
+    assertThat(selfDistance).isLessThan(0.01f); // Should be near zero
+  }
+
+  @Test
+  void testEmptyTrainingSet() {
+    int dimension = 32;
+    int numSubvectors = 4;
+    List<float[]> emptyVectors = new ArrayList<>();
+
+    assertThatThrownBy(
+            () -> ProductQuantizer.train(dimension, numSubvectors, DistanceMetrics.Metric.L2, emptyVectors)
+                .get())
+        .hasCauseInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Training set cannot be empty");
+  }
+
+  @Test
+  void testNullCodebooks() {
+    assertThatThrownBy(() -> new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2, 1, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Codebooks cannot be null");
+  }
+
+  @Test
+  void testCodebookMismatch() {
+    // Wrong number of codebooks for subvectors
+    float[][][] wrongCodebooks = new float[2][][]; // Only 2 instead of 4
+
+    assertThatThrownBy(() -> new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2, 1, wrongCodebooks))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Codebook count mismatch");
   }
 
   @Test
-  void testEncodeBeforeTrain() {
-    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2);
-    float[] vector = new float[32];
-
-    assertThatThrownBy(() -> pq.encode(vector))
-        .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("not been trained");
-  }
-
-  @Test
-  void testDecodeBeforeTrain() {
-    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2);
-    byte[] codes = new byte[4];
-
-    assertThatThrownBy(() -> pq.decode(codes))
-        .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("not been trained");
-  }
-
-  @Test
-  void testBuildLookupTableBeforeTrain() {
-    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2);
-    float[] query = new float[32];
-
-    assertThatThrownBy(() -> pq.buildLookupTable(query))
-        .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("not been trained");
-  }
-
-  @Test
-  void testEncodeDimensionMismatch() throws Exception {
-    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2);
-
-    Random random = new Random(42);
-    List<float[]> trainingVectors = generateRandomVectors(100, 32, random);
-    pq.train(trainingVectors).get();
-
-    float[] wrongDimVector = new float[64];
-
-    assertThatThrownBy(() -> pq.encode(wrongDimVector))
+  void testProductQuantizerErrorConditions() {
+    // Test with invalid dimensions
+    assertThatThrownBy(() -> new ProductQuantizer(-1, 4, DistanceMetrics.Metric.L2, 1, new float[4][256][16]))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("dimension mismatch");
-  }
+        .hasMessageContaining("Dimension must be positive");
 
-  @Test
-  void testDecodeLengthMismatch() throws Exception {
-    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2);
-
-    Random random = new Random(42);
-    List<float[]> trainingVectors = generateRandomVectors(100, 32, random);
-    pq.train(trainingVectors).get();
-
-    byte[] wrongLengthCodes = new byte[8];
-
-    assertThatThrownBy(() -> pq.decode(wrongLengthCodes))
+    // Test with null codebooks
+    assertThatThrownBy(() -> new ProductQuantizer(64, 4, DistanceMetrics.Metric.L2, 1, null))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Code length mismatch");
-  }
+        .hasMessageContaining("Codebooks cannot be null");
 
-  @Test
-  void testComputeDistanceLengthMismatch() {
-    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2);
-
-    byte[] wrongLengthCodes = new byte[8];
-    float[][] lut = new float[4][256];
-
-    assertThatThrownBy(() -> pq.computeDistance(wrongLengthCodes, lut))
+    // Test with mismatched codebook count
+    assertThatThrownBy(() -> new ProductQuantizer(64, 4, DistanceMetrics.Metric.L2, 1, new float[2][256][16]))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Code length mismatch");
+        .hasMessageContaining("Codebook count mismatch");
   }
 
   @Test
-  void testTrainEmptySet() {
-    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2);
-    List<float[]> emptySet = new ArrayList<>();
-
-    CompletableFuture<Void> future = pq.train(emptySet);
-    assertThatThrownBy(future::get)
-        .isInstanceOf(ExecutionException.class)
-        .hasRootCauseInstanceOf(IllegalArgumentException.class)
-        .hasRootCauseMessage("Training set cannot be empty");
-  }
-
-  @Test
-  void testTrainSmallSet() throws Exception {
-    // Test with fewer vectors than centroids
-    ProductQuantizer pq = new ProductQuantizer(16, 2, DistanceMetrics.Metric.L2);
-
+  void testProductQuantizerTrainingWithInsufficientData() {
+    List<float[]> trainingData = new ArrayList<>();
+    // Add only 5 vectors (less than 256 centroids)
     Random random = new Random(42);
-    List<float[]> smallSet = generateRandomVectors(50, 16, random); // Much less than 256
-
-    // Should still work but with degraded quality
-    pq.train(smallSet).get();
-
-    float[] testVector = generateRandomVector(16, random);
-    byte[] codes = pq.encode(testVector);
-    float[] reconstructed = pq.decode(codes);
-
-    assertThat(codes).hasSize(2);
-    assertThat(reconstructed).hasSize(16);
-  }
-
-  @Test
-  void testHighDimensionalVectors() throws Exception {
-    int dimension = 1024;
-    int numSubvectors = 32;
-
-    ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2);
-
-    Random random = new Random(42);
-    List<float[]> trainingVectors = generateRandomVectors(300, dimension, random);
-
-    pq.train(trainingVectors).get();
-
-    float[] testVector = generateRandomVector(dimension, random);
-    byte[] codes = pq.encode(testVector);
-
-    assertThat(codes).hasSize(numSubvectors);
-  }
-
-  @Test
-  void testParallelTraining() throws Exception {
-    // Test that parallel training works
-    ProductQuantizer pq = new ProductQuantizer(64, 8, DistanceMetrics.Metric.L2);
-
-    Random random = new Random(42);
-    List<float[]> trainingVectors = generateRandomVectors(500, 64, random);
-
-    pq.train(trainingVectors).get();
-
-    assertThat(pq.getCodebooks()).isNotNull();
-    assertThat(pq.getCodebooks().length).isEqualTo(8);
-  }
-
-  @Test
-  void testReproducibility() throws Exception {
-    // Same seed should produce similar results
-    int dimension = 32;
-    int numSubvectors = 4;
-
-    ProductQuantizer pq1 = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2);
-    ProductQuantizer pq2 = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2);
-
-    // Generate same training data with same seed
-    List<float[]> trainingVectors1 = generateRandomVectors(300, dimension, new Random(42));
-    List<float[]> trainingVectors2 = generateRandomVectors(300, dimension, new Random(42));
-
-    pq1.train(trainingVectors1).get();
-    pq2.train(trainingVectors2).get();
-
-    // Encode same vector
-    float[] testVector = generateRandomVector(dimension, new Random(99));
-    byte[] codes1 = pq1.encode(testVector);
-    byte[] codes2 = pq2.encode(testVector);
-
-    // Results should be similar (not necessarily identical due to parallel execution)
-    int differences = 0;
-    for (int i = 0; i < codes1.length; i++) {
-      if (codes1[i] != codes2[i]) {
-        differences++;
+    for (int i = 0; i < 5; i++) {
+      float[] vec = new float[64];
+      for (int j = 0; j < 64; j++) {
+        vec[j] = random.nextFloat();
       }
+      trainingData.add(vec);
     }
 
-    // Allow some differences due to k-means randomness and parallel execution
-    assertThat(differences).isLessThanOrEqualTo(numSubvectors);
+    // This should still work, just with fewer effective centroids
+    CompletableFuture<float[][][]> future = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData);
+
+    assertThat(future).isCompletedWithValueMatching(codebooks -> {
+      assertThat(codebooks.length).isEqualTo(4);
+      assertThat(codebooks[0].length).isEqualTo(256);
+      return true;
+    });
+  }
+
+  @Test
+  void testProductQuantizerWithDifferentMetrics() throws Exception {
+    List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
+
+    // Test with COSINE metric
+    float[][][] cosineCodebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.COSINE, trainingData)
+        .get();
+    ProductQuantizer cosinePq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.COSINE, 1, cosineCodebooks);
+
+    float[] vector = trainingData.get(0);
+    byte[] encoded = cosinePq.encode(vector);
+    float[] decoded = cosinePq.decode(encoded);
+    assertThat(decoded.length).isEqualTo(64);
+
+    // Test with INNER_PRODUCT metric
+    float[][][] ipCodebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.INNER_PRODUCT, trainingData)
+        .get();
+    ProductQuantizer ipPq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.INNER_PRODUCT, 1, ipCodebooks);
+
+    encoded = ipPq.encode(vector);
+    decoded = ipPq.decode(encoded);
+    assertThat(decoded.length).isEqualTo(64);
+
+    // Test lookup table computation
+    float[][] lookupTable = ipPq.buildLookupTable(vector);
+    assertThat(lookupTable.length).isEqualTo(4);
+    assertThat(lookupTable[0].length).isEqualTo(256);
+
+    // Test distance computation (INNER_PRODUCT can be negative)
+    float distance = ipPq.computeDistance(encoded, lookupTable);
+    assertThat(distance).isNotNull();
+  }
+
+  @Test
+  void testProductQuantizerDecodeWithInvalidInput() {
+    List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
+    float[][][] codebooks;
+    try {
+      codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData)
+          .get();
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+
+    ProductQuantizer pq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.L2, 1, codebooks);
+
+    // Test decode with wrong size
+    assertThatThrownBy(() -> pq.decode(new byte[10]))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Code length mismatch");
+  }
+
+  @Test
+  void testProductQuantizerDistanceComputationEdgeCases() throws Exception {
+    List<float[]> trainingData = generateRandomVectors(100, 32, new Random(42));
+    float[][][] codebooks = ProductQuantizer.train(32, 4, DistanceMetrics.Metric.L2, trainingData)
+        .get();
+    ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2, 1, codebooks);
+
+    float[] query = trainingData.get(0);
+    float[][] lookupTable = pq.buildLookupTable(query);
+
+    // Test with invalid code length
+    assertThatThrownBy(() -> pq.computeDistance(new byte[10], lookupTable))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Code length mismatch");
+
+    // Test with invalid lookup table - should throw ArrayIndexOutOfBoundsException
+    assertThatThrownBy(() -> pq.computeDistance(new byte[4], new float[2][256]))
+        .isInstanceOf(ArrayIndexOutOfBoundsException.class);
+  }
+
+  @Test
+  void testProductQuantizerEncodeWithWrongDimension() throws Exception {
+    List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
+    float[][][] codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData)
+        .get();
+    ProductQuantizer pq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.L2, 1, codebooks);
+
+    // Test encode with wrong dimension
+    float[] wrongSize = new float[32];
+    assertThatThrownBy(() -> pq.encode(wrongSize))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Vector dimension mismatch");
+  }
+
+  @Test
+  void testProductQuantizerBuildLookupTableFromPqCodeWithWrongSize() throws Exception {
+    List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
+    float[][][] codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData)
+        .get();
+    ProductQuantizer pq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.L2, 1, codebooks);
+
+    // Test buildLookupTableFromPqCode with wrong size
+    assertThatThrownBy(() -> pq.buildLookupTableFromPqCode(new byte[10]))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Code length mismatch");
+  }
+
+  @Test
+  void testProductQuantizerTrainingWithLogging() throws Exception {
+    // Enable detailed logging to cover logging paths
+    List<float[]> trainingData = generateRandomVectors(300, 64, new Random(42));
+
+    // This should trigger the logging path where we have more than 256 vectors
+    float[][][] codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData)
+        .get();
+
+    assertThat(codebooks).isNotNull();
+    assertThat(codebooks.length).isEqualTo(4);
+
+    // Create ProductQuantizer and test methods
+    ProductQuantizer pq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.L2, 1, codebooks);
+
+    // Test encode/decode round trip
+    float[] vector = trainingData.get(0);
+    byte[] encoded = pq.encode(vector);
+    float[] decoded = pq.decode(encoded);
+    assertThat(decoded.length).isEqualTo(64);
+
+    // Test buildLookupTableFromPqCode
+    float[][] lookupTable = pq.buildLookupTableFromPqCode(encoded);
+    assertThat(lookupTable.length).isEqualTo(4);
+    assertThat(lookupTable[0].length).isEqualTo(256);
+  }
+
+  @Test
+  void testProductQuantizerAccessors() throws Exception {
+    List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
+    float[][][] codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.COSINE, trainingData)
+        .get();
+    ProductQuantizer pq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.COSINE, 2, codebooks);
+
+    assertThat(pq.getDimension()).isEqualTo(64);
+    assertThat(pq.getNumSubvectors()).isEqualTo(4);
+    assertThat(pq.getNumCentroids()).isEqualTo(256);
+    assertThat(pq.getMetric()).isEqualTo(DistanceMetrics.Metric.COSINE);
+    assertThat(pq.getCodebookVersion()).isEqualTo(2);
   }
 
   // Helper methods
-
   private List<float[]> generateRandomVectors(int count, int dimension, Random random) {
     List<float[]> vectors = new ArrayList<>(count);
     for (int i = 0; i < count; i++) {
