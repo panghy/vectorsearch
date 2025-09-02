@@ -46,9 +46,9 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Worker that processes link tasks to build the proximity graph.
@@ -64,7 +64,7 @@ import java.util.stream.Collectors;
  */
 public class LinkWorker implements Runnable {
 
-  private static final Logger LOGGER = Logger.getLogger(LinkWorker.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(LinkWorker.class);
 
   // OpenTelemetry instrumentation
   private static final Tracer TRACER = GlobalOpenTelemetry.getTracer("io.github.panghy.vectorsearch", "0.1.0");
@@ -188,14 +188,13 @@ public class LinkWorker implements Runnable {
               LOGGER.info("Link worker interrupted");
               return false;
             }
-            LOGGER.log(Level.SEVERE, "Error processing batch", e);
+            LOGGER.error("Error processing batch", e);
             return running.get();
           });
         })
         .join();
 
-    LOGGER.info(String.format(
-        "Link worker stopped. Processed: %d, Failed: %d", totalProcessed.get(), totalFailed.get()));
+    LOGGER.info("Link worker stopped. Processed: {}, Failed: {}", totalProcessed.get(), totalFailed.get());
   }
 
   /**
@@ -259,9 +258,9 @@ public class LinkWorker implements Runnable {
 
     if (index >= targetSize || instantSource.instant().isAfter(claimDeadline)) {
       if (index < targetSize) {
-        LOGGER.fine("Claim budget exhausted after " + index + " claims");
+        LOGGER.debug("Claim budget exhausted after {} claims", index);
       }
-      LOGGER.fine("Claimed " + claims.size() + " tasks");
+      LOGGER.debug("Claimed {} tasks", claims.size());
       return completedFuture(claims);
     }
 
@@ -272,9 +271,9 @@ public class LinkWorker implements Runnable {
     claimFuture.orTimeout(CLAIM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).whenComplete((claim, error) -> {
       if (error != null) {
         if (error instanceof TimeoutException) {
-          LOGGER.info("No task available within timeout");
+          LOGGER.debug("No task available within timeout");
         } else {
-          LOGGER.log(Level.WARNING, "Failed to claim task", error);
+          LOGGER.warn("Failed to claim task", error);
         }
         timeoutFuture.complete(null);
       } else {
@@ -285,7 +284,7 @@ public class LinkWorker implements Runnable {
     return timeoutFuture.thenCompose(claim -> {
       if (claim == null) {
         // No more tasks or error occurred, return what we have
-        LOGGER.info("Claimed " + claims.size() + " tasks");
+        LOGGER.info("Claimed {} tasks", claims.size());
         return completedFuture(claims);
       }
 
@@ -302,11 +301,11 @@ public class LinkWorker implements Runnable {
   private CompletableFuture<Boolean> processClaimedTasksAsync(List<TaskClaim<Long, LinkTask>> claims) {
     return processTasksInTransactionAsync(claims).thenCompose(success -> {
       if (success) {
-        LOGGER.info("Processed " + claims.size() + " tasks");
-        return completeTasksAsync(claims).thenApply(v -> success);
+        LOGGER.info("Processed {} tasks", claims.size());
+        return completeTasksAsync(claims).thenApply(v -> true);
       } else {
-        LOGGER.warning("Failed to process " + claims.size() + " tasks");
-        return failTasksAsync(claims).thenApply(v -> success);
+        LOGGER.warn("Failed to process {} tasks", claims.size());
+        return failTasksAsync(claims).thenApply(v -> false);
       }
     });
   }
@@ -315,7 +314,7 @@ public class LinkWorker implements Runnable {
    * Processes all claimed tasks in a single transaction asynchronously.
    */
   private CompletableFuture<Boolean> processTasksInTransactionAsync(List<TaskClaim<Long, LinkTask>> claims) {
-    LOGGER.info("Claimed " + claims.size() + " tasks");
+    LOGGER.info("Claimed {} tasks", claims.size());
     return database.runAsync(tr -> {
           // Group tasks by PQ block for efficient updates
           Map<Long, List<TaskClaim<Long, LinkTask>>> tasksByBlock = groupTasksByBlock(claims);
@@ -333,7 +332,7 @@ public class LinkWorker implements Runnable {
         .orTimeout(TRANSACTION_BUDGET.toSeconds() + 1, TimeUnit.SECONDS)
         .handle((success, error) -> {
           if (error != null) {
-            LOGGER.log(Level.WARNING, "Transaction failed", error);
+            LOGGER.warn("Transaction failed", error);
             return false;
           }
           return success;
@@ -696,10 +695,9 @@ public class LinkWorker implements Runnable {
 
     for (TaskClaim<Long, LinkTask> claim : claims) {
       CompletableFuture<Void> completeFuture = claim.complete()
-          .orTimeout(5, TimeUnit.SECONDS)
           .thenAccept(v -> TASKS_COMPLETED.add(1))
           .exceptionally(e -> {
-            LOGGER.log(Level.WARNING, "Failed to complete task " + claim.taskKey(), e);
+            LOGGER.warn("Failed to complete task {}", claim.taskKey(), e);
             TASKS_FAILED.add(1);
             return null;
           });
@@ -717,10 +715,9 @@ public class LinkWorker implements Runnable {
 
     for (TaskClaim<Long, LinkTask> claim : claims) {
       CompletableFuture<Void> failFuture = claim.fail()
-          .orTimeout(5, TimeUnit.SECONDS)
           .thenAccept(v -> TASKS_FAILED.add(1))
           .exceptionally(e -> {
-            LOGGER.log(Level.WARNING, "Failed to fail task " + claim.taskKey(), e);
+            LOGGER.warn("Failed to fail task {}", claim.taskKey(), e);
             return null;
           });
       futures.add(failFuture);
@@ -752,7 +749,7 @@ public class LinkWorker implements Runnable {
 
     if (newSize != currentSize) {
       currentBatchSize.set(newSize);
-      LOGGER.info("Adjusted batch size from " + currentSize + " to " + newSize);
+      LOGGER.info("Adjusted batch size from {} to {}", currentSize, newSize);
     }
   }
 
@@ -816,7 +813,7 @@ public class LinkWorker implements Runnable {
             // No task available within timeout
             return false;
           }
-          LOGGER.log(Level.WARNING, "Failed to process single task", e);
+          LOGGER.warn("Failed to process single task", e);
           return false;
         });
   }

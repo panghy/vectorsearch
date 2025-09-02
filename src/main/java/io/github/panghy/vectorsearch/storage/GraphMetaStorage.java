@@ -9,7 +9,8 @@ import java.time.Instant;
 import java.time.InstantSource;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Storage layer for graph connectivity metadata.
@@ -28,7 +29,7 @@ import java.util.logging.Logger;
  * transaction boundaries and batch operations efficiently.
  */
 public class GraphMetaStorage {
-  private static final Logger LOGGER = Logger.getLogger(GraphMetaStorage.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(GraphMetaStorage.class);
 
   private final VectorIndexKeys keys;
   private final InstantSource instantSource;
@@ -55,12 +56,12 @@ public class GraphMetaStorage {
     byte[] key = keys.graphMetaKey();
     tx.set(key, graphMeta.toByteArray());
 
-    LOGGER.fine(String.format(
-        "Stored graph metadata: components=%d, largest=%d, total=%d, orphans=%d",
+    LOGGER.debug(
+        "Stored graph metadata: components={}, largest={}, total={}, orphans={}",
         graphMeta.getConnectedComponents(),
         graphMeta.getLargestComponentSize(),
         graphMeta.getTotalNodes(),
-        graphMeta.getOrphanedNodesCount()));
+        graphMeta.getOrphanedNodesCount());
 
     return CompletableFuture.completedFuture(null);
   }
@@ -113,13 +114,13 @@ public class GraphMetaStorage {
       // Calculate connectivity percentage
       double connectivityPercentage = totalNodes > 0 ? (double) largestComponentSize / totalNodes * 100.0 : 0.0;
 
-      LOGGER.info(String.format(
-          "Connectivity analysis: %d components, main=%.1f%% (%d/%d nodes), %d orphans",
+      LOGGER.info(
+          "Connectivity analysis: {} components, main={:.1f}% ({}/{} nodes), {} orphans",
           connectedComponents,
           connectivityPercentage,
           largestComponentSize,
           totalNodes,
-          orphanedNodes != null ? orphanedNodes.size() : 0));
+          orphanedNodes != null ? orphanedNodes.size() : 0);
 
       tx.set(key, builder.build().toByteArray());
       return null;
@@ -150,9 +151,12 @@ public class GraphMetaStorage {
 
       tx.set(key, builder.build().toByteArray());
 
-      LOGGER.fine(String.format(
-          "Updated graph statistics: avg_degree=%.2f, max=%d, min=%d, isolated=%d",
-          avgDegree, maxDegree, minDegree, isolatedNodes));
+      LOGGER.debug(
+          "Updated graph statistics: avg_degree={:.2f}, max={}, min={}, isolated={}",
+          avgDegree,
+          maxDegree,
+          minDegree,
+          isolatedNodes);
 
       return null;
     });
@@ -170,7 +174,7 @@ public class GraphMetaStorage {
 
     return readProto(tx, key, GraphMeta.parser()).thenApply(existing -> {
       if (existing == null) {
-        LOGGER.warning("Cannot mark repair completed: no graph metadata found");
+        LOGGER.warn("Cannot mark repair completed: no graph metadata found");
         return null;
       }
 
@@ -182,7 +186,7 @@ public class GraphMetaStorage {
 
       tx.set(key, builder.build().toByteArray());
 
-      LOGGER.info(String.format("Graph repair completed: %d nodes reconnected", repairedNodes));
+      LOGGER.info("Graph repair completed: {} nodes reconnected", repairedNodes);
 
       return null;
     });
@@ -229,9 +233,9 @@ public class GraphMetaStorage {
       boolean isHealthy = connectivityRatio >= healthyThreshold;
 
       if (!isHealthy) {
-        LOGGER.warning(String.format(
-            "Graph connectivity below threshold: %.1f%% < %.1f%%",
-            connectivityRatio * 100, healthyThreshold * 100));
+        LOGGER.warn(
+            "Graph connectivity below threshold: {:.1f}% < {:.1f}%",
+            connectivityRatio * 100, healthyThreshold * 100);
       }
 
       return isHealthy;

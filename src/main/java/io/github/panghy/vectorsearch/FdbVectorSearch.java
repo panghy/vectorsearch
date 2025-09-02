@@ -63,7 +63,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * FoundationDB-backed vector search index implementing DiskANN-style graph traversal
@@ -104,7 +105,7 @@ import java.util.logging.Logger;
  */
 public class FdbVectorSearch implements VectorSearch, AutoCloseable {
 
-  private static final Logger LOGGER = Logger.getLogger(FdbVectorSearch.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(FdbVectorSearch.class);
 
   // OpenTelemetry instrumentation
   private static final Tracer TRACER = GlobalOpenTelemetry.getTracer("io.github.panghy.vectorsearch", "0.1.0");
@@ -593,7 +594,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
           this.storedConfig = protoConfig;
           this.initialized = true;
 
-          LOGGER.info("Created new vector search index with dimension=" + config.getDimension());
+          LOGGER.info("Created new vector search index with dimension={}", config.getDimension());
           return completedFuture(null);
         } else {
           // Existing index - validate configuration
@@ -612,7 +613,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
 
               this.initialized = true;
 
-              LOGGER.info("Opened existing vector search index with dimension=" + config.getDimension());
+              LOGGER.info("Opened existing vector search index with dimension={}", config.getDimension());
             });
           } catch (IndexConfigurationException e) {
             // Re-throw configuration mismatches directly
@@ -654,7 +655,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
       linkWorkerThread = new Thread(linkWorker, "LinkWorker");
       linkWorkerThread.setDaemon(true);
       linkWorkerThread.start();
-      LOGGER.info("Started LinkWorker thread with codebook version " + activeVersion);
+      LOGGER.info("Started LinkWorker thread with codebook version {}", activeVersion);
     } else if (activeVersion <= 0) {
       LOGGER.info("Not starting LinkWorker - no codebooks available yet");
     }
@@ -671,12 +672,12 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
       try {
         linkWorkerThread.join(5000); // Wait up to 5 seconds
         if (linkWorkerThread.isAlive()) {
-          LOGGER.warning("LinkWorker thread did not stop gracefully");
+          LOGGER.warn("LinkWorker thread did not stop gracefully");
           linkWorkerThread.interrupt();
         }
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        LOGGER.warning("Interrupted while waiting for LinkWorker to stop");
+        LOGGER.warn("Interrupted while waiting for LinkWorker to stop");
       }
       linkWorkerThread = null;
     }
@@ -686,7 +687,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
   @Override
   public CompletableFuture<Void> refreshEntryPoints() {
     if (connectivityMonitor == null) {
-      LOGGER.warning("Cannot refresh entry points: storage not initialized");
+      LOGGER.warn("Cannot refresh entry points: storage not initialized");
       return completedFuture(null);
     }
 
@@ -699,14 +700,14 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
               cachedEntryPoints.set(null);
             }))
         .exceptionally(e -> {
-          LOGGER.severe("Failed to refresh entry points: " + e.getMessage());
+          LOGGER.error("Failed to refresh entry points: {}", e.getMessage());
           return null;
         });
   }
 
   CompletableFuture<Void> checkAndRepairConnectivity() {
     if (connectivityMonitor == null || graphMetaStorage == null) {
-      LOGGER.warning("Cannot check connectivity: storage not initialized");
+      LOGGER.warn("Cannot check connectivity: storage not initialized");
       return completedFuture(null);
     }
 
@@ -729,12 +730,12 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
                 .analyzeAndRepair(codebookVersion)
                 .thenAccept(v -> LOGGER.info("Graph connectivity check completed"));
           } else {
-            LOGGER.fine("Graph connectivity check skipped - analysis still fresh");
+            LOGGER.debug("Graph connectivity check skipped - analysis still fresh");
             return completedFuture(null);
           }
         })
         .exceptionally(e -> {
-          LOGGER.severe("Failed to check/repair graph connectivity: " + e.getMessage());
+          LOGGER.error("Failed to check/repair graph connectivity: {}", e.getMessage());
           return null;
         });
   }
@@ -768,7 +769,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
         terminated = maintenanceScheduler.awaitTermination(timeout, unit);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        LOGGER.warning("Interrupted while awaiting scheduler termination");
+        LOGGER.warn("Interrupted while awaiting scheduler termination");
         terminated = false;
       }
     } else {
@@ -963,11 +964,11 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
       // We need at least 100 vectors to train meaningful codebooks
       // This threshold can be adjusted based on requirements
       if (totalVectors < 100) {
-        LOGGER.info("Not enough vectors for training codebooks. Have " + totalVectors + ", need at least 100");
+        LOGGER.info("Not enough vectors for training codebooks. Have {}, need at least 100", totalVectors);
         return completedFuture(false);
       }
 
-      LOGGER.info("Training initial codebooks with " + totalVectors + " vectors");
+      LOGGER.info("Training initial codebooks with {} vectors", totalVectors);
 
       // Collect training vectors: current batch + sample of existing sketches
       List<float[]> trainingVectors = new ArrayList<>(currentVectors.values());
@@ -1004,7 +1005,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
           // Get the trained codebooks
 
           if (codebooks == null) {
-            LOGGER.severe("Failed to train codebooks");
+            LOGGER.error("Failed to train codebooks");
             return completedFuture(false);
           }
 
@@ -1029,8 +1030,9 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
                   return codebookStorage.setActiveVersion(nextVersion);
                 })
                 .thenApply(v -> {
-                  LOGGER.info("Successfully trained and stored initial codebooks (version "
-                      + nextVersion + ")");
+                  LOGGER.info(
+                      "Successfully trained and stored initial codebooks (version {})",
+                      nextVersion);
 
                   // Start LinkWorker now that we have codebooks
                   startLinkWorker();
@@ -1040,7 +1042,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
           });
         })
         .exceptionally(ex -> {
-          LOGGER.severe("Error training codebooks: " + ex.getMessage());
+          LOGGER.error("Error training codebooks: {}", ex.getMessage());
           return false;
         });
   }
@@ -1104,17 +1106,17 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
                 .loadCodebooks(latestVersion)
                 .thenApply(codebooks -> {
                   if (codebooks == null) {
-                    LOGGER.warning("Failed to load codebooks for version " + latestVersion);
+                    LOGGER.warn("Failed to load codebooks for version {}", latestVersion);
                     return false;
                   }
 
                   // Load into ProductQuantizer
                   // Codebooks are now loaded via cache
-                  LOGGER.fine("Loaded codebooks version " + latestVersion + " into ProductQuantizer");
+                  LOGGER.debug("Loaded codebooks version {} into ProductQuantizer", latestVersion);
                   return true;
                 })
                 .exceptionally(ex -> {
-                  LOGGER.severe("Error loading codebooks: " + ex.getMessage());
+                  LOGGER.error("Error loading codebooks: {}", ex.getMessage());
                   return false;
                 });
           })
@@ -1154,7 +1156,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
         // Get ProductQuantizer and perform beam search
         return codebookStorage.getLatestProductQuantizer().thenCompose(pq -> {
           if (pq == null) {
-            LOGGER.warning("No ProductQuantizer available for search");
+            LOGGER.warn("No ProductQuantizer available for search");
             return completedFuture(List.of());
           }
           return beamSearchEngine.search(tr, queryVector, k, searchList, maxVisits, pq);
@@ -1261,8 +1263,11 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
               return false;
             }
             if (!linkQueueEmpty.join() || !unlinkQueueEmpty.join()) {
-              LOGGER.info("Waiting for indexing to complete. link_queue is_empty: "
-                  + linkQueueEmpty.join() + ", unlink_queue is_empty: " + unlinkQueueEmpty.join());
+              LOGGER.info(
+                  "Waiting for indexing to complete. link_queue is_empty: {}, unlink_queue is_empty:"
+                      + " {}",
+                  linkQueueEmpty.join(),
+                  unlinkQueueEmpty.join());
             } else {
               LOGGER.info("Indexing complete");
             }

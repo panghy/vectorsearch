@@ -16,8 +16,9 @@ import java.util.List;
 import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Implements beam search algorithm for approximate nearest neighbor search
@@ -36,7 +37,7 @@ import java.util.stream.Collectors;
  * and supports configurable beam size and visit limits for latency control.
  */
 public class BeamSearchEngine {
-  private static final Logger LOGGER = Logger.getLogger(BeamSearchEngine.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(BeamSearchEngine.class);
 
   private final NodeAdjacencyStorage adjacencyStorage;
   private final PqBlockStorage pqBlockStorage;
@@ -79,11 +80,11 @@ public class BeamSearchEngine {
     // Apply Milvus behavior: search_list = max(default, topK)
     int beamSize = searchListSize > 0 ? Math.max(searchListSize, topK) : Math.max(16, topK);
 
-    LOGGER.fine(String.format("Starting beam search: topK=%d, beam=%d, maxVisits=%d", topK, beamSize, maxVisits));
+    LOGGER.debug("Starting beam search: topK={}, beam={}, maxVisits={}", topK, beamSize, maxVisits);
 
     // Build PQ lookup table for query
     if (pq == null) {
-      LOGGER.warning("No ProductQuantizer available for search");
+      LOGGER.warn("No ProductQuantizer available for search");
       return CompletableFuture.completedFuture(List.of());
     }
     int codebookVersion = pq.getCodebookVersion();
@@ -92,7 +93,7 @@ public class BeamSearchEngine {
     // Get entry points using hierarchical strategy
     return entryPointStorage.getHierarchicalEntryPoints(tx, beamSize).thenCompose(entryPoints -> {
       if (entryPoints.isEmpty()) {
-        LOGGER.warning("No entry points found, returning empty results");
+        LOGGER.warn("No entry points found, returning empty results");
         return completedFuture(Collections.emptyList());
       }
 
@@ -130,7 +131,7 @@ public class BeamSearchEngine {
     // Get the ProductQuantizer for this codebook version
     return codebookStorage.getProductQuantizer(codebookVersion).thenCompose(pq -> {
       if (pq == null) {
-        LOGGER.warning("No ProductQuantizer available for codebook version " + codebookVersion);
+        LOGGER.warn("No ProductQuantizer available for codebook version {}", codebookVersion);
         return CompletableFuture.completedFuture(List.of());
       }
 
@@ -220,7 +221,7 @@ public class BeamSearchEngine {
         finalResults = finalResults.subList(0, topK);
       }
 
-      LOGGER.fine(String.format("Search complete: visited=%d, results=%d", visitCount, finalResults.size()));
+      LOGGER.debug("Search complete: visited={}, results={}", visitCount, finalResults.size());
 
       return completedFuture(finalResults);
     }
@@ -353,7 +354,7 @@ public class BeamSearchEngine {
     // Get the ProductQuantizer for distance computation
     return codebookStorage.getProductQuantizer(codebookVersion).thenCompose(pq -> {
       if (pq == null) {
-        LOGGER.warning("No ProductQuantizer available for codebook version " + codebookVersion);
+        LOGGER.warn("No ProductQuantizer available for codebook version {}", codebookVersion);
         // Return max distance for all nodes
         List<SearchCandidate> candidates = new ArrayList<>();
         for (Long nodeId : nodeIds) {

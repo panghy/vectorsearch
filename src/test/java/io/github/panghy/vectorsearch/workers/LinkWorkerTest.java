@@ -42,15 +42,16 @@ import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class LinkWorkerTest {
-  private static final Logger LOGGER = Logger.getLogger(LinkWorkerTest.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(LinkWorkerTest.class);
 
   private Database db;
   private DirectorySubspace testDirectory;
@@ -353,14 +354,14 @@ class LinkWorkerTest {
 
     // The new node should have discovered some neighbors
     List<Long> neighbors = newNodeAdj.getNeighborsList();
-    LOGGER.info("New node " + newNodeId + " has neighbors: " + neighbors);
+    LOGGER.info("New node {} has neighbors: {}", newNodeId, neighbors);
 
     // Verify back-links were created
     for (Long neighborId : neighbors) {
       NodeAdjacency neighborAdj = db.runAsync(tr -> nodeAdjacencyStorage.loadAdjacency(tr, neighborId))
           .get();
       assertThat(neighborAdj.getNeighborsList()).contains(newNodeId);
-      LOGGER.info("Neighbor " + neighborId + " has back-link to " + newNodeId);
+      LOGGER.info("Neighbor {} has back-link to {}", neighborId, newNodeId);
     }
   }
 
@@ -400,7 +401,7 @@ class LinkWorkerTest {
     assertThat(processed).isEqualTo(20);
 
     int finalBatchSize = linkWorker.getCurrentBatchSize();
-    LOGGER.info("Batch size changed from " + initialBatchSize + " to " + finalBatchSize);
+    LOGGER.info("Batch size changed from {} to {}", initialBatchSize, finalBatchSize);
 
     // Batch size may have changed based on processing speed
     assertThat(linkWorker.getTotalProcessed()).isEqualTo(20);
@@ -544,7 +545,7 @@ class LinkWorkerTest {
 
     // The batch size may have been adjusted during processing
     int finalBatchSize = linkWorker.getCurrentBatchSize();
-    LOGGER.info("Batch size changed from " + initialBatchSize + " to " + finalBatchSize);
+    LOGGER.info("Batch size changed from {} to {}", initialBatchSize, finalBatchSize);
     // Batch size should be positive and within bounds
     assertThat(finalBatchSize).isGreaterThan(0).isLessThanOrEqualTo(100);
   }

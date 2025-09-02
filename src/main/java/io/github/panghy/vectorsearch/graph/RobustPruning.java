@@ -7,9 +7,10 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Function;
-import java.util.logging.Logger;
 import lombok.Builder;
 import lombok.Getter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Implements DiskANN-style robust pruning algorithm for neighbor selection in graph construction.
@@ -30,7 +31,7 @@ import lombok.Getter;
  * </ul>
  */
 public class RobustPruning {
-  private static final Logger LOGGER = Logger.getLogger(RobustPruning.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(RobustPruning.class);
 
   /**
    * Default alpha parameter for diversity control.
@@ -124,9 +125,12 @@ public class RobustPruning {
         selected.add(candidate.getNodeId());
         selectedSet.add(candidate.getNodeId());
 
-        LOGGER.fine(String.format(
-            "Selected node %d with distance %.4f (count: %d/%d)",
-            candidate.getNodeId(), candidate.getDistanceToQuery(), selected.size(), config.getMaxDegree()));
+        LOGGER.debug(
+            "Selected node {} with distance {:.4f} (count: {}/{})",
+            candidate.getNodeId(),
+            candidate.getDistanceToQuery(),
+            selected.size(),
+            config.getMaxDegree());
       }
     }
 
@@ -171,12 +175,12 @@ public class RobustPruning {
         // If candidate is very close to an already selected node, it's dominated
         if (pairDist < config.getAlpha() * candidate.getDistanceToQuery()) {
           dominated = true;
-          LOGGER.fine(String.format(
-              "Node %d dominated by %d (pairwise dist: %.4f < %.4f)",
+          LOGGER.debug(
+              "Node {} dominated by {} (pairwise dist: {:.4f} < {:.4f})",
               candidate.getNodeId(),
               selectedId,
               pairDist,
-              config.getAlpha() * candidate.getDistanceToQuery()));
+              config.getAlpha() * candidate.getDistanceToQuery());
           break;
         }
       }
@@ -185,9 +189,12 @@ public class RobustPruning {
         selected.add(candidate.getNodeId());
         selectedSet.add(candidate.getNodeId());
 
-        LOGGER.fine(String.format(
-            "Selected node %d with distance %.4f (count: %d/%d)",
-            candidate.getNodeId(), candidate.getDistanceToQuery(), selected.size(), config.getMaxDegree()));
+        LOGGER.debug(
+            "Selected node {} with distance {:.4f} (count: {}/{})",
+            candidate.getNodeId(),
+            candidate.getDistanceToQuery(),
+            selected.size(),
+            config.getMaxDegree());
       }
     }
 
