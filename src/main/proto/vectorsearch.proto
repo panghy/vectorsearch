@@ -136,6 +136,10 @@ message PqCodesBlock {
   
   // Optional: Bloom filter for quick NID existence checks (future optimization)
   optional bytes bloom_filter = 7;
+  
+  // Bitmap tracking which offsets have been written
+  // Each bit represents whether the corresponding offset has valid data
+  optional bytes written_offsets = 8;
 }
 
 // ========================================================================================

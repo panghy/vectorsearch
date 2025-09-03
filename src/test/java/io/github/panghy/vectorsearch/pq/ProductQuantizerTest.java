@@ -19,8 +19,7 @@ class ProductQuantizerTest {
     List<float[]> trainingVectors = generateRandomVectors(100, dimension, new Random(42));
 
     try {
-      float[][][] codebooks = ProductQuantizer.train(
-              dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+      float[][][] codebooks = ProductQuantizer.train(numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
           .get();
 
       // Valid construction with codebooks
@@ -61,7 +60,7 @@ class ProductQuantizerTest {
 
     // Train the quantizer - static method returns codebooks
     CompletableFuture<float[][][]> trainFuture =
-        ProductQuantizer.train(dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors);
+        ProductQuantizer.train(numSubvectors, DistanceMetrics.Metric.L2, trainingVectors);
     float[][][] codebooks = trainFuture.get(); // Wait for training to complete
 
     // Verify codebooks are created
@@ -93,8 +92,7 @@ class ProductQuantizerTest {
     // Train with sufficient data
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(1000, dimension, random);
-    float[][][] codebooks = ProductQuantizer.train(
-            dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+    float[][][] codebooks = ProductQuantizer.train(numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
         .get();
 
     // Create ProductQuantizer with trained codebooks
@@ -124,8 +122,7 @@ class ProductQuantizerTest {
     // Train
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(500, dimension, random);
-    float[][][] codebooks = ProductQuantizer.train(
-            dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+    float[][][] codebooks = ProductQuantizer.train(numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
         .get();
 
     ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 1, codebooks);
@@ -162,8 +159,7 @@ class ProductQuantizerTest {
     List<float[]> trainingVectors = generateRandomVectors(300, dimension, random);
 
     // Train with cosine metric
-    float[][][] codebooks = ProductQuantizer.train(
-            dimension, numSubvectors, DistanceMetrics.Metric.COSINE, trainingVectors)
+    float[][][] codebooks = ProductQuantizer.train(numSubvectors, DistanceMetrics.Metric.COSINE, trainingVectors)
         .get();
 
     ProductQuantizer pq =
@@ -198,7 +194,7 @@ class ProductQuantizerTest {
     List<float[]> trainingVectors = generateRandomVectors(300, dimension, random);
 
     float[][][] codebooks = ProductQuantizer.train(
-            dimension, numSubvectors, DistanceMetrics.Metric.INNER_PRODUCT, trainingVectors)
+            numSubvectors, DistanceMetrics.Metric.INNER_PRODUCT, trainingVectors)
         .get();
 
     ProductQuantizer pq =
@@ -220,8 +216,7 @@ class ProductQuantizerTest {
     // Train first PQ to get codebooks
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(500, dimension, random);
-    float[][][] codebooks = ProductQuantizer.train(
-            dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+    float[][][] codebooks = ProductQuantizer.train(numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
         .get();
 
     // Create new PQ with same codebooks but different version
@@ -245,8 +240,7 @@ class ProductQuantizerTest {
 
     Random random = new Random(42);
     List<float[]> trainingVectors = generateRandomVectors(500, dimension, random);
-    float[][][] codebooks = ProductQuantizer.train(
-            dimension, numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
+    float[][][] codebooks = ProductQuantizer.train(numSubvectors, DistanceMetrics.Metric.L2, trainingVectors)
         .get();
 
     ProductQuantizer pq = new ProductQuantizer(dimension, numSubvectors, DistanceMetrics.Metric.L2, 1, codebooks);
@@ -273,9 +267,8 @@ class ProductQuantizerTest {
     int numSubvectors = 4;
     List<float[]> emptyVectors = new ArrayList<>();
 
-    assertThatThrownBy(
-            () -> ProductQuantizer.train(dimension, numSubvectors, DistanceMetrics.Metric.L2, emptyVectors)
-                .get())
+    assertThatThrownBy(() -> ProductQuantizer.train(numSubvectors, DistanceMetrics.Metric.L2, emptyVectors)
+            .get())
         .hasCauseInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Training set cannot be empty");
   }
@@ -329,7 +322,7 @@ class ProductQuantizerTest {
     }
 
     // This should still work, just with fewer effective centroids
-    CompletableFuture<float[][][]> future = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData);
+    CompletableFuture<float[][][]> future = ProductQuantizer.train(4, DistanceMetrics.Metric.L2, trainingData);
 
     assertThat(future).isCompletedWithValueMatching(codebooks -> {
       assertThat(codebooks.length).isEqualTo(4);
@@ -343,7 +336,7 @@ class ProductQuantizerTest {
     List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
 
     // Test with COSINE metric
-    float[][][] cosineCodebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.COSINE, trainingData)
+    float[][][] cosineCodebooks = ProductQuantizer.train(4, DistanceMetrics.Metric.COSINE, trainingData)
         .get();
     ProductQuantizer cosinePq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.COSINE, 1, cosineCodebooks);
 
@@ -353,7 +346,7 @@ class ProductQuantizerTest {
     assertThat(decoded.length).isEqualTo(64);
 
     // Test with INNER_PRODUCT metric
-    float[][][] ipCodebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.INNER_PRODUCT, trainingData)
+    float[][][] ipCodebooks = ProductQuantizer.train(4, DistanceMetrics.Metric.INNER_PRODUCT, trainingData)
         .get();
     ProductQuantizer ipPq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.INNER_PRODUCT, 1, ipCodebooks);
 
@@ -376,7 +369,7 @@ class ProductQuantizerTest {
     List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
     float[][][] codebooks;
     try {
-      codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData)
+      codebooks = ProductQuantizer.train(4, DistanceMetrics.Metric.L2, trainingData)
           .get();
     } catch (Exception e) {
       throw new RuntimeException(e);
@@ -393,7 +386,7 @@ class ProductQuantizerTest {
   @Test
   void testProductQuantizerDistanceComputationEdgeCases() throws Exception {
     List<float[]> trainingData = generateRandomVectors(100, 32, new Random(42));
-    float[][][] codebooks = ProductQuantizer.train(32, 4, DistanceMetrics.Metric.L2, trainingData)
+    float[][][] codebooks = ProductQuantizer.train(4, DistanceMetrics.Metric.L2, trainingData)
         .get();
     ProductQuantizer pq = new ProductQuantizer(32, 4, DistanceMetrics.Metric.L2, 1, codebooks);
 
@@ -413,7 +406,7 @@ class ProductQuantizerTest {
   @Test
   void testProductQuantizerEncodeWithWrongDimension() throws Exception {
     List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
-    float[][][] codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData)
+    float[][][] codebooks = ProductQuantizer.train(4, DistanceMetrics.Metric.L2, trainingData)
         .get();
     ProductQuantizer pq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.L2, 1, codebooks);
 
@@ -427,7 +420,7 @@ class ProductQuantizerTest {
   @Test
   void testProductQuantizerBuildLookupTableFromPqCodeWithWrongSize() throws Exception {
     List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
-    float[][][] codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData)
+    float[][][] codebooks = ProductQuantizer.train(4, DistanceMetrics.Metric.L2, trainingData)
         .get();
     ProductQuantizer pq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.L2, 1, codebooks);
 
@@ -443,7 +436,7 @@ class ProductQuantizerTest {
     List<float[]> trainingData = generateRandomVectors(300, 64, new Random(42));
 
     // This should trigger the logging path where we have more than 256 vectors
-    float[][][] codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.L2, trainingData)
+    float[][][] codebooks = ProductQuantizer.train(4, DistanceMetrics.Metric.L2, trainingData)
         .get();
 
     assertThat(codebooks).isNotNull();
@@ -467,7 +460,7 @@ class ProductQuantizerTest {
   @Test
   void testProductQuantizerAccessors() throws Exception {
     List<float[]> trainingData = generateRandomVectors(100, 64, new Random(42));
-    float[][][] codebooks = ProductQuantizer.train(64, 4, DistanceMetrics.Metric.COSINE, trainingData)
+    float[][][] codebooks = ProductQuantizer.train(4, DistanceMetrics.Metric.COSINE, trainingData)
         .get();
     ProductQuantizer pq = new ProductQuantizer(64, 4, DistanceMetrics.Metric.COSINE, 2, codebooks);
 

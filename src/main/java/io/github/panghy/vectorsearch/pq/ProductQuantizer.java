@@ -88,14 +88,13 @@ public class ProductQuantizer {
    * Trains PQ codebooks using k-means clustering on training vectors.
    * This is a static method that returns the trained codebooks.
    *
-   * @param dimension       the dimension of input vectors
    * @param numSubvectors   the number of subvectors
    * @param metric          the distance metric to use
    * @param trainingVectors the training data
    * @return CompletableFuture containing the trained codebooks
    */
   public static CompletableFuture<float[][][]> train(
-      int dimension, int numSubvectors, DistanceMetrics.Metric metric, List<float[]> trainingVectors) {
+      int numSubvectors, DistanceMetrics.Metric metric, List<float[]> trainingVectors) {
 
     if (trainingVectors.isEmpty()) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("Training set cannot be empty"));

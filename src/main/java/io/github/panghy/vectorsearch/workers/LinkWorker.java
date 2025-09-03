@@ -320,7 +320,7 @@ public class LinkWorker implements Runnable {
    * Processes all claimed tasks in a single transaction asynchronously.
    */
   private CompletableFuture<Boolean> processTasksInTransactionAsync(List<TaskClaim<Long, LinkTask>> claims) {
-    LOGGER.info("Claimed {} tasks", claims.size());
+    LOGGER.debug("Claimed {} tasks", claims.size());
     return database.runAsync(tr -> {
           // Group tasks by PQ block for efficient updates
           Map<Long, List<TaskClaim<Long, LinkTask>>> tasksByBlock = groupTasksByBlock(claims);
@@ -375,7 +375,7 @@ public class LinkWorker implements Runnable {
     return allOf(encodingFutures.toArray(CompletableFuture[]::new)).thenCompose(v -> {
       // Now all tasks have PQ-encoded data
       List<PqEncodedData> encodedData =
-          encodingFutures.stream().map(CompletableFuture::join).collect(Collectors.toList());
+          encodingFutures.stream().map(CompletableFuture::join).toList();
 
       // Get the codebook version (all should be the same after encoding)
       final int codebookVersion = encodedData.isEmpty() ? 1 : encodedData.get(0).codebookVersion;
@@ -387,17 +387,31 @@ public class LinkWorker implements Runnable {
         }
 
         // Step 1: Persist PQ codes for all nodes in this block
-        List<CompletableFuture<Void>> persistFutures = new ArrayList<>();
+        // Collect all PQ codes and node IDs to store as a batch
+        List<Long> nodeIdsToStore = new ArrayList<>();
+        List<byte[]> pqCodesToStore = new ArrayList<>();
+        int cbVersion = -1;
+
         for (int i = 0; i < claims.size(); i++) {
           TaskClaim<Long, LinkTask> claim = claims.get(i);
           PqEncodedData encoded = encodedData.get(i);
           if (encoded.pqCode != null) {
-            persistFutures.add(pqBlockStorage.storePqCode(
-                tr, claim.taskKey(), encoded.pqCode, encoded.codebookVersion));
+            nodeIdsToStore.add(claim.taskKey());
+            pqCodesToStore.add(encoded.pqCode);
+            cbVersion = encoded.codebookVersion;
           }
         }
 
-        return allOf(persistFutures.toArray(CompletableFuture[]::new)).thenCompose($ -> {
+        // Store all PQ codes in a single batch operation
+        CompletableFuture<Void> persistFuture;
+        if (!nodeIdsToStore.isEmpty()) {
+          persistFuture = pqBlockStorage.batchStorePqCodesInTransaction(
+              tr, nodeIdsToStore, pqCodesToStore, cbVersion);
+        } else {
+          persistFuture = completedFuture(null);
+        }
+
+        return persistFuture.thenCompose($ -> {
           // Step 2: Discover neighbors for all nodes
           List<CompletableFuture<List<Long>>> neighborFutures = new ArrayList<>();
 
@@ -498,7 +512,7 @@ public class LinkWorker implements Runnable {
     return entryPointStorage.getEntryPoints(tr).thenCompose(entryPoints -> {
       if (entryPoints.isEmpty()) {
         // No entry points yet, initialize with this first node
-        LOGGER.info("No entry points found, initializing with node {}", nodeId);
+        LOGGER.info("No entry points found, initializing with node {} as the FIRST entry point", nodeId);
         return entryPointStorage
             .storeEntryList(
                 tr,
@@ -507,12 +521,73 @@ public class LinkWorker implements Runnable {
                 Collections.emptyList() // No high-degree entries yet
                 )
             .thenApply(v -> {
+              LOGGER.info("Successfully stored node {} as initial entry point", nodeId);
               // Return empty neighbors since this is the first node
               return new ArrayList<>();
             });
       }
 
-      // Use beam search to find neighbors
+      // Check if we should add more entry points for diversity
+      // Add every 50th node as additional entry point during initial graph building for better coverage
+      if (nodeId % 50 == 0 && entryPoints.size() < 20) {
+        LOGGER.debug(
+            "Adding node {} as additional entry point for diversity (current count: {})",
+            nodeId,
+            entryPoints.size());
+        List<Long> updatedPrimary = new ArrayList<>(entryPoints);
+        if (!updatedPrimary.contains(nodeId)) {
+          updatedPrimary.add(nodeId);
+          // Store updated entry points but don't wait for it
+          entryPointStorage.storeEntryList(
+              tr,
+              updatedPrimary.subList(0, Math.min(updatedPrimary.size(), 20)), // Keep max 20 primary
+              Collections.emptyList(),
+              Collections.emptyList());
+        }
+      }
+
+      // Warm-up phase: For the first few nodes, connect them all to each other
+      // This ensures good initial connectivity for the graph
+      final int warmUpNodeCount = 50; // First 50 nodes get special treatment
+
+      // During warm-up, we need to get ALL existing nodes, not just entry points
+      // Use a simple heuristic: if node ID is low, we're in warm-up phase
+      if (nodeId <= warmUpNodeCount) {
+        // Collect all nodes with IDs less than current node as potential neighbors
+        List<Long> warmUpNeighbors = new ArrayList<>();
+
+        // Add all lower-numbered nodes (they should already be processed)
+        for (long i = 1; i < nodeId && i <= warmUpNodeCount; i++) {
+          if (i != nodeId) {
+            warmUpNeighbors.add(i);
+          }
+        }
+
+        if (!warmUpNeighbors.isEmpty()) {
+          LOGGER.info(
+              "Warm-up phase for node {} - connecting to {} potential neighbors",
+              nodeId,
+              warmUpNeighbors.size());
+
+          // Limit to graph degree if needed
+          if (warmUpNeighbors.size() > graphDegree) {
+            // Keep a diverse set during warm-up by taking evenly spaced nodes
+            List<Long> selected = new ArrayList<>();
+            int step = warmUpNeighbors.size() / graphDegree;
+            for (int i = 0; i < warmUpNeighbors.size() && selected.size() < graphDegree; i += step) {
+              selected.add(warmUpNeighbors.get(i));
+            }
+            warmUpNeighbors = selected;
+          }
+
+          LOGGER.debug("Warm-up: node {} will connect to {} neighbors", nodeId, warmUpNeighbors.size());
+          return completedFuture(warmUpNeighbors);
+        }
+        // If no neighbors yet (node 1), fall through to normal processing
+      }
+
+      // Normal phase: Use beam search to find neighbors
+      LOGGER.debug("Searching for neighbors of node {} with {} entry points", nodeId, entryPoints.size());
       return searchEngine
           .searchForNeighbors(
               tr,
@@ -522,7 +597,43 @@ public class LinkWorker implements Runnable {
               entryPoints,
               graphDegree * 2, // Search for more candidates
               maxSearchVisits)
-          .thenApply(this::convertAndPrune);
+          .thenApply(searchResults -> {
+            LOGGER.debug(
+                "Found {} candidates for node {}, pruning to max {}",
+                searchResults.size(),
+                nodeId,
+                graphDegree);
+
+            // If beam search returns too few candidates, add some random connections
+            if (searchResults.size() < 5 && entryPoints.size() > 10) {
+              LOGGER.info(
+                  "Only found {} candidates for node {}, adding random connections",
+                  searchResults.size(),
+                  nodeId);
+
+              // Add some random entry points as fallback
+              List<SearchResult> combined = new ArrayList<>(searchResults);
+              List<Long> randomPoints = new ArrayList<>(entryPoints);
+              Collections.shuffle(randomPoints);
+
+              for (Long randomNode : randomPoints) {
+                if (randomNode != nodeId && combined.size() < graphDegree) {
+                  boolean alreadyPresent =
+                      combined.stream().anyMatch(r -> r.getNodeId() == randomNode);
+                  if (!alreadyPresent) {
+                    // Add with a high distance as fallback
+                    combined.add(new SearchResult(randomNode, Float.MAX_VALUE / 2));
+                  }
+                  if (combined.size() >= 10) break; // Add up to 10 fallback connections
+                }
+              }
+              searchResults = combined;
+            }
+
+            List<Long> pruned = convertAndPrune(searchResults);
+            LOGGER.debug("After pruning, node {} will have {} neighbors", nodeId, pruned.size());
+            return pruned;
+          });
     });
   }
 
@@ -771,7 +882,7 @@ public class LinkWorker implements Runnable {
 
     if (newSize != currentSize) {
       currentBatchSize.set(newSize);
-      LOGGER.info("Adjusted batch size from {} to {}", currentSize, newSize);
+      LOGGER.debug("Adjusted batch size from {} to {}", currentSize, newSize);
     }
   }
 
