@@ -34,7 +34,9 @@ import io.opentelemetry.api.trace.Tracer;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -260,38 +262,42 @@ public class LinkWorker implements Runnable {
       if (index < targetSize) {
         LOGGER.debug("Claim budget exhausted after {} claims", index);
       }
-      LOGGER.debug("Claimed {} tasks", claims.size());
       return completedFuture(claims);
     }
 
-    CompletableFuture<TaskClaim<Long, LinkTask>> claimFuture = taskQueue.awaitAndClaimTask(database);
+    long claimBudgetMillis = instantSource.instant().until(claimDeadline, ChronoUnit.MILLIS);
+    if (claimBudgetMillis > 0) {
+      CompletableFuture<TaskClaim<Long, LinkTask>> claimFuture = taskQueue.awaitAndClaimTask(database);
 
-    // Add timeout to the claim future
-    CompletableFuture<TaskClaim<Long, LinkTask>> timeoutFuture = new CompletableFuture<>();
-    claimFuture.orTimeout(CLAIM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).whenComplete((claim, error) -> {
-      if (error != null) {
-        if (error instanceof TimeoutException) {
-          LOGGER.debug("No task available within timeout");
+      // Add timeout to the claim future
+      CompletableFuture<TaskClaim<Long, LinkTask>> timeoutFuture = new CompletableFuture<>();
+      claimFuture.orTimeout(claimBudgetMillis, TimeUnit.MILLISECONDS).whenComplete((claim, error) -> {
+        if (error != null) {
+          if (error instanceof TimeoutException) {
+            LOGGER.debug("No task available within timeout");
+          } else {
+            LOGGER.warn("Failed to claim task", error);
+          }
+          timeoutFuture.complete(null);
         } else {
-          LOGGER.warn("Failed to claim task", error);
+          timeoutFuture.complete(claim);
         }
-        timeoutFuture.complete(null);
-      } else {
-        timeoutFuture.complete(claim);
-      }
-    });
+      });
 
-    return timeoutFuture.thenCompose(claim -> {
-      if (claim == null) {
-        // No more tasks or error occurred, return what we have
-        LOGGER.info("Claimed {} tasks", claims.size());
-        return completedFuture(claims);
-      }
+      return timeoutFuture.thenCompose(claim -> {
+        if (claim == null) {
+          // No more tasks or error occurred, return what we have
+          return completedFuture(claims);
+        }
 
-      claims.add(claim);
-      TASKS_CLAIMED.add(1);
-      return claimTasksRecursive(claims, targetSize, claimDeadline, index + 1);
-    });
+        claims.add(claim);
+        TASKS_CLAIMED.add(1);
+        return claimTasksRecursive(claims, targetSize, claimDeadline, index + 1);
+      });
+    } else {
+      LOGGER.debug("Claim budget exhausted after {} claims", index);
+      return completedFuture(claims);
+    }
   }
 
   /**
@@ -375,8 +381,8 @@ public class LinkWorker implements Runnable {
       final int codebookVersion = encodedData.isEmpty() ? 1 : encodedData.get(0).codebookVersion;
 
       // Validate that the codebook version exists
-      return codebookStorage.loadCodebooks(codebookVersion).thenCompose(codebooks -> {
-        if (codebooks == null) {
+      return codebookStorage.getProductQuantizer(codebookVersion).thenCompose(productQuantizer -> {
+        if (productQuantizer == null) {
           throw new IllegalArgumentException("Codebook version " + codebookVersion + " does not exist");
         }
 
@@ -491,8 +497,19 @@ public class LinkWorker implements Runnable {
     // Load entry points
     return entryPointStorage.getEntryPoints(tr).thenCompose(entryPoints -> {
       if (entryPoints.isEmpty()) {
-        // No entry points yet, this might be one of the first nodes
-        return completedFuture(new ArrayList<>());
+        // No entry points yet, initialize with this first node
+        LOGGER.info("No entry points found, initializing with node {}", nodeId);
+        return entryPointStorage
+            .storeEntryList(
+                tr,
+                List.of(nodeId), // Use this node as the first primary entry
+                Collections.emptyList(), // No random entries yet
+                Collections.emptyList() // No high-degree entries yet
+                )
+            .thenApply(v -> {
+              // Return empty neighbors since this is the first node
+              return new ArrayList<>();
+            });
       }
 
       // Use beam search to find neighbors
@@ -505,25 +522,30 @@ public class LinkWorker implements Runnable {
               entryPoints,
               graphDegree * 2, // Search for more candidates
               maxSearchVisits)
-          .thenApply(searchResults -> {
-            // Convert SearchResults to RobustPruning.Candidates
-            List<Candidate> candidates = new ArrayList<>();
-            for (SearchResult result : searchResults) {
-              candidates.add(Candidate.builder()
-                  .nodeId(result.getNodeId())
-                  .distanceToQuery(result.getDistance())
-                  .build());
-            }
-
-            // Apply proper robust pruning with distances
-            PruningConfig config = PruningConfig.builder()
-                .maxDegree(graphDegree)
-                .alpha(pruningAlpha)
-                .build();
-
-            return RobustPruning.prune(candidates, config);
-          });
+          .thenApply(this::convertAndPrune);
     });
+  }
+
+  /**
+   * Converts search results to candidates and applies pruning.
+   */
+  private List<Long> convertAndPrune(List<SearchResult> searchResults) {
+    // Convert SearchResults to RobustPruning.Candidates
+    List<Candidate> candidates = new ArrayList<>();
+    for (SearchResult result : searchResults) {
+      candidates.add(Candidate.builder()
+          .nodeId(result.getNodeId())
+          .distanceToQuery(result.getDistance())
+          .build());
+    }
+
+    // Apply proper robust pruning with distances
+    PruningConfig config = PruningConfig.builder()
+        .maxDegree(graphDegree)
+        .alpha(pruningAlpha)
+        .build();
+
+    return RobustPruning.prune(candidates, config);
   }
 
   /**
@@ -825,7 +847,7 @@ public class LinkWorker implements Runnable {
    * @param maxTasks maximum number of tasks to process (0 for unlimited)
    * @return CompletableFuture with the number of tasks processed
    */
-  public CompletableFuture<Integer> processAllAvailableTasks(int maxTasks) {
+  CompletableFuture<Integer> processAllAvailableTasks(int maxTasks) {
     return processTasksRecursively(new AtomicInteger(0), maxTasks);
   }
 

@@ -963,10 +963,14 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
     return vectorSketchStorage.countVectorSketches(tr).thenCompose(existingCount -> {
       int totalVectors = existingCount + currentVectors.size();
 
-      // We need at least 100 vectors to train meaningful codebooks
-      // This threshold can be adjusted based on requirements
-      if (totalVectors < 100) {
-        LOGGER.info("Not enough vectors for training codebooks. Have {}, need at least 100", totalVectors);
+      // We need at least k=256 vectors to train meaningful codebooks
+      // since each subspace uses k-means with k=256 centroids
+      final int minVectorsForTraining = 256;
+      if (totalVectors < minVectorsForTraining) {
+        LOGGER.info(
+            "Not enough vectors for training codebooks. Have {}, need at least {}",
+            totalVectors,
+            minVectorsForTraining);
         return completedFuture(false);
       }
 
@@ -1056,8 +1060,8 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
    * @return the active codebook version, or 0 if not set
    */
   private CompletableFuture<Long> readActiveCodebookVersion(Transaction tr) {
-    // Construct the active codebook version key using metaSubspace
-    byte[] key = metaSubspace.pack(Tuple.from("cbv", "active"));
+    // Read the active codebook version key
+    byte[] key = vectorIndexKeys.activeCodebookVersionKey();
     return tr.get(key).thenApply(value -> {
       if (value == null) {
         return 0L;
@@ -1090,8 +1094,11 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
     return readActiveCodebookVersion(tr).thenCompose(latestVersion -> {
       if (latestVersion == 0) {
         // No codebooks exist yet
+        LOGGER.debug("No active codebook version found (version=0)");
         return completedFuture(false);
       }
+
+      LOGGER.debug("Active codebook version: {}", latestVersion);
 
       // Use semaphore to prevent concurrent loading of the same version
       return codeBooksLoadingSemaphore
@@ -1105,9 +1112,9 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
               return completedFuture(true);
             }
             return codebookStorage
-                .loadCodebooks(latestVersion)
-                .thenApply(codebooks -> {
-                  if (codebooks == null) {
+                .getProductQuantizer(latestVersion)
+                .thenApply(productQuantizer -> {
+                  if (productQuantizer == null) {
                     LOGGER.warn("Failed to load codebooks for version {}", latestVersion);
                     return false;
                   }
@@ -1152,8 +1159,11 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
       return ensureLatestCodebooksLoaded(tr).thenCompose(loaded -> {
         if (!loaded) {
           // No codebooks available or failed to load
+          LOGGER.warn("No codebooks loaded for search, returning empty results");
           return completedFuture(List.of());
         }
+
+        LOGGER.debug("Codebooks loaded, performing search");
 
         // Get ProductQuantizer and perform beam search
         return codebookStorage.getLatestProductQuantizer().thenCompose(pq -> {
@@ -1257,23 +1267,23 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
 
     Instant startTime = Instant.now();
     return AsyncUtil.whileTrue(() -> {
-      CompletableFuture<Boolean> linkQueueEmpty = linkTaskQueue.isEmpty();
-      CompletableFuture<Boolean> unlinkQueueEmpty = unlinkTaskQueue.isEmpty();
-      return allOf(linkQueueEmpty, unlinkQueueEmpty)
+      CompletableFuture<Boolean> hasLinkTasksF = linkTaskQueue.hasVisibleUnclaimedTasks();
+      CompletableFuture<Boolean> hasUnlinkTasksF = unlinkTaskQueue.hasVisibleUnclaimedTasks();
+      return allOf(hasLinkTasksF, hasUnlinkTasksF)
           .thenApply($ -> {
             if (Instant.now().isAfter(startTime.plus(maxWait))) {
               return false;
             }
-            if (!linkQueueEmpty.join() || !unlinkQueueEmpty.join()) {
+            if (hasLinkTasksF.join() || hasUnlinkTasksF.join()) {
               LOGGER.info(
-                  "Waiting for indexing to complete. link_queue is_empty: {}, unlink_queue is_empty:"
-                      + " {}",
-                  linkQueueEmpty.join(),
-                  unlinkQueueEmpty.join());
+                  "Waiting for indexing to complete. link_queue has_tasks: {}, unlink_queue"
+                      + " has_tasks: {}",
+                  hasLinkTasksF.join(),
+                  hasUnlinkTasksF.join());
             } else {
               LOGGER.info("Indexing complete");
             }
-            return !linkQueueEmpty.join() || !unlinkQueueEmpty.join();
+            return hasLinkTasksF.join() || hasUnlinkTasksF.join();
           })
           .thenCompose(shouldLoop -> {
             if (shouldLoop) {

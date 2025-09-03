@@ -87,8 +87,9 @@ public class EntryPointStorage {
         // For now, we just store what we're given
       }
 
-      tx.set(key, builder.build().toByteArray());
-      LOGGER.debug(
+      EntryList entryList = builder.build();
+      tx.set(key, entryList.toByteArray());
+      LOGGER.info(
           "Stored entry list with {} primary, {} random, {} high-degree entries",
           primaryEntries != null ? primaryEntries.size() : 0,
           randomEntries != null ? randomEntries.size() : 0,
@@ -161,8 +162,15 @@ public class EntryPointStorage {
   public CompletableFuture<List<Long>> getHierarchicalEntryPoints(Transaction tx, int beamSize) {
     return loadEntryList(tx).thenApply(entryList -> {
       if (entryList == null) {
+        LOGGER.debug("No entry list found in storage");
         return Collections.emptyList();
       }
+
+      LOGGER.debug(
+          "Loaded entry list with {} primary, {} random, {} high-degree entries",
+          entryList.getPrimaryEntriesCount(),
+          entryList.getRandomEntriesCount(),
+          entryList.getHighDegreeEntriesCount());
 
       List<Long> entries = new ArrayList<>();
 
