@@ -106,6 +106,8 @@ public class LinkWorker implements Runnable {
   private static final Duration CLAIM_BUDGET = Duration.ofMillis(500);
   private static final Duration TRANSACTION_BUDGET = Duration.ofSeconds(4);
   private static final int MIN_BATCH_SIZE = 1;
+  // Large batch size allows efficient processing of bulk insertions while staying within FDB's
+  // transaction limits. Consider tuning based on deployment characteristics and memory constraints.
   private static final int MAX_BATCH_SIZE = 10000;
   private static final int INITIAL_BATCH_SIZE = 10;
 
@@ -512,7 +514,7 @@ public class LinkWorker implements Runnable {
     return entryPointStorage.getEntryPoints(tr).thenCompose(entryPoints -> {
       if (entryPoints.isEmpty()) {
         // No entry points yet, initialize with this first node
-        LOGGER.info("No entry points found, initializing with node {} as the FIRST entry point", nodeId);
+        LOGGER.debug("No entry points found, initializing with node {} as the FIRST entry point", nodeId);
         return entryPointStorage
             .storeEntryList(
                 tr,
@@ -521,7 +523,7 @@ public class LinkWorker implements Runnable {
                 Collections.emptyList() // No high-degree entries yet
                 )
             .thenApply(v -> {
-              LOGGER.info("Successfully stored node {} as initial entry point", nodeId);
+              LOGGER.debug("Successfully stored node {} as initial entry point", nodeId);
               // Return empty neighbors since this is the first node
               return new ArrayList<>();
             });

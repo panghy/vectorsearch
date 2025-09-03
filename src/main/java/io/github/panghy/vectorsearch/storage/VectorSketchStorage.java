@@ -28,6 +28,9 @@ public class VectorSketchStorage {
   private final int dimension;
 
   public VectorSketchStorage(VectorIndexKeys keys, int dimension) {
+    if (dimension <= 0) {
+      throw new IllegalArgumentException("Dimension must be positive, got: " + dimension);
+    }
     this.keys = keys;
     this.dimension = dimension;
   }
