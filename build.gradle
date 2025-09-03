@@ -89,12 +89,33 @@ sourceSets {
       srcDir 'src/main/proto'
     }
   }
+  integrationTest {
+    java {
+      srcDir 'src/integrationTest/java'
+    }
+    resources {
+      srcDir 'src/integrationTest/resources'
+    }
+    compileClasspath += sourceSets.main.output + configurations.testRuntimeClasspath
+    runtimeClasspath += sourceSets.main.output + configurations.testRuntimeClasspath
+  }
 }
 
 test {
   useJUnitPlatform()
   finalizedBy jacocoTestReport
 }
+
+// Integration test task
+tasks.register('integrationTest', Test) {
+  useJUnitPlatform()
+  testClassesDirs = sourceSets.integrationTest.output.classesDirs
+  classpath = sourceSets.integrationTest.runtimeClasspath
+  shouldRunAfter test
+}
+
+// Make check depend on integrationTest
+check.dependsOn integrationTest
 
 // Ensure proto compilation happens before Java compilation
 compileJava.dependsOn 'generateProto'
