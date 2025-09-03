@@ -163,24 +163,57 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 3. **Codebook Rotation** - Two-phase rotation not implemented
 4. **Vector Count** - getVectorCount() returns 0, not implemented
 
-## 🎯 **Next Milestone: Complete Core Functionality**
+## 🎯 **Next Milestone: Segment-Based PQ Architecture**
 
-**Priority 1 - Critical (System Functional):**
-1. **Implement Codebook Training** - Generate initial codebooks from training data
-2. **Create UnlinkWorker** - Process delete operations
-3. **Wire LinkWorker** - Actually process link tasks from queue
+**Priority 0 - Fundamental Architecture Change (Milvus-style):**
+1. **Implement Segment-Based PQ** - Transition from global to per-segment codebooks
+   - Each segment (512MB) has its own PQ codebook trained on local data
+   - Eliminates need for complex two-phase rotation
+   - See [Segment-Based PQ Architecture Design](segment_based_pq_architecture.md) for details
+2. **Growing vs Sealed Segments** - Implement segment lifecycle
+   - Growing segments accept new vectors (in-memory, original vectors)
+   - Sealed segments are immutable with PQ encoding
+   - Automatic sealing when size threshold reached
+3. **Multi-Segment Search** - Query across all segments and merge results
+   - Parallel search across segments
+   - Growing segments use exact distances
+   - Sealed segments use PQ distances with local codebooks
+4. **Background Compaction** - Merge small segments and handle deletions
+   - Periodically merge small segments
+   - Remove soft-deleted vectors during compaction
+   - Retrain codebook for merged segment
 
-**Priority 2 - Enhanced Functionality:**
-1. **Implement getStats()** - Gather actual metrics
-2. **Implement getVectorCount()** - Track actual vector count
-3. **Codebook retraining** - Use stored vector sketches for periodic updates
+**Priority 1 - Accuracy Improvement (DiskANN-style):**
+1. **Store Original Vectors** - Store full-precision vectors alongside graph for exact distance computation
+   - Store with segment data to leverage locality
+   - Consider float16 compression for storage efficiency
+2. **Implement Reranking Pipeline** - Use PQ for candidate selection, original vectors for final ranking
+   - Overquery strategy: Fetch 3x candidates using PQ distance, rerank with original vectors
+   - Two-stage process: PQ for graph traversal, original vectors for top-k results
+3. **Hybrid Distance Computation** - PQ distances for graph traversal, exact distances for results
+   - BeamSearchEngine continues using PQ for navigation
+   - Load original vectors only for final candidate set
+   - Return exact distances to users (fixing the ~6-7 distance for exact matches issue)
 
-**Success Criteria:**
-- System can train initial codebooks from inserted vectors
-- Delete operations are processed by UnlinkWorker
-- LinkWorker processes tasks to build graph connections
-- Search returns actual results (not empty) after indexing
+**Priority 2 - Critical (System Functional):**
+1. **Create UnlinkWorker** - Process delete operations (or handle via compaction)
+2. **Implement getStats()** - Gather actual metrics  
+3. **Implement getVectorCount()** - Track actual vector count
+
+**Success Criteria for Segment-Based Architecture:**
+- Each segment has its own optimized PQ codebook
+- No global codebook retraining needed
+- Growing segments provide exact distance search
+- Sealed segments use local PQ for efficiency
+- Compaction handles deletions and merges small segments
+- System scales to billions of vectors without retraining overhead
+
+**Success Criteria for Original Vector Storage:**
+- Original vector storage enables exact distance computation (distance ~0 for exact matches)
+- Reranking with original vectors improves accuracy to >90% on random data
+- System maintains high performance with hybrid PQ/original vector approach
+- Search returns actual results with accurate distances
 
 ---
 
-*This roadmap will be updated as implementation progresses. Current focus: **Codebook training to enable actual search results.***
+*This roadmap will be updated as implementation progresses. Current focus: **Segment-based PQ architecture to eliminate global codebook limitations.***
