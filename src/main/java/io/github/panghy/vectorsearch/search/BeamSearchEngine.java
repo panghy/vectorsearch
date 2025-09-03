@@ -80,22 +80,26 @@ public class BeamSearchEngine {
     // Apply Milvus behavior: search_list = max(default, topK)
     int beamSize = searchListSize > 0 ? Math.max(searchListSize, topK) : Math.max(16, topK);
 
-    LOGGER.debug("Starting beam search: topK={}, beam={}, maxVisits={}", topK, beamSize, maxVisits);
+    LOGGER.info("Starting beam search: topK={}, beam={}, maxVisits={}", topK, beamSize, maxVisits);
 
     // Build PQ lookup table for query
     if (pq == null) {
       LOGGER.warn("No ProductQuantizer available for search");
       return CompletableFuture.completedFuture(List.of());
     }
+
+    LOGGER.debug("ProductQuantizer available, codebook version: {}", pq.getCodebookVersion());
     int codebookVersion = pq.getCodebookVersion();
     float[][] lookupTable = pq.buildLookupTable(queryVector);
 
     // Get entry points using hierarchical strategy
     return entryPointStorage.getHierarchicalEntryPoints(tx, beamSize).thenCompose(entryPoints -> {
       if (entryPoints.isEmpty()) {
-        LOGGER.warn("No entry points found, returning empty results");
+        LOGGER.debug("No entry points found for search, returning empty results");
         return completedFuture(Collections.emptyList());
       }
+
+      LOGGER.debug("Found {} entry points for search", entryPoints.size());
 
       // Score and seed initial candidates
       return scoreNodes(entryPoints, lookupTable, codebookVersion).thenCompose(initialCandidates -> {

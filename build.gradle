@@ -1,5 +1,7 @@
 import com.vanniktech.maven.publish.SonatypeHost
 
+import java.time.Duration
+
 buildscript {
   dependencies {
     classpath 'com.palantir.javaformat:gradle-palantir-java-format:2.72.0'
@@ -44,7 +46,7 @@ dependencies {
   implementation 'io.opentelemetry:opentelemetry-context:1.40.0'
 
   // TaskQueue
-  implementation 'io.github.panghy:taskqueue:0.5.0'
+  implementation 'io.github.panghy:taskqueue:0.8.0'
 
   implementation 'com.ibm.async:asyncutil:0.1.0'
 

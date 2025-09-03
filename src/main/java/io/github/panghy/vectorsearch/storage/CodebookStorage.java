@@ -1,5 +1,8 @@
 package io.github.panghy.vectorsearch.storage;
 
+import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
+import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
+
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Range;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
@@ -164,8 +167,7 @@ public class CodebookStorage {
    * @param version codebook version to load
    * @return array of codebooks or null if version doesn't exist
    */
-  public CompletableFuture<float[][][]> loadCodebooks(long version) {
-
+  CompletableFuture<float[][][]> loadCodebooks(long version) {
     return db.runAsync(tx -> {
       // Read all codebook subspaces for this version
       byte[] prefix = keys.codebookPrefixForVersion(version);
@@ -218,8 +220,8 @@ public class CodebookStorage {
         if (value == null) {
           return -1;
         }
-        // Store as 4-byte integer
-        return bytesToInt(value);
+        // Decode as long integer
+        return (int) decodeInt(value);
       });
     });
   }
@@ -243,7 +245,7 @@ public class CodebookStorage {
 
         // Set the active version
         byte[] key = keys.activeCodebookVersionKey();
-        tx.set(key, intToBytes(version));
+        tx.set(key, encodeInt(version));
 
         LOGGER.info("Set active codebook version to {}", version);
         return CompletableFuture.completedFuture(null);
@@ -354,16 +356,6 @@ public class CodebookStorage {
     }
 
     return array;
-  }
-
-  private byte[] intToBytes(int value) {
-    // Little-endian: least significant byte first (consistent with FDB's atomic operations)
-    return new byte[] {(byte) value, (byte) (value >>> 8), (byte) (value >>> 16), (byte) (value >>> 24)};
-  }
-
-  private int bytesToInt(byte[] bytes) {
-    // Little-endian: least significant byte first (consistent with FDB's atomic operations)
-    return (bytes[0] & 0xFF) | ((bytes[1] & 0xFF) << 8) | ((bytes[2] & 0xFF) << 16) | ((bytes[3] & 0xFF) << 24);
   }
 
   private int parseVersionFromKey(byte[] key, byte[] prefix) {
