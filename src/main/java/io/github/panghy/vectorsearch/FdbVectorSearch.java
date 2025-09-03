@@ -518,6 +518,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
               .maxAttempts(5)
               .estimatedWorkerCount(config.getLinkWorkerCount())
               .instantSource(config.getInstantSource())
+              .taskNameExtractor(task -> String.format("LinkTask[nodeId=%d]", task.getNodeId()))
               .build();
 
           var unlinkQueueConfig = TaskQueueConfig.builder(
@@ -529,6 +530,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
               .maxAttempts(5)
               .estimatedWorkerCount(config.getUnlinkWorkerCount())
               .instantSource(config.getInstantSource())
+              .taskNameExtractor(task -> String.format("UnlinkTask[nodeId=%d]", task.getNodeId()))
               .build();
 
           // Create the task queues

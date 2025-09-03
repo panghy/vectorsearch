@@ -132,6 +132,7 @@ class LinkWorkerTest {
     TaskQueueConfig<Long, LinkTask> queueConfig = TaskQueueConfig.builder(
             db, taskQueueDirectory, new LongSerializer(), new LinkTaskSerializer())
         .defaultTtl(Duration.ofMinutes(10))
+        .taskNameExtractor(task -> String.format("LinkTask[nodeId=%d]", task.getNodeId()))
         .build();
 
     taskQueue = TaskQueues.createTaskQueue(queueConfig).get(5, TimeUnit.SECONDS);
