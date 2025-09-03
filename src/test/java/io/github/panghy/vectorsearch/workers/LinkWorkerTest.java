@@ -114,8 +114,7 @@ class LinkWorkerTest {
       }
       trainingData.add(vec);
     }
-    float[][][] codebooks = ProductQuantizer.train(
-            DIMENSION, PQ_SUBVECTORS, DistanceMetrics.Metric.L2, trainingData)
+    float[][][] codebooks = ProductQuantizer.train(PQ_SUBVECTORS, DistanceMetrics.Metric.L2, trainingData)
         .get(5, TimeUnit.SECONDS);
 
     // Store codebooks
@@ -221,6 +220,9 @@ class LinkWorkerTest {
       float[] vector = generateRandomVector(DIMENSION);
       byte[] pqCode = pq.encode(vector);
       pqCodes.add(pqCode);
+
+      // Store PQ code first (LinkWorker expects it to be already stored)
+      pqBlockStorage.storePqCode(nodeId, pqCode, 1).get();
 
       LinkTask linkTask = LinkTask.newBuilder()
           .setCollection("test-collection")
@@ -782,8 +784,8 @@ class LinkWorkerTest {
 
     // Mock PQ block storage to return null for some nodes
     PqBlockStorage mockPqStorage = mock(PqBlockStorage.class);
-    when(mockPqStorage.storePqCode(any(), anyLong(), any(), anyInt())).thenReturn(completedFuture(null));
-    when(mockPqStorage.loadPqCode(anyLong(), anyInt())).thenReturn(completedFuture(null)); // Return null PQ codes
+    when(mockPqStorage.batchLoadPqCodes(any(), anyInt()))
+        .thenReturn(completedFuture(Arrays.asList((byte[]) null))); // Return null PQ codes
     when(mockPqStorage.getBlockNumber(anyLong())).thenReturn(0L);
 
     LinkWorker worker = new LinkWorker(
@@ -800,9 +802,9 @@ class LinkWorkerTest {
         1.2,
         Clock.systemUTC());
 
-    // Should handle null PQ codes gracefully
+    // Should handle null PQ codes gracefully by returning false (task failed)
     CompletableFuture<Boolean> result = worker.processOneTask();
-    assertTrue(result.get(5, TimeUnit.SECONDS));
+    assertFalse(result.get(5, TimeUnit.SECONDS));
   }
 
   @Test

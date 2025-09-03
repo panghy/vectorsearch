@@ -171,7 +171,7 @@ class PqBlockStorageTest {
 
     assertThat(loaded).hasSize(3);
     assertThat(loaded.get(0)).isNotNull(); // 10L exists
-    assertThat(loaded.get(1)).isEqualTo(new byte[PQ_SUBVECTORS]); // 20L unwritten (zeros)
+    assertThat(loaded.get(1)).isNull(); // 20L doesn't exist (null)
     assertThat(loaded.get(2)).isNotNull(); // 30L exists
   }
 
@@ -333,9 +333,9 @@ class PqBlockStorageTest {
     List<Long> nodeIds = Arrays.asList(1L, 2L, 3L);
     List<byte[]> pqCodes = Arrays.asList(createRandomPqCode(), createRandomPqCode());
 
-    assertThatThrownBy(() -> storage.batchStorePqCodes(nodeIds, pqCodes, 1))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("Node IDs and PQ codes count mismatch");
+    assertThatThrownBy(() -> storage.batchStorePqCodes(nodeIds, pqCodes, 1).get())
+        .hasCauseInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Node IDs and PQ codes count mismatch");
   }
 
   @Test

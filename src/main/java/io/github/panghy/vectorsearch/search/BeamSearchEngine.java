@@ -80,7 +80,7 @@ public class BeamSearchEngine {
     // Apply Milvus behavior: search_list = max(default, topK)
     int beamSize = searchListSize > 0 ? Math.max(searchListSize, topK) : Math.max(16, topK);
 
-    LOGGER.info("Starting beam search: topK={}, beam={}, maxVisits={}", topK, beamSize, maxVisits);
+    LOGGER.debug("Starting beam search: topK={}, beam={}, maxVisits={}", topK, beamSize, maxVisits);
 
     // Build PQ lookup table for query
     if (pq == null) {
@@ -92,14 +92,22 @@ public class BeamSearchEngine {
     int codebookVersion = pq.getCodebookVersion();
     float[][] lookupTable = pq.buildLookupTable(queryVector);
 
+    // Get more entry points than beam size for better coverage
+    int entryPointCount = Math.min(beamSize * 2, 32); // Get more entry points for diversity
+
     // Get entry points using hierarchical strategy
-    return entryPointStorage.getHierarchicalEntryPoints(tx, beamSize).thenCompose(entryPoints -> {
+    return entryPointStorage.getHierarchicalEntryPoints(tx, entryPointCount).thenCompose(entryPoints -> {
       if (entryPoints.isEmpty()) {
-        LOGGER.debug("No entry points found for search, returning empty results");
+        LOGGER.warn("No entry points found for search, returning empty results");
         return completedFuture(Collections.emptyList());
       }
 
-      LOGGER.debug("Found {} entry points for search", entryPoints.size());
+      LOGGER.debug(
+          "Starting search with {} entry points (beamSize={}, topK={}, maxVisits={})",
+          entryPoints.size(),
+          beamSize,
+          topK,
+          maxVisits);
 
       // Score and seed initial candidates
       return scoreNodes(entryPoints, lookupTable, codebookVersion).thenCompose(initialCandidates -> {
@@ -225,7 +233,25 @@ public class BeamSearchEngine {
         finalResults = finalResults.subList(0, topK);
       }
 
-      LOGGER.debug("Search complete: visited={}, results={}", visitCount, finalResults.size());
+      LOGGER.info(
+          "Search complete: visited={} nodes, returning {} results (requested topK={})",
+          visitCount,
+          finalResults.size(),
+          topK);
+      if (!finalResults.isEmpty()) {
+        LOGGER.debug(
+            "Result node IDs (first 10): {}",
+            finalResults.stream()
+                .limit(10)
+                .map(SearchResult::getNodeId)
+                .toList());
+        LOGGER.debug(
+            "Result distances (first 10): {}",
+            finalResults.stream()
+                .limit(10)
+                .map(r -> String.format("%.3f", r.getDistance()))
+                .toList());
+      }
 
       return completedFuture(finalResults);
     }
@@ -295,6 +321,18 @@ public class BeamSearchEngine {
               newNeighbors.add(neighbor);
               seen.add(neighbor);
             }
+          }
+
+          // Log graph traversal progress for debugging
+          if (newVisitCount <= 5 || newVisitCount % 50 == 0) {
+            LOGGER.debug(
+                "Visit {}: node={} has {} neighbors, {} new to explore, beam size={}, seen={}",
+                newVisitCount,
+                finalCurrent.getNodeId(),
+                adjacency.getNeighborsList().size(),
+                newNeighbors.size(),
+                beam.size(),
+                seen.size());
           }
 
           if (newNeighbors.isEmpty()) {
@@ -372,22 +410,6 @@ public class BeamSearchEngine {
       return listCompletableFuture.thenApply(pqCodes -> {
         List<SearchCandidate> candidates = new ArrayList<>(pqCodes.size());
 
-        // Debug: Check if all PQ codes are the same
-        if (!pqCodes.isEmpty() && pqCodes.get(0) != null) {
-          byte[] firstCode = pqCodes.get(0);
-          boolean allSame = true;
-          for (int j = 1; j < Math.min(10, pqCodes.size()); j++) {
-            byte[] code = pqCodes.get(j);
-            if (code != null && !java.util.Arrays.equals(firstCode, code)) {
-              allSame = false;
-              break;
-            }
-          }
-          if (allSame) {
-            LOGGER.warn("scoreNodes: All PQ codes appear to be identical!");
-          }
-        }
-
         for (int i = 0; i < nodeIds.size(); i++) {
           byte[] pqCode = pqCodes.get(i);
           if (pqCode == null) {
@@ -397,23 +419,6 @@ public class BeamSearchEngine {
             candidates.add(SearchCandidate.unvisited(nodeIds.get(i), distance));
           }
         }
-
-        // Debug: Check if all distances are the same
-        if (candidates.size() > 1) {
-          float firstDist = candidates.get(0).getDistance();
-          boolean allSameDist = true;
-          for (int k = 1; k < Math.min(10, candidates.size()); k++) {
-            if (Math.abs(candidates.get(k).getDistance() - firstDist) > 0.001f) {
-              allSameDist = false;
-              break;
-            }
-          }
-          if (allSameDist) {
-            LOGGER.warn(
-                "scoreNodes: All {} candidates have same distance: {}", candidates.size(), firstDist);
-          }
-        }
-
         return candidates;
       });
     });
