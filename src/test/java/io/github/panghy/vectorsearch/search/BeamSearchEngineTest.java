@@ -89,7 +89,7 @@ class BeamSearchEngineTest {
 
     // Then
     assertThat(results).isEmpty();
-    verify(entryPointStorage).getHierarchicalEntryPoints(tx, 10);
+    verify(entryPointStorage).getHierarchicalEntryPoints(tx, 20); // min(10*2, 32) = 20
   }
 
   @Test
@@ -221,7 +221,7 @@ class BeamSearchEngineTest {
     float[] queryVector = new float[VECTOR_DIM];
     long nodeId = 100L;
 
-    when(entryPointStorage.getHierarchicalEntryPoints(any(), eq(16)))
+    when(entryPointStorage.getHierarchicalEntryPoints(any(), eq(32)))
         .thenReturn(CompletableFuture.completedFuture(Arrays.asList(nodeId)));
 
     byte[] pqCode = new byte[PQ_SUBVECTORS];
@@ -236,7 +236,7 @@ class BeamSearchEngineTest {
 
     // Then
     assertThat(results).isNotNull();
-    verify(entryPointStorage).getHierarchicalEntryPoints(tx, 16); // max(16, 5) = 16
+    verify(entryPointStorage).getHierarchicalEntryPoints(tx, 32); // min(16*2, 32) = 32
   }
 
   @Test
@@ -245,7 +245,7 @@ class BeamSearchEngineTest {
     float[] queryVector = new float[VECTOR_DIM];
     long nodeId = 200L;
 
-    when(entryPointStorage.getHierarchicalEntryPoints(any(), eq(50)))
+    when(entryPointStorage.getHierarchicalEntryPoints(any(), eq(32)))
         .thenReturn(CompletableFuture.completedFuture(Arrays.asList(nodeId)));
 
     byte[] pqCode = new byte[PQ_SUBVECTORS];
@@ -260,7 +260,7 @@ class BeamSearchEngineTest {
 
     // Then
     assertThat(results).isNotNull();
-    verify(entryPointStorage).getHierarchicalEntryPoints(tx, 50); // max(16, 50) = 50
+    verify(entryPointStorage).getHierarchicalEntryPoints(tx, 32); // min(50*2, 32) = 32 (capped at 32)
   }
 
   @Test
@@ -377,7 +377,7 @@ class BeamSearchEngineTest {
     int searchListSize = 10; // Smaller than topK
 
     long nodeId = 1L;
-    when(entryPointStorage.getHierarchicalEntryPoints(any(), eq(20))) // Should use max(10, 20) = 20
+    when(entryPointStorage.getHierarchicalEntryPoints(any(), eq(32))) // Should use min(20*2, 32) = 32
         .thenReturn(CompletableFuture.completedFuture(Arrays.asList(nodeId)));
 
     byte[] pqCode = new byte[PQ_SUBVECTORS];
@@ -393,6 +393,6 @@ class BeamSearchEngineTest {
 
     // Then
     assertThat(results).isNotNull();
-    verify(entryPointStorage).getHierarchicalEntryPoints(tx, 20); // Beam size should be max(searchListSize, topK)
+    verify(entryPointStorage).getHierarchicalEntryPoints(tx, 32); // Entry points: min(beamSize*2, 32)
   }
 }
