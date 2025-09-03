@@ -145,8 +145,17 @@ jacoco {
   toolVersion = "0.8.13"
 }
 
+// Enable JaCoCo for integration tests
+integrationTest {
+  finalizedBy jacocoTestReport
+}
+
 jacocoTestReport {
-  dependsOn test
+  dependsOn test, integrationTest
+  
+  // Combine execution data from both test and integrationTest
+  executionData fileTree(layout.buildDirectory).include("jacoco/*.exec")
+  
   reports {
     xml.required = true
     html.required = true
@@ -161,6 +170,9 @@ jacocoTestReport {
 }
 
 jacocoTestCoverageVerification {
+  // Combine execution data from both test and integrationTest
+  executionData fileTree(layout.buildDirectory).include("jacoco/*.exec")
+  
   afterEvaluate {
     classDirectories.setFrom(files(classDirectories.files.collect {
       fileTree(dir: it, exclude: [
