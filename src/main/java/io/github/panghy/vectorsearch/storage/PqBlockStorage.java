@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,6 +40,10 @@ public class PqBlockStorage {
 
   // Cache for frequently accessed blocks using Caffeine
   private final AsyncLoadingCache<BlockCacheKey, PqCodesBlock> blockCache;
+
+  // Debug counters
+  private final AtomicInteger debugStoreCount = new AtomicInteger(0);
+  private final AtomicInteger debugExtractCount = new AtomicInteger(0);
 
   public PqBlockStorage(
       Database db,
@@ -138,6 +143,17 @@ public class PqBlockStorage {
 
       // Write PQ code at the correct offset
       System.arraycopy(pqCode, 0, codes, blockOffset * pqSubvectors, pqSubvectors);
+
+      // Debug: Log first few stores
+      if (debugStoreCount.getAndIncrement() < 5) {
+        LOGGER.debug(
+            "Storing PQ code for nodeId={}, blockNumber={}, blockOffset={}, code=[{}, {}, ...]",
+            nodeId,
+            blockNumber,
+            blockOffset,
+            Byte.toUnsignedInt(pqCode[0]),
+            pqCode.length > 1 ? Byte.toUnsignedInt(pqCode[1]) : -1);
+      }
 
       blockBuilder.setCodes(ByteString.copyFrom(codes));
       PqCodesBlock updatedBlock = blockBuilder.build();
@@ -290,7 +306,19 @@ public class PqBlockStorage {
             int blockOffset = VectorIndexKeys.blockOffset(nodeId, codesPerBlock);
 
             if (blockOffset < block.getCodesInBlock()) {
-              results.set(idx, extractCode(block, blockOffset));
+              byte[] extractedCode = extractCode(block, blockOffset);
+              // Check if the code is all zeros (uninitialized)
+              boolean isInitialized = false;
+              for (byte b : extractedCode) {
+                if (b != 0) {
+                  isInitialized = true;
+                  break;
+                }
+              }
+              // Only return the code if it's been initialized
+              if (isInitialized) {
+                results.set(idx, extractedCode);
+              }
             }
           }
         }
@@ -438,6 +466,17 @@ public class PqBlockStorage {
     byte[] codes = block.getCodes().toByteArray();
     byte[] pqCode = new byte[pqSubvectors];
     System.arraycopy(codes, blockOffset * pqSubvectors, pqCode, 0, pqSubvectors);
+
+    // Debug: Log extraction
+    if (debugExtractCount.getAndIncrement() < 10) {
+      LOGGER.debug(
+          "Extracted PQ code: blockOffset={}, code=[{}, {}, ...], from block with {} codes",
+          blockOffset,
+          Byte.toUnsignedInt(pqCode[0]),
+          pqCode.length > 1 ? Byte.toUnsignedInt(pqCode[1]) : -1,
+          block.getCodesInBlock());
+    }
+
     return pqCode;
   }
 
