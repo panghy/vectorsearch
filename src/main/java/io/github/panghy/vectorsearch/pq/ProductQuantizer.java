@@ -6,6 +6,7 @@ import java.util.Random;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.Getter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +41,9 @@ public class ProductQuantizer {
   // Codebooks: [subvector_index][centroid_index][dimension]
   @Getter
   private final float[][][] codebooks;
+
+  private final AtomicBoolean debugDistanceOnce = new AtomicBoolean(false);
+  private final AtomicBoolean debugLutOnce = new AtomicBoolean(false);
 
   /**
    * Creates a Product Quantizer with trained codebooks.
@@ -185,6 +189,18 @@ public class ProductQuantizer {
       codes[s] = (byte) nearestCentroid;
     }
 
+    // Debug: Check if all codes are the same
+    boolean allSame = true;
+    for (int i = 1; i < codes.length; i++) {
+      if (codes[i] != codes[0]) {
+        allSame = false;
+        break;
+      }
+    }
+    if (allSame) {
+      LOGGER.warn("All PQ codes are the same: {}", Byte.toUnsignedInt(codes[0]));
+    }
+
     return codes;
   }
 
@@ -232,11 +248,36 @@ public class ProductQuantizer {
 
     float[][] lut = new float[numSubvectors][numCentroids];
 
+    boolean debugOnce = debugLutOnce.compareAndSet(false, true);
+
     for (int s = 0; s < numSubvectors; s++) {
       float[] querySubvector = VectorUtils.getSubvector(processedQuery, s, numSubvectors);
 
       for (int c = 0; c < numCentroids; c++) {
         lut[s][c] = computeSubvectorDistance(querySubvector, codebooks[s][c]);
+      }
+
+      if (debugOnce && s == 0) {
+        // Check if all values in first subvector are the same
+        float firstVal = lut[0][0];
+        boolean allSame = true;
+        for (int c = 1; c < Math.min(10, numCentroids); c++) {
+          if (Math.abs(lut[0][c] - firstVal) > 0.001) {
+            allSame = false;
+            break;
+          }
+        }
+        if (allSame) {
+          LOGGER.warn("LUT[0] has all same values: {}", firstVal);
+        } else {
+          LOGGER.debug(
+              "LUT[0] sample: [{}, {}, {}, {}, {}]",
+              lut[0][0],
+              lut[0][1],
+              lut[0][2],
+              lut[0][3],
+              lut[0][4]);
+        }
       }
     }
 
@@ -257,9 +298,20 @@ public class ProductQuantizer {
     }
 
     float distance = 0;
+    boolean firstDebug = debugDistanceOnce.compareAndSet(false, true);
+
     for (int s = 0; s < numSubvectors; s++) {
       int centroidIdx = Byte.toUnsignedInt(codes[s]);
-      distance += lookupTable[s][centroidIdx];
+      float subDist = lookupTable[s][centroidIdx];
+      distance += subDist;
+
+      if (firstDebug && s < 3) {
+        LOGGER.debug("Subvector {}: code={}, distance={}", s, centroidIdx, subDist);
+      }
+    }
+
+    if (firstDebug) {
+      LOGGER.debug("Total distance: {}", distance);
     }
 
     return distance;

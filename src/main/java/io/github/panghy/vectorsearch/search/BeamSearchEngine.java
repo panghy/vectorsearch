@@ -371,6 +371,23 @@ public class BeamSearchEngine {
           pqBlockStorage.batchLoadPqCodes(nodeIds, codebookVersion);
       return listCompletableFuture.thenApply(pqCodes -> {
         List<SearchCandidate> candidates = new ArrayList<>(pqCodes.size());
+
+        // Debug: Check if all PQ codes are the same
+        if (!pqCodes.isEmpty() && pqCodes.get(0) != null) {
+          byte[] firstCode = pqCodes.get(0);
+          boolean allSame = true;
+          for (int j = 1; j < Math.min(10, pqCodes.size()); j++) {
+            byte[] code = pqCodes.get(j);
+            if (code != null && !java.util.Arrays.equals(firstCode, code)) {
+              allSame = false;
+              break;
+            }
+          }
+          if (allSame) {
+            LOGGER.warn("scoreNodes: All PQ codes appear to be identical!");
+          }
+        }
+
         for (int i = 0; i < nodeIds.size(); i++) {
           byte[] pqCode = pqCodes.get(i);
           if (pqCode == null) {
@@ -380,6 +397,23 @@ public class BeamSearchEngine {
             candidates.add(SearchCandidate.unvisited(nodeIds.get(i), distance));
           }
         }
+
+        // Debug: Check if all distances are the same
+        if (candidates.size() > 1) {
+          float firstDist = candidates.get(0).getDistance();
+          boolean allSameDist = true;
+          for (int k = 1; k < Math.min(10, candidates.size()); k++) {
+            if (Math.abs(candidates.get(k).getDistance() - firstDist) > 0.001f) {
+              allSameDist = false;
+              break;
+            }
+          }
+          if (allSameDist) {
+            LOGGER.warn(
+                "scoreNodes: All {} candidates have same distance: {}", candidates.size(), firstDist);
+          }
+        }
+
         return candidates;
       });
     });
