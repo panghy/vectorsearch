@@ -170,6 +170,7 @@ jacocoTestReport {
 }
 
 jacocoTestCoverageVerification {
+  dependsOn jacocoTestReport
   // Combine execution data from both test and integrationTest
   executionData fileTree(layout.buildDirectory).include("jacoco/*.exec")
   

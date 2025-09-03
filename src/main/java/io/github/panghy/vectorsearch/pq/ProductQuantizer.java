@@ -18,6 +18,9 @@ import org.slf4j.LoggerFactory;
 public class ProductQuantizer {
   private static final Logger LOGGER = LoggerFactory.getLogger(ProductQuantizer.class);
 
+  // Constants
+  private static final int NUM_CENTROIDS = 256; // 2^8 for 8-bit quantization
+
   // K-means training parameters
   private static final int KMEANS_MAX_ITERATIONS = 25;
   private static final float KMEANS_CONVERGENCE_THRESHOLD = 1e-4f;
@@ -78,7 +81,7 @@ public class ProductQuantizer {
 
     this.dimension = dimension;
     this.numSubvectors = numSubvectors;
-    this.numCentroids = 256; // 8-bit quantization
+    this.numCentroids = NUM_CENTROIDS;
     this.metric = metric;
     this.codebookVersion = codebookVersion;
     this.codebooks = codebooks;
@@ -131,7 +134,7 @@ public class ProductQuantizer {
                   }
 
                   // Run k-means clustering
-                  return kmeansCluster(subvectors, 256, metric);
+                  return kmeansCluster(subvectors, NUM_CENTROIDS, metric);
                 },
                 ForkJoinPool.commonPool());
 

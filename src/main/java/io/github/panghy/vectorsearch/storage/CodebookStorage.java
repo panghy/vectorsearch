@@ -83,7 +83,10 @@ public class CodebookStorage {
    */
   public CompletableFuture<Void> storeCodebooks(long version, float[][][] codebooks, TrainingStats trainingStats) {
     return db.runAsync(tx -> {
-      // First check if this version already exists
+      // Check if this version already exists. FDB's transaction isolation ensures this
+      // check-then-set operation is atomic within the transaction. If two transactions
+      // try to insert the same version, one will succeed and the other will retry and
+      // see the existing version.
       byte[] firstKey = keys.codebookKey(version, 0);
       return tx.get(firstKey).thenCompose(existingValue -> {
         if (existingValue != null) {
