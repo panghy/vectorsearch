@@ -89,7 +89,7 @@ public class EntryPointStorage {
 
       EntryList entryList = builder.build();
       tx.set(key, entryList.toByteArray());
-      LOGGER.info(
+      LOGGER.debug(
           "Stored entry list with {} primary, {} random, {} high-degree entries",
           primaryEntries != null ? primaryEntries.size() : 0,
           randomEntries != null ? randomEntries.size() : 0,
@@ -162,37 +162,36 @@ public class EntryPointStorage {
   public CompletableFuture<List<Long>> getHierarchicalEntryPoints(Transaction tx, int beamSize) {
     return loadEntryList(tx).thenApply(entryList -> {
       if (entryList == null) {
-        LOGGER.debug("No entry list found in storage");
+        LOGGER.warn("No entry list found in storage - search will return empty results");
         return Collections.emptyList();
       }
-
-      LOGGER.debug(
-          "Loaded entry list with {} primary, {} random, {} high-degree entries",
-          entryList.getPrimaryEntriesCount(),
-          entryList.getRandomEntriesCount(),
-          entryList.getHighDegreeEntriesCount());
 
       List<Long> entries = new ArrayList<>();
 
       // Add primary entries up to beam size
       List<Long> primary = entryList.getPrimaryEntriesList();
       int toAdd = Math.min(primary.size(), beamSize);
-      entries.addAll(primary.subList(0, toAdd));
+      if (toAdd > 0) {
+        entries.addAll(primary.subList(0, toAdd));
+      }
 
       // If we need more, add random entries
       if (entries.size() < beamSize) {
         List<Long> random = entryList.getRandomEntriesList();
         toAdd = Math.min(random.size(), beamSize - entries.size());
-        entries.addAll(random.subList(0, toAdd));
+        if (toAdd > 0) {
+          entries.addAll(random.subList(0, toAdd));
+        }
       }
 
       // If we still need more, add high-degree entries
       if (entries.size() < beamSize) {
         List<Long> highDegree = entryList.getHighDegreeEntriesList();
         toAdd = Math.min(highDegree.size(), beamSize - entries.size());
-        entries.addAll(highDegree.subList(0, toAdd));
+        if (toAdd > 0) {
+          entries.addAll(highDegree.subList(0, toAdd));
+        }
       }
-
       return entries;
     });
   }

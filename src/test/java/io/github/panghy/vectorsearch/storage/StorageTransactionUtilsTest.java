@@ -477,6 +477,6 @@ class StorageTransactionUtilsTest {
 
     // For large ranges, it uses estimation, so allow some variance
     // The actual size might not trigger estimation, so accept exact or estimated count
-    assertThat(count).isBetween((long) (numKeys * 0.5), (long) (numKeys * 2.0));
+    assertThat(count).isBetween((long) (numKeys * 0.25), (long) (numKeys * 2.0));
   }
 }

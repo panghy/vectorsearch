@@ -392,8 +392,6 @@ public class GraphConnectivityMonitor {
     // Generate random probe point within range
     long probeId = selectedRange.min + (long) (random.nextDouble() * (selectedRange.max - selectedRange.min + 1));
 
-    LOGGER.info("Probing range {} - {} at {}", selectedRange.min, selectedRange.max, probeId);
-
     // Probe for node
     byte[] searchKey = keys.nodeAdjacencyKey(probeId);
     KeySelector selector =
@@ -403,7 +401,6 @@ public class GraphConnectivityMonitor {
       long foundId = extractNodeIdFromKey(foundKey);
 
       if (foundId >= selectedRange.min && foundId <= selectedRange.max) {
-        LOGGER.info("Found node {} in range {} - {}", foundId, selectedRange.min, selectedRange.max);
         // Hit - found a node in the range
         boolean isNewNode = sampledIds.add(foundId);
 

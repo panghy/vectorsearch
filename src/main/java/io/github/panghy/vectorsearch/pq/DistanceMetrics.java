@@ -97,16 +97,11 @@ public class DistanceMetrics {
    * @throws IllegalArgumentException if vectors have different dimensions
    */
   public static float distance(float[] a, float[] b, Metric metric) {
-    switch (metric) {
-      case L2:
-        return l2Distance(a, b);
-      case INNER_PRODUCT:
-        return innerProduct(a, b);
-      case COSINE:
-        return cosineDistance(a, b);
-      default:
-        throw new IllegalArgumentException("Unsupported metric: " + metric);
-    }
+    return switch (metric) {
+      case L2 -> l2Distance(a, b);
+      case INNER_PRODUCT -> innerProduct(a, b);
+      case COSINE -> cosineDistance(a, b);
+    };
   }
 
   /**

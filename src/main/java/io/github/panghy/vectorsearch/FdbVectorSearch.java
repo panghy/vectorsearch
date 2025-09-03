@@ -1002,11 +1002,10 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
   private CompletableFuture<Boolean> trainAndStoreCodebooks(Transaction tr, List<float[]> trainingVectors) {
     // Train the product quantizer
     // Get metrics and parameters from config
-    int dimension = config.getDimension();
     int numSubvectors = config.getPqSubvectors();
     DistanceMetrics.Metric metric = convertDistanceMetric(config.getDistanceMetric());
 
-    return ProductQuantizer.train(dimension, numSubvectors, metric, trainingVectors)
+    return ProductQuantizer.train(numSubvectors, metric, trainingVectors)
         .thenCompose(codebooks -> {
           // Get the trained codebooks
 
