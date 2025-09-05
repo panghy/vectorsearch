@@ -34,6 +34,7 @@ public class VectorIndexKeys {
   private static final String SEGMENTS = "segments"; // aggregate: active, meta
   private static final String SEGMENT = "segment"; // per-segment namespace
   private static final String ACTIVE = "active";
+  private static final String NODE_SEGMENT = "node_segment";
 
   // Original vector keys
   private static final String VECTOR = "vector";
@@ -217,6 +218,22 @@ public class VectorIndexKeys {
    */
   public byte[] segmentPqBlockPrefix(long segId) {
     return collectionSubspace.pack(Tuple.from(SEGMENT, segId, PQ, BLOCK));
+  }
+
+  /**
+   * Key for mapping a node ID to its segment ID.
+   * Path: /C/{collection}/segments/node_segment/{nodeId}
+   */
+  public byte[] nodeSegmentKey(long nodeId) {
+    return collectionSubspace.pack(Tuple.from(SEGMENTS, NODE_SEGMENT, nodeId));
+  }
+
+  /**
+   * Prefix for all node->segment mappings.
+   * Path: /C/{collection}/segments/node_segment/
+   */
+  public byte[] allNodeSegmentsPrefix() {
+    return collectionSubspace.pack(Tuple.from(SEGMENTS, NODE_SEGMENT));
   }
 
   // ==================== Graph Keys ====================
