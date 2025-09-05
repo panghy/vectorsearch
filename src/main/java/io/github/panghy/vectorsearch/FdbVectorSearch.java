@@ -41,6 +41,7 @@ import io.github.panghy.vectorsearch.storage.CodebookStorage;
 import io.github.panghy.vectorsearch.storage.EntryPointStorage;
 import io.github.panghy.vectorsearch.storage.GraphMetaStorage;
 import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
+import io.github.panghy.vectorsearch.storage.OriginalVectorStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
 import io.github.panghy.vectorsearch.workers.LinkWorker;
@@ -267,6 +268,8 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
    */
   private GraphConnectivityMonitor connectivityMonitor;
 
+  private OriginalVectorStorage originalVectorStorage;
+
   /**
    * Beam search engine for graph traversal
    */
@@ -407,6 +410,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
     int dimension = storedConfig != null ? storedConfig.getDimension() : config.getDimension();
 
     this.codebookStorage = new CodebookStorage(database, vectorIndexKeys, dimension, subVectors, metric);
+    this.originalVectorStorage = new OriginalVectorStorage(vectorIndexKeys, dimension);
 
     this.pqBlockStorage = new PqBlockStorage(
         database,
@@ -898,6 +902,9 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
       // Ensure node adjacency exists
       CompletableFuture<Void> adjFuture = nodeAdjacencyStorage.storeAdjacency(tr, nodeId, List.of());
 
+      // Store original vector for exact reranking
+      CompletableFuture<Void> vecFuture = originalVectorStorage.storeVector(tr, nodeId, vector);
+
       // Create link task with either PQ-encoded or raw vector
       LinkTask.Builder taskBuilder = LinkTask.newBuilder().setNodeId(nodeId);
 
@@ -923,7 +930,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
           linkTaskQueue.enqueue(tr, nodeId, taskBuilder.build()).thenApply(metadata -> null);
 
       // Combine all operations for this vector
-      futures.add(allOf(adjFuture, enqueueFuture));
+      futures.add(allOf(adjFuture, vecFuture, enqueueFuture));
     }
 
     // Update metrics
@@ -1134,15 +1141,46 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
 
         LOGGER.debug("Codebooks loaded, performing search");
 
-        // Get ProductQuantizer and perform beam search
+        // Get ProductQuantizer and perform beam search with overquery for reranking
         return codebookStorage.getLatestProductQuantizer().thenCompose(pq -> {
           if (pq == null) {
             LOGGER.warn("No ProductQuantizer available for search");
             return completedFuture(List.of());
           }
-          return beamSearchEngine.search(tr, queryVector, k, searchList, maxVisits, pq);
+          int rerankCandidates = Math.max(k, k * 3);
+          return beamSearchEngine
+              .search(tr, queryVector, rerankCandidates, searchList, maxVisits, pq)
+              .thenCompose(approx -> rerankExact(tr, queryVector, approx, k));
         });
       });
+    });
+  }
+
+  /** Rerank approximate results using exact distances over stored original vectors. */
+  private CompletableFuture<List<SearchResult>> rerankExact(
+      com.apple.foundationdb.ReadTransaction tr, float[] queryVector, List<SearchResult> approx, int k) {
+    if (approx == null || approx.isEmpty()) {
+      return completedFuture(List.of());
+    }
+
+    DistanceMetrics.Metric metric = convertDistanceMetric(config.getDistanceMetric());
+
+    List<CompletableFuture<float[]>> vecFutures = new ArrayList<>(approx.size());
+    List<Long> ids = new ArrayList<>(approx.size());
+    for (SearchResult r : approx) {
+      ids.add(r.getNodeId());
+      vecFutures.add(originalVectorStorage.readVector(tr, r.getNodeId()));
+    }
+
+    return allOf(vecFutures.toArray(CompletableFuture[]::new)).thenApply($ -> {
+      List<SearchResult> exact = new ArrayList<>(ids.size());
+      for (int i = 0; i < ids.size(); i++) {
+        float[] v = vecFutures.get(i).join();
+        float d = (v == null) ? Float.MAX_VALUE : DistanceMetrics.distance(queryVector, v, metric);
+        exact.add(new SearchResult(ids.get(i), d));
+      }
+      exact.sort(null);
+      return exact.size() > k ? exact.subList(0, k) : exact;
     });
   }
 

@@ -1,20 +1,19 @@
 package io.github.panghy.vectorsearch.storage;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
 import io.github.panghy.vectorsearch.pq.VectorUtils;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 class OriginalVectorStorageTest {
 
@@ -134,9 +133,9 @@ class OriginalVectorStorageTest {
       return null;
     });
 
-    CompletionException ex = assertThrows(
-        CompletionException.class,
-        () -> db.read(tr -> storage.readVector(tr, nodeId)).join());
+    CompletionException ex =
+        assertThrows(CompletionException.class, () -> db.read(tr -> storage.readVector(tr, nodeId))
+            .join());
     assertThat(ex.getCause()).isInstanceOf(IllegalStateException.class);
   }
 
