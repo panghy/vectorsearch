@@ -1,6 +1,7 @@
 package io.github.panghy.vectorsearch.storage;
 
-// Intentionally avoiding static imports; use qualified references
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
@@ -61,12 +62,12 @@ class OriginalVectorStorageTest {
     });
 
     float[] read = db.read(tr -> storage.readVector(tr, nodeId)).join();
-    org.assertj.core.api.Assertions.assertThat(read).isNotNull();
-    org.assertj.core.api.Assertions.assertThat(read.length).isEqualTo(DIM);
+    assertThat(read).isNotNull();
+    assertThat(read.length).isEqualTo(DIM);
 
     // fp16 is lossy; verify element-wise within tolerance
     for (int i = 0; i < DIM; i++) {
-      org.assertj.core.api.Assertions.assertThat(read[i]).isCloseTo(vec[i], withinAbs(1e-2f));
+      assertThat(read[i]).isCloseTo(vec[i], withinAbs(1e-2f));
     }
   }
 
@@ -88,7 +89,7 @@ class OriginalVectorStorageTest {
     });
 
     float[] read = db.read(tr -> storage.readVector(tr, nodeId)).join();
-    org.assertj.core.api.Assertions.assertThat(read).isNull();
+    assertThat(read).isNull();
   }
 
   @Test
@@ -97,26 +98,25 @@ class OriginalVectorStorageTest {
     long nodeId = 1L;
     float[] wrong = randomVector(DIM - 1);
 
-    CompletionException ex = org.junit.jupiter.api.Assertions.assertThrows(
+    CompletionException ex = assertThrows(
         CompletionException.class,
         () -> db.run(tr -> {
           storage.storeVector(tr, nodeId, wrong).join();
           return null;
         }));
-    org.assertj.core.api.Assertions.assertThat(ex.getCause()).isInstanceOf(IllegalArgumentException.class);
+    assertThat(ex.getCause()).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void readVector_nonexistentReturnsNull() {
     OriginalVectorStorage storage = new OriginalVectorStorage(keys, DIM);
     float[] read = db.read(tr -> storage.readVector(tr, 999L)).join();
-    org.assertj.core.api.Assertions.assertThat(read).isNull();
+    assertThat(read).isNull();
   }
 
   @Test
   void constructor_throwsOnInvalidDimension() {
-    org.junit.jupiter.api.Assertions.assertThrows(
-        IllegalArgumentException.class, () -> new OriginalVectorStorage(keys, 0));
+    assertThrows(IllegalArgumentException.class, () -> new OriginalVectorStorage(keys, 0));
   }
 
   @Test
@@ -133,10 +133,10 @@ class OriginalVectorStorageTest {
       return null;
     });
 
-    CompletionException ex = org.junit.jupiter.api.Assertions.assertThrows(
-        CompletionException.class,
-        () -> db.read(tr -> storage.readVector(tr, nodeId)).join());
-    org.assertj.core.api.Assertions.assertThat(ex.getCause()).isInstanceOf(IllegalStateException.class);
+    CompletionException ex =
+        assertThrows(CompletionException.class, () -> db.read(tr -> storage.readVector(tr, nodeId))
+            .join());
+    assertThat(ex.getCause()).isInstanceOf(IllegalStateException.class);
   }
 
   @Test
@@ -157,7 +157,7 @@ class OriginalVectorStorageTest {
 
     float[] read = db.read(tr -> storage.readVector(tr, nodeId)).join();
     for (int i = 0; i < DIM; i++) {
-      org.assertj.core.api.Assertions.assertThat(read[i]).isCloseTo(v2[i], withinAbs(1e-2f));
+      assertThat(read[i]).isCloseTo(v2[i], withinAbs(1e-2f));
     }
   }
 

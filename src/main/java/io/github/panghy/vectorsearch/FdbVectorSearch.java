@@ -7,6 +7,7 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 import static java.util.concurrent.CompletableFuture.failedFuture;
 
 import com.apple.foundationdb.Database;
+import com.apple.foundationdb.ReadTransaction;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.TransactionContext;
 import com.apple.foundationdb.async.AsyncUtil;
@@ -943,7 +944,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
    * Check if we should train initial codebooks and do so if needed.
    * This is called when no codebooks exist and vectors are being inserted.
    *
-   * @param tr the transaction to use
+   * @param tr             the transaction to use
    * @param currentVectors the vectors being inserted in this batch
    * @return true if codebooks were trained and stored
    */
@@ -972,7 +973,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
   /**
    * Train codebooks and store them in the database.
    *
-   * @param tr the transaction to use
+   * @param tr              the transaction to use
    * @param trainingVectors the vectors to use for training
    * @return true if successful
    */
@@ -1156,9 +1157,11 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
     });
   }
 
-  /** Rerank approximate results using exact distances over stored original vectors. */
+  /**
+   * Rerank approximate results using exact distances over stored original vectors.
+   */
   private CompletableFuture<List<SearchResult>> rerankExact(
-      com.apple.foundationdb.ReadTransaction tr, float[] queryVector, List<SearchResult> approx, int k) {
+      ReadTransaction tr, float[] queryVector, List<SearchResult> approx, int k) {
     if (approx == null || approx.isEmpty()) {
       return completedFuture(List.of());
     }
