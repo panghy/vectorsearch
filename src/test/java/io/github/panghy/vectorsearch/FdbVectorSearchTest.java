@@ -206,9 +206,6 @@ class FdbVectorSearchTest {
       assertNotNull(graphMetaDir);
 
       // Check other subspaces
-      DirectorySubspace sketchDir =
-          directory.createOrOpen(tr, List.of("sketch")).join();
-      assertNotNull(sketchDir);
       DirectorySubspace entryDir =
           directory.createOrOpen(tr, List.of("entry")).join();
       assertNotNull(entryDir);

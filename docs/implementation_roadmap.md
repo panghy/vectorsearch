@@ -148,44 +148,19 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 
 ## ⚠️ **Critical Integration Gaps**
 
-### Recently Completed (Dec 2024):
-1. ✅ **BeamSearchEngine** - Now fully wired to FdbVectorSearch.search() methods
-2. ✅ **ProductQuantizer** - Properly initialized with codebooks loaded on demand
-3. ✅ **Integration Testing** - Comprehensive tests with 500+ vectors, clustering, and search validation
-
 ### Components Built But Not Fully Utilized:
 1. **VectorSketchStorage** - Storing sketches but no codebook retraining implementation uses them
 2. **Statistics Collection** - getStats() returns hardcoded zeros, no actual metrics gathering
 
 ### Missing Components:
 1. **UnlinkWorker** - Does not exist, delete operations enqueue tasks with no processor
-2. **Codebook Training** - No initial codebook generation from training data
-3. **Codebook Rotation** - Two-phase rotation not implemented
-4. **Vector Count** - getVectorCount() returns 0, not implemented
+2. **Codebook Rotation** - Two-phase rotation not implemented
+3. **Vector Count** - getVectorCount() returns 0, not implemented
 
-## 🎯 **Next Milestone: Segment-Based PQ Architecture**
-
-**Priority 0 - Fundamental Architecture Change (Milvus-style):**
-1. **Implement Segment-Based PQ** - Transition from global to per-segment codebooks
-   - Each segment (512MB) has its own PQ codebook trained on local data
-   - Eliminates need for complex two-phase rotation
-   - See [Segment-Based PQ Architecture Design](segment_based_pq_architecture.md) for details
-2. **Growing vs Sealed Segments** - Implement segment lifecycle
-   - Growing segments accept new vectors (in-memory, original vectors)
-   - Sealed segments are immutable with PQ encoding
-   - Automatic sealing when size threshold reached
-3. **Multi-Segment Search** - Query across all segments and merge results
-   - Parallel search across segments
-   - Growing segments use exact distances
-   - Sealed segments use PQ distances with local codebooks
-4. **Background Compaction** - Merge small segments and handle deletions
-   - Periodically merge small segments
-   - Remove soft-deleted vectors during compaction
-   - Retrain codebook for merged segment
+## 🎯 **Next Milestone: Accuracy Improvement (DiskANN-style)**
 
 **Priority 1 - Accuracy Improvement (DiskANN-style):**
 1. **Store Original Vectors** - Store full-precision vectors alongside graph for exact distance computation
-   - Store with segment data to leverage locality
    - Consider float16 compression for storage efficiency
 2. **Implement Reranking Pipeline** - Use PQ for candidate selection, original vectors for final ranking
    - Overquery strategy: Fetch 3x candidates using PQ distance, rerank with original vectors
@@ -199,14 +174,6 @@ Building a millisecond-latency Approximate Nearest Neighbor (ANN) search system 
 1. **Create UnlinkWorker** - Process delete operations (or handle via compaction)
 2. **Implement getStats()** - Gather actual metrics  
 3. **Implement getVectorCount()** - Track actual vector count
-
-**Success Criteria for Segment-Based Architecture:**
-- Each segment has its own optimized PQ codebook
-- No global codebook retraining needed
-- Growing segments provide exact distance search
-- Sealed segments use local PQ for efficiency
-- Compaction handles deletions and merges small segments
-- System scales to billions of vectors without retraining overhead
 
 **Success Criteria for Original Vector Storage:**
 - Original vector storage enables exact distance computation (distance ~0 for exact matches)

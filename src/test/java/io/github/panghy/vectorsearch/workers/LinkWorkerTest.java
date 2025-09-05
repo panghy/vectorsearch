@@ -169,7 +169,6 @@ class LinkWorkerTest {
     byte[] pqCode = pq.encode(vector);
 
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(nodeId)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(pqCode))
@@ -225,7 +224,6 @@ class LinkWorkerTest {
       pqBlockStorage.storePqCode(nodeId, pqCode, 1).get();
 
       LinkTask linkTask = LinkTask.newBuilder()
-          .setCollection("test-collection")
           .setNodeId(nodeId)
           .setPqEncoded(PqEncodedVector.newBuilder()
               .setPqCode(ByteString.copyFrom(pqCode))
@@ -273,7 +271,6 @@ class LinkWorkerTest {
     byte[] pqCode = pq.encode(vector);
 
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(nodeId)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(pqCode))
@@ -334,7 +331,6 @@ class LinkWorkerTest {
     byte[] newPqCode = pq.encode(newVector);
 
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(newNodeId)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(newPqCode))
@@ -382,7 +378,6 @@ class LinkWorkerTest {
       byte[] pqCode = pq.encode(vector);
 
       LinkTask linkTask = LinkTask.newBuilder()
-          .setCollection("test-collection")
           .setNodeId(nodeId)
           .setPqEncoded(PqEncodedVector.newBuilder()
               .setPqCode(ByteString.copyFrom(pqCode))
@@ -435,7 +430,6 @@ class LinkWorkerTest {
       byte[] pqCode = pq.encode(vector);
 
       LinkTask linkTask = LinkTask.newBuilder()
-          .setCollection("test-collection")
           .setNodeId(nodeId)
           .setPqEncoded(PqEncodedVector.newBuilder()
               .setPqCode(ByteString.copyFrom(pqCode))
@@ -463,7 +457,6 @@ class LinkWorkerTest {
     Arrays.fill(pqCode, (byte) 1);
 
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(nodeId)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(pqCode))
@@ -495,7 +488,6 @@ class LinkWorkerTest {
     byte[] pqCode = pq.encode(queryVector);
 
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(nodeId)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(pqCode))
@@ -528,7 +520,6 @@ class LinkWorkerTest {
       Arrays.fill(pqCode, (byte) (i % 10));
 
       LinkTask linkTask = LinkTask.newBuilder()
-          .setCollection("test-collection")
           .setNodeId(nodeId)
           .setPqEncoded(PqEncodedVector.newBuilder()
               .setPqCode(ByteString.copyFrom(pqCode))
@@ -607,7 +598,6 @@ class LinkWorkerTest {
 
     // Create link task for node1
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(node1)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(pq.encode(generateRandomVector(DIMENSION))))
@@ -656,7 +646,6 @@ class LinkWorkerTest {
 
     // Create link task
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(targetNode)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(pq.encode(generateRandomVector(DIMENSION))))
@@ -1309,7 +1298,6 @@ class LinkWorkerTest {
 
     // Create link task for new node
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(newNode)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(newNodePqCode))
@@ -1394,7 +1382,6 @@ class LinkWorkerTest {
 
     // Create link task
     LinkTask linkTask = LinkTask.newBuilder()
-        .setCollection("test-collection")
         .setNodeId(newNode)
         .setPqEncoded(PqEncodedVector.newBuilder()
             .setPqCode(ByteString.copyFrom(newNodePqCode))
