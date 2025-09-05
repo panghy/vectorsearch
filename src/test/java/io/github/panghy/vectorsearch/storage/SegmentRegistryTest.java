@@ -1,5 +1,7 @@
 package io.github.panghy.vectorsearch.storage;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
@@ -57,19 +59,19 @@ class SegmentRegistryTest {
     });
 
     Long active = db.read(tr -> registry.getActiveSegment(tr)).get(5, TimeUnit.SECONDS);
-    org.assertj.core.api.Assertions.assertThat(active).isEqualTo(1L);
+    assertThat(active).isEqualTo(1L);
 
     SegmentMeta meta = db.read(tr -> registry.readSegmentMeta(tr, 1L)).get(5, TimeUnit.SECONDS);
-    org.assertj.core.api.Assertions.assertThat(meta).isNotNull();
-    org.assertj.core.api.Assertions.assertThat(meta.getSegmentId()).isEqualTo(1L);
-    org.assertj.core.api.Assertions.assertThat(meta.getCodebookVersion()).isEqualTo(7);
-    org.assertj.core.api.Assertions.assertThat(meta.getStatus()).isEqualTo(SegmentMeta.Status.ACTIVE);
+    assertThat(meta).isNotNull();
+    assertThat(meta.getSegmentId()).isEqualTo(1L);
+    assertThat(meta.getCodebookVersion()).isEqualTo(7);
+    assertThat(meta.getStatus()).isEqualTo(SegmentMeta.Status.ACTIVE);
 
     db.run(tr -> {
       registry.sealSegment(tr, 1L).join();
       return null;
     });
     SegmentMeta sealed = db.read(tr -> registry.readSegmentMeta(tr, 1L)).get(5, TimeUnit.SECONDS);
-    org.assertj.core.api.Assertions.assertThat(sealed.getStatus()).isEqualTo(SegmentMeta.Status.SEALED);
+    assertThat(sealed.getStatus()).isEqualTo(SegmentMeta.Status.SEALED);
   }
 }

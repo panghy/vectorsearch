@@ -1,5 +1,7 @@
 package io.github.panghy.vectorsearch.storage;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
@@ -53,7 +55,7 @@ class NodeSegmentStorageTest {
     });
 
     Long got = db.read(tr -> storage.get(tr, nodeId)).get(5, TimeUnit.SECONDS);
-    org.assertj.core.api.Assertions.assertThat(got).isEqualTo(segId);
+    assertThat(got).isEqualTo(segId);
   }
 
   @Test
@@ -67,6 +69,6 @@ class NodeSegmentStorageTest {
       return null;
     });
     Long got = storage.getAsync(nodeId).get(5, TimeUnit.SECONDS);
-    org.assertj.core.api.Assertions.assertThat(got).isEqualTo(segId);
+    assertThat(got).isEqualTo(segId);
   }
 }

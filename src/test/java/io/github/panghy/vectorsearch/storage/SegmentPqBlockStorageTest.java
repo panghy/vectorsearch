@@ -1,5 +1,7 @@
 package io.github.panghy.vectorsearch.storage;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
@@ -14,8 +16,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-
-import static org.assertj.core.api.Assertions.assertThat;
 
 class SegmentPqBlockStorageTest {
   private Database db;

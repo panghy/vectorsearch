@@ -1,21 +1,30 @@
 package io.github.panghy.vectorsearch;
 
-// Avoid static imports; use qualified references
+import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
+import static io.github.panghy.vectorsearch.pq.DistanceMetrics.Metric;
+import static io.github.panghy.vectorsearch.pq.DistanceMetrics.distance;
+import static java.util.concurrent.CompletableFuture.completedFuture;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
-import io.github.panghy.vectorsearch.pq.DistanceMetrics;
 import io.github.panghy.vectorsearch.pq.ProductQuantizer;
 import io.github.panghy.vectorsearch.search.BeamSearchEngine;
 import io.github.panghy.vectorsearch.search.SearchResult;
+import io.github.panghy.vectorsearch.storage.CodebookStorage;
 import io.github.panghy.vectorsearch.storage.OriginalVectorStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -69,49 +78,34 @@ class FdbVectorSearchRerankTest {
     DirectorySubspace indexMeta = (DirectorySubspace) getField(index, "metaSubspace");
     VectorIndexKeys indexKeys = new VectorIndexKeys(indexMeta);
     db.run(tr -> {
-      tr.set(indexKeys.activeCodebookVersionKey(), com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt(1));
+      tr.set(indexKeys.activeCodebookVersionKey(), encodeInt(1));
       return null;
     });
 
     // Mock ProductQuantizer and Codebook/Beam/OriginalVector storages
-    ProductQuantizer mockPq = org.mockito.Mockito.mock(ProductQuantizer.class);
-    org.mockito.Mockito.when(mockPq.getCodebookVersion()).thenReturn(1);
+    ProductQuantizer mockPq = mock(ProductQuantizer.class);
+    when(mockPq.getCodebookVersion()).thenReturn(1);
 
-    io.github.panghy.vectorsearch.storage.CodebookStorage mockCodebooks =
-        org.mockito.Mockito.mock(io.github.panghy.vectorsearch.storage.CodebookStorage.class);
-    org.mockito.Mockito.when(mockCodebooks.getLatestProductQuantizer())
-        .thenReturn(CompletableFuture.completedFuture(mockPq));
-    org.mockito.Mockito.when(mockCodebooks.getProductQuantizer(org.mockito.ArgumentMatchers.anyLong()))
-        .thenReturn(CompletableFuture.completedFuture(mockPq));
+    CodebookStorage mockCodebooks = mock(CodebookStorage.class);
+    when(mockCodebooks.getLatestProductQuantizer()).thenReturn(completedFuture(mockPq));
+    when(mockCodebooks.getProductQuantizer(anyLong())).thenReturn(completedFuture(mockPq));
 
-    BeamSearchEngine mockBeam = org.mockito.Mockito.mock(BeamSearchEngine.class);
+    BeamSearchEngine mockBeam = mock(BeamSearchEngine.class);
     // Approximate candidate IDs (distances ignored in rerank)
     List<SearchResult> approx =
         List.of(new SearchResult(1L, 10f), new SearchResult(2L, 20f), new SearchResult(3L, 30f));
-    org.mockito.Mockito.when(mockBeam.search(
-            org.mockito.ArgumentMatchers.any(),
-            org.mockito.ArgumentMatchers.any(float[].class),
-            org.mockito.ArgumentMatchers.anyInt(),
-            org.mockito.ArgumentMatchers.anyInt(),
-            org.mockito.ArgumentMatchers.anyInt(),
-            org.mockito.ArgumentMatchers.any(ProductQuantizer.class)))
-        .thenReturn(CompletableFuture.completedFuture(approx));
+    when(mockBeam.search(any(), any(float[].class), anyInt(), anyInt(), anyInt(), any(ProductQuantizer.class)))
+        .thenReturn(completedFuture(approx));
 
-    OriginalVectorStorage mockOriginals = org.mockito.Mockito.mock(OriginalVectorStorage.class);
+    OriginalVectorStorage mockOriginals = mock(OriginalVectorStorage.class);
     // Query and stored vectors such that exact L2 distances rank 2 < 1 < 3
     float[] q = new float[] {1f, 0f, 0f, 0f};
     float[] v1 = new float[] {0.9f, 0f, 0f, 0f}; // dist ~ 0.01
     float[] v2 = new float[] {1.0f, 0f, 0f, 0f}; // dist 0.0 (best)
     float[] v3 = new float[] {2.0f, 0f, 0f, 0f}; // dist 1.0 (worst)
-    org.mockito.Mockito.when(mockOriginals.readVector(
-            org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq(1L)))
-        .thenReturn(CompletableFuture.completedFuture(v1));
-    org.mockito.Mockito.when(mockOriginals.readVector(
-            org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq(2L)))
-        .thenReturn(CompletableFuture.completedFuture(v2));
-    org.mockito.Mockito.when(mockOriginals.readVector(
-            org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq(3L)))
-        .thenReturn(CompletableFuture.completedFuture(v3));
+    when(mockOriginals.readVector(any(), eq(1L))).thenReturn(completedFuture(v1));
+    when(mockOriginals.readVector(any(), eq(2L))).thenReturn(completedFuture(v2));
+    when(mockOriginals.readVector(any(), eq(3L))).thenReturn(completedFuture(v3));
 
     // Inject mocks via reflection
     setField(index, "codebookStorage", mockCodebooks);
@@ -121,15 +115,15 @@ class FdbVectorSearchRerankTest {
     // Execute search with k=2 (should rerank to [2, 1])
     List<SearchResult> results = index.search(q, 2).get(10, java.util.concurrent.TimeUnit.SECONDS);
 
-    org.assertj.core.api.Assertions.assertThat(results).hasSize(2);
-    org.assertj.core.api.Assertions.assertThat(results.get(0).getNodeId()).isEqualTo(2L);
-    org.assertj.core.api.Assertions.assertThat(results.get(1).getNodeId()).isEqualTo(1L);
+    assertThat(results).hasSize(2);
+    assertThat(results.get(0).getNodeId()).isEqualTo(2L);
+    assertThat(results.get(1).getNodeId()).isEqualTo(1L);
 
     // Validate distances computed via DistanceMetrics
-    float d2 = io.github.panghy.vectorsearch.pq.DistanceMetrics.distance(q, v2, DistanceMetrics.Metric.L2);
-    float d1 = io.github.panghy.vectorsearch.pq.DistanceMetrics.distance(q, v1, DistanceMetrics.Metric.L2);
-    org.assertj.core.api.Assertions.assertThat(results.get(0).getDistance()).isEqualTo(d2);
-    org.assertj.core.api.Assertions.assertThat(results.get(1).getDistance()).isEqualTo(d1);
+    float d2 = distance(q, v2, Metric.L2);
+    float d1 = distance(q, v1, Metric.L2);
+    assertThat(results.get(0).getDistance()).isEqualTo(d2);
+    assertThat(results.get(1).getDistance()).isEqualTo(d1);
 
     index.shutdown();
   }

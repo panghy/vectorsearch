@@ -298,13 +298,6 @@ public class VectorSearchConfig {
   @Getter
   private final int stripeCount;
 
-  /**
-   * -- GETTER --
-   * Gets whether to store vector sketches for codebook rotation.
-   * Sketches allow approximate vector reconstruction without storing full vectors.
-   * Adds ~32 bytes per vector of storage overhead.
-   * Default: true.
-   */
   @Getter
   private final boolean storeVectorSketches;
 
@@ -801,10 +794,6 @@ public class VectorSearchConfig {
       return this;
     }
 
-    /**
-     * Enables or disables vector sketch storage.
-     * Default: true (recommended for codebook rotation).
-     */
     public Builder storeVectorSketches(boolean storeVectorSketches) {
       this.storeVectorSketches = storeVectorSketches;
       return this;
