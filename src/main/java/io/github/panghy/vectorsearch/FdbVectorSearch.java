@@ -43,7 +43,6 @@ import io.github.panghy.vectorsearch.storage.GraphMetaStorage;
 import io.github.panghy.vectorsearch.storage.NodeAdjacencyStorage;
 import io.github.panghy.vectorsearch.storage.PqBlockStorage;
 import io.github.panghy.vectorsearch.storage.VectorIndexKeys;
-import io.github.panghy.vectorsearch.storage.VectorSketchStorage;
 import io.github.panghy.vectorsearch.workers.LinkWorker;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.LongCounter;
@@ -83,7 +82,7 @@ import org.slf4j.LoggerFactory;
  *   <li>Configuration and metadata in /meta/</li>
  *   <li>PQ codebooks and compressed codes in /pq/</li>
  *   <li>Graph adjacency lists in /graph/</li>
- *   <li>Vector sketches for reconstruction in /sketch/</li>
+ *
  * </ul>
  *
  * <p>Example usage:
@@ -184,9 +183,8 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
   private final DirectorySubspace graphMetaSubspace;
 
   /**
-   * /sketch/ - Vector sketches for reconstruction
+   *
    */
-  private final DirectorySubspace sketchSubspace;
 
   /**
    * /entry - Entry points for search initialization
@@ -265,11 +263,6 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
   private GraphMetaStorage graphMetaStorage;
 
   /**
-   * Storage for vector sketches
-   */
-  private VectorSketchStorage vectorSketchStorage;
-
-  /**
    * Graph connectivity monitor
    */
   private GraphConnectivityMonitor connectivityMonitor;
@@ -322,7 +315,6 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
    * @param pqBlockSubspace   subspace for PQ blocks
    * @param graphNodeSubspace subspace for graph nodes
    * @param graphMetaSubspace subspace for graph metadata
-   * @param sketchSubspace    subspace for vector sketches
    * @param entrySubspace     subspace for entry points
    * @param linkTaskQueue     task queue for link operations
    * @param unlinkTaskQueue   task queue for unlink operations
@@ -336,7 +328,6 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
       DirectorySubspace pqBlockSubspace,
       DirectorySubspace graphNodeSubspace,
       DirectorySubspace graphMetaSubspace,
-      DirectorySubspace sketchSubspace,
       DirectorySubspace entrySubspace,
       TaskQueue<Long, LinkTask> linkTaskQueue,
       TaskQueue<Long, UnlinkTask> unlinkTaskQueue) {
@@ -349,7 +340,6 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
     this.pqBlockSubspace = pqBlockSubspace;
     this.graphNodeSubspace = graphNodeSubspace;
     this.graphMetaSubspace = graphMetaSubspace;
-    this.sketchSubspace = sketchSubspace;
     this.entrySubspace = entrySubspace;
     this.linkTaskQueue = linkTaskQueue;
     this.unlinkTaskQueue = unlinkTaskQueue;
@@ -435,7 +425,6 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
         Duration.ofMinutes(5));
     this.entryPointStorage = new EntryPointStorage(collectionSubspace, instantSource);
     this.graphMetaStorage = new GraphMetaStorage(vectorIndexKeys, instantSource);
-    this.vectorSketchStorage = new VectorSketchStorage(vectorIndexKeys, dimension);
 
     // Initialize connectivity monitor
     this.connectivityMonitor = new GraphConnectivityMonitor(
@@ -489,7 +478,7 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
     var pqBlockFuture = rootDir.createOrOpen(context, List.of("pq", "block"));
     var graphNodeFuture = rootDir.createOrOpen(context, List.of("graph", "node"));
     var graphMetaFuture = rootDir.createOrOpen(context, List.of("graph", "meta"));
-    var sketchFuture = rootDir.createOrOpen(context, List.of("sketch"));
+
     var entryFuture = rootDir.createOrOpen(context, List.of("entry"));
 
     // Create directories for task queues
@@ -503,7 +492,6 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
             pqBlockFuture,
             graphNodeFuture,
             graphMetaFuture,
-            sketchFuture,
             entryFuture,
             linkQueueDirFuture,
             unlinkQueueDirFuture)
@@ -552,7 +540,6 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
                 pqBlockFuture.join(),
                 graphNodeFuture.join(),
                 graphMetaFuture.join(),
-                sketchFuture.join(),
                 entryFuture.join(),
                 linkQueue,
                 unlinkQueue);
@@ -931,15 +918,12 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
         taskBuilder.setRawVector(rawVectorBuilder.build());
       }
 
-      // Store vector sketch for future codebook retraining
-      CompletableFuture<Void> sketchFuture = vectorSketchStorage.storeVectorSketch(tr, nodeId, vector);
-
       // Enqueue link task
       CompletableFuture<Void> enqueueFuture =
           linkTaskQueue.enqueue(tr, nodeId, taskBuilder.build()).thenApply(metadata -> null);
 
       // Combine all operations for this vector
-      futures.add(allOf(adjFuture, sketchFuture, enqueueFuture));
+      futures.add(allOf(adjFuture, enqueueFuture));
     }
 
     // Update metrics
@@ -957,39 +941,25 @@ public class FdbVectorSearch implements VectorSearch, AutoCloseable {
    * @return true if codebooks were trained and stored
    */
   private CompletableFuture<Boolean> maybeTrainInitialCodebooks(Transaction tr, Map<Long, float[]> currentVectors) {
-    // Check if we have enough vectors to train
-    // We need at least some vectors for training, but we'll also check if there are existing sketches
+    // Check if we have enough vectors to train using only the current batch
+    int totalVectors = currentVectors.size();
 
-    return vectorSketchStorage.countVectorSketches(tr).thenCompose(existingCount -> {
-      int totalVectors = existingCount + currentVectors.size();
+    // We need at least k=256 vectors to train meaningful codebooks
+    // since each subspace uses k-means with k=256 centroids
+    final int minVectorsForTraining = 256;
+    if (totalVectors < minVectorsForTraining) {
+      LOGGER.info(
+          "Not enough vectors for training codebooks. Have {}, need at least {}",
+          totalVectors,
+          minVectorsForTraining);
+      return completedFuture(false);
+    }
 
-      // We need at least k=256 vectors to train meaningful codebooks
-      // since each subspace uses k-means with k=256 centroids
-      final int minVectorsForTraining = 256;
-      if (totalVectors < minVectorsForTraining) {
-        LOGGER.info(
-            "Not enough vectors for training codebooks. Have {}, need at least {}",
-            totalVectors,
-            minVectorsForTraining);
-        return completedFuture(false);
-      }
+    LOGGER.info("Training initial codebooks with {} vectors", totalVectors);
 
-      LOGGER.info("Training initial codebooks with {} vectors", totalVectors);
-
-      // Collect training vectors: current batch + sample of existing sketches
-      List<float[]> trainingVectors = new ArrayList<>(currentVectors.values());
-
-      // If we have existing sketches, load a sample of them
-      if (existingCount > 0) {
-        int sampleSize = Math.min(existingCount, 1000 - currentVectors.size());
-        return vectorSketchStorage.sampleVectorSketches(tr, sampleSize).thenCompose(sketches -> {
-          trainingVectors.addAll(sketches);
-          return trainAndStoreCodebooks(tr, trainingVectors);
-        });
-      } else {
-        return trainAndStoreCodebooks(tr, trainingVectors);
-      }
-    });
+    // Collect training vectors: current batch only
+    List<float[]> trainingVectors = new ArrayList<>(currentVectors.values());
+    return trainAndStoreCodebooks(tr, trainingVectors);
   }
 
   /**

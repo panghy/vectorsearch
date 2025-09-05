@@ -237,17 +237,8 @@ message GraphMeta {
 }
 
 // ========================================================================================
-// VECTOR SKETCHES FOR RECONSTRUCTION
-// ========================================================================================
-
-// Compressed representation of original vector for approximate reconstruction.
-// Enables codebook retraining without storing full vectors.
-// Stored at: /C/{collection}/sketch/{node_id}
 message VectorSketch {
-  // Node ID this sketch belongs to
   uint64 node_id = 1;
-  
-  // Sketch algorithm version for forward compatibility
   enum SketchType {
     SIMHASH_256 = 0;      // 256-bit SimHash (locality-sensitive)
     PCA_PROJECTION = 1;   // First k PCA components  
@@ -255,25 +246,11 @@ message VectorSketch {
     SCALAR_QUANTIZED = 3; // 8-bit scalar quantization
   }
   SketchType sketch_type = 2;
-  
-  // Compressed vector representation.
-  // Size depends on sketch_type:
-  // - SIMHASH_256: 32 bytes
-  // - PCA_PROJECTION: variable (typically 64-128 bytes)
-  // - RANDOM_PROJECTION: variable
-  // - SCALAR_QUANTIZED: dimension bytes
   bytes sketch_data = 3;
-  
-  // Optional: Additional parameters for reconstruction
-  // (e.g., normalization factor, mean values for PCA)
   optional bytes sketch_params = 4;
-  
-  // Metadata
   uint64 version = 5;
   google.protobuf.Timestamp created_at = 6;
-  
-  // Quality metrics (populated during sketch creation)
-  optional double reconstruction_error = 7;  // L2 distance to original
+  optional double reconstruction_error = 7;
 }
 
 // ========================================================================================
@@ -298,26 +275,14 @@ message RawVector {
 // Task payload for link operations (graph construction).
 // Enqueued during upsert operations for async processing.
 message LinkTask {
-  // Collection name
-  string collection = 1;
-  
   // Node ID to link into the graph
-  uint64 node_id = 2;
+  uint64 node_id = 1;
   
   // Either PQ-encoded or raw vector
   oneof vector_data {
-    PqEncodedVector pq_encoded = 3;
-    RawVector raw_vector = 4;
+    PqEncodedVector pq_encoded = 2;
+    RawVector raw_vector = 3;
   }
-  
-  // Task metadata
-  google.protobuf.Timestamp enqueued_at = 5;
-  uint32 retry_count = 6;
-  optional string request_id = 7;  // For tracing
-  
-  // Optional: Partial vector for better graph construction
-  // (first few dimensions in fp16 for coarse distance estimates)
-  optional bytes vector_prefix = 8;
 }
 
 // Task payload for unlink operations (node removal).

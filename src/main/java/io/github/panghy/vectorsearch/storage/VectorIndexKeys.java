@@ -30,13 +30,18 @@ public class VectorIndexKeys {
   private static final String CODEBOOK = "codebook";
   private static final String BLOCK = "block";
 
+  // Segment management keys
+  private static final String SEGMENTS = "segments"; // aggregate: active, meta
+  private static final String SEGMENT = "segment"; // per-segment namespace
+  private static final String ACTIVE = "active";
+
+  // Original vector keys
+  private static final String VECTOR = "vector";
+
   // Graph storage keys
   private static final String GRAPH = "graph";
   private static final String NODE = "node";
   private static final String CONNECTIVITY = "connectivity";
-
-  // Sketch storage keys
-  private static final String SKETCH = "sketch";
 
   /**
    * -- GETTER --
@@ -164,6 +169,56 @@ public class VectorIndexKeys {
     return collectionSubspace.pack(Tuple.from(PQ, BLOCK));
   }
 
+  // ==================== Segment Keys ====================
+
+  /**
+   * Key for the active ingest segment ID.
+   * Path: /C/{collection}/segments/active
+   */
+  public byte[] activeSegmentKey() {
+    return collectionSubspace.pack(Tuple.from(SEGMENTS, ACTIVE));
+  }
+
+  /**
+   * Key for a segment's metadata record.
+   * Path: /C/{collection}/segments/meta/{segId}
+   */
+  public byte[] segmentMetaKey(long segId) {
+    return collectionSubspace.pack(Tuple.from(SEGMENTS, META, segId));
+  }
+
+  /**
+   * Key for a segment-scoped PQ codebook subspace.
+   * Path: /C/{collection}/segment/{segId}/pq/codebook/{subspace}
+   */
+  public byte[] segmentCodebookKey(long segId, int subspaceIndex) {
+    return collectionSubspace.pack(Tuple.from(SEGMENT, segId, PQ, CODEBOOK, subspaceIndex));
+  }
+
+  /**
+   * Prefix for all codebooks within a segment.
+   * Path: /C/{collection}/segment/{segId}/pq/codebook/
+   */
+  public byte[] segmentCodebookPrefix(long segId) {
+    return collectionSubspace.pack(Tuple.from(SEGMENT, segId, PQ, CODEBOOK));
+  }
+
+  /**
+   * Key for a segment-scoped PQ codes block.
+   * Path: /C/{collection}/segment/{segId}/pq/block/{blockNo}
+   */
+  public byte[] segmentPqBlockKey(long segId, long blockNo) {
+    return collectionSubspace.pack(Tuple.from(SEGMENT, segId, PQ, BLOCK, blockNo));
+  }
+
+  /**
+   * Prefix for all PQ blocks within a segment.
+   * Path: /C/{collection}/segment/{segId}/pq/block/
+   */
+  public byte[] segmentPqBlockPrefix(long segId) {
+    return collectionSubspace.pack(Tuple.from(SEGMENT, segId, PQ, BLOCK));
+  }
+
   // ==================== Graph Keys ====================
 
   /**
@@ -192,34 +247,29 @@ public class VectorIndexKeys {
     return collectionSubspace.pack(Tuple.from(GRAPH, META, CONNECTIVITY));
   }
 
-  // ==================== Sketch Keys ====================
+  // ==================== Original Vector Keys ====================
 
   /**
-   * Key for a vector sketch.
-   * Path: /C/{collection}/sketch/{nodeId}
-   *
-   * @param nodeId the node ID
+   * Key for an original (full-precision) vector stored in fp16.
+   * Path: /C/{collection}/vector/{nodeId}
    */
-  public byte[] vectorSketchKey(long nodeId) {
-    return collectionSubspace.pack(Tuple.from(SKETCH, nodeId));
+  public byte[] vectorKey(long nodeId) {
+    return collectionSubspace.pack(Tuple.from(VECTOR, nodeId));
   }
 
   /**
-   * Key prefix for all vector sketches.
-   * Path: /C/{collection}/sketch/
+   * Prefix for all original vectors.
+   * Path: /C/{collection}/vector/
    */
-  public byte[] allSketchesPrefix() {
-    return collectionSubspace.pack(Tuple.from(SKETCH));
+  public byte[] allVectorsPrefix() {
+    return collectionSubspace.pack(Tuple.from(VECTOR));
   }
 
   /**
-   * Range for all vector sketches.
-   * Path: /C/{collection}/sketch/
-   *
-   * @return Range for scanning all vector sketches
+   * Range for scanning original vectors.
    */
-  public com.apple.foundationdb.Range vectorSketchRange() {
-    byte[] prefix = allSketchesPrefix();
+  public com.apple.foundationdb.Range vectorRange() {
+    byte[] prefix = allVectorsPrefix();
     return new com.apple.foundationdb.Range(prefix, com.apple.foundationdb.tuple.ByteArrayUtil.strinc(prefix));
   }
 

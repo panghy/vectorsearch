@@ -208,25 +208,6 @@ class VectorIndexKeysTest {
   }
 
   @Test
-  void testVectorSketchKey() {
-    byte[] key = keys.vectorSketchKey(9999L);
-    assertThat(key).isNotNull();
-
-    Tuple decoded = collectionSubspace.unpack(key);
-    assertThat(decoded.getString(0)).isEqualTo("sketch");
-    assertThat(decoded.getLong(1)).isEqualTo(9999);
-  }
-
-  @Test
-  void testAllSketchesPrefix() {
-    byte[] prefix = keys.allSketchesPrefix();
-    assertThat(prefix).isNotNull();
-
-    Tuple decoded = collectionSubspace.unpack(prefix);
-    assertThat(decoded.getString(0)).isEqualTo("sketch");
-  }
-
-  @Test
   void testPrefixRange() {
     byte[] prefix = keys.allNodesPrefix();
     byte[][] range = VectorIndexKeys.prefixRange(prefix);
@@ -286,13 +267,10 @@ class VectorIndexKeysTest {
     byte[] statsKey = keys.statsKey();
     byte[] entryKey = keys.entryListKey();
     byte[] nodeKey = keys.nodeAdjacencyKey(1L);
-    byte[] sketchKey = keys.vectorSketchKey(1L);
 
     assertThat(configKey).isNotEqualTo(statsKey);
     assertThat(configKey).isNotEqualTo(entryKey);
     assertThat(configKey).isNotEqualTo(nodeKey);
-    assertThat(configKey).isNotEqualTo(sketchKey);
-    assertThat(nodeKey).isNotEqualTo(sketchKey);
   }
 
   @Test
