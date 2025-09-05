@@ -43,7 +43,7 @@ class NodeSegmentStorageTest {
   @Test
   @DisplayName("store and get node->segment mapping")
   void testStoreGet() throws Exception {
-    NodeSegmentStorage storage = new NodeSegmentStorage(keys);
+    NodeSegmentStorage storage = new NodeSegmentStorage(db, keys, 100, java.time.Duration.ofMinutes(5));
     long nodeId = 123L;
     long segId = 9L;
 
@@ -53,6 +53,20 @@ class NodeSegmentStorageTest {
     });
 
     Long got = db.read(tr -> storage.get(tr, nodeId)).get(5, TimeUnit.SECONDS);
+    org.assertj.core.api.Assertions.assertThat(got).isEqualTo(segId);
+  }
+
+  @Test
+  @DisplayName("getAsync returns cached segment id")
+  void testGetAsync() throws Exception {
+    NodeSegmentStorage storage = new NodeSegmentStorage(db, keys, 100, java.time.Duration.ofMinutes(5));
+    long nodeId = 321L;
+    long segId = 5L;
+    db.run(tr -> {
+      storage.store(tr, nodeId, segId).join();
+      return null;
+    });
+    Long got = storage.getAsync(nodeId).get(5, TimeUnit.SECONDS);
     org.assertj.core.api.Assertions.assertThat(got).isEqualTo(segId);
   }
 }
