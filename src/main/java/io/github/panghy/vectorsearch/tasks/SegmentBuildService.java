@@ -7,6 +7,7 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.KeyValue;
 import com.apple.foundationdb.Range;
+import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.subspace.Subspace;
 import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.ByteString;
@@ -132,46 +133,100 @@ public class SegmentBuildService {
     final float[][][] cCentroids = centroids;
     final List<float[]> vVectors = vectors;
 
-    int idx = 0;
-    boolean wroteCodebook = false;
-    while (idx < kvs.size() || !wroteCodebook) {
-      final int start = idx;
-      final boolean writeCb = !wroteCodebook;
-      int next = db.run(tr -> {
-        // Optionally write codebook in this transaction
-        if (writeCb) {
-          tr.set(dirs.segmentKeys(segStr).pqCodebookKey(), cb.build().toByteArray());
-        }
-        FdbDirectories.SegmentKeys sk = dirs.segmentKeys(segStr);
-        int wrote = 0;
-        int j = start;
-        for (; j < kvs.size(); j++) {
-          KeyValue kv = kvs.get(j);
-          long vecId = vectorsPrefixUnpackId(dirs, kv.getKey());
-          byte[] codes = PqEncoder.encode(cCentroids, vVectors.get(j));
-          tr.set(sk.pqCodeKey((int) vecId), codes);
-          Adjacency adj = Adjacency.newBuilder()
-              .addAllNeighborIds(java.util.Arrays.stream(neighbors[(int) vecId])
-                  .boxed()
-                  .toList())
-              .build();
-          tr.set(sk.graphKey((int) vecId), adj.toByteArray());
-          wrote++;
-          if ((wrote % CHECK_EVERY) == 0) {
-            Long approx = tr.getApproximateSize().join();
-            if (approx != null && approx >= SOFT_LIMIT) {
-              j++; // include this write and split
-              break;
-            }
-          }
-        }
-        return j;
-      });
-      wroteCodebook = true;
-      idx = next;
-    }
+    // Asynchronously write chunks until all records (and codebook) are persisted.
+    return writeChunkLoop(db, dirs, segStr, kvs, vVectors, cCentroids, neighbors, SOFT_LIMIT, CHECK_EVERY);
+  }
 
-    return completedFuture(null);
+  private CompletableFuture<Void> writeChunkLoop(
+      Database db,
+      FdbDirectories.IndexDirectories dirs,
+      String segStr,
+      List<KeyValue> kvs,
+      List<float[]> vectors,
+      float[][][] centroids,
+      int[][] neighbors,
+      long softLimit,
+      int checkEvery) {
+    return writeChunk(db, dirs, segStr, kvs, vectors, centroids, neighbors, 0, false, softLimit, checkEvery);
+  }
+
+  private CompletableFuture<Void> writeChunk(
+      Database db,
+      FdbDirectories.IndexDirectories dirs,
+      String segStr,
+      List<KeyValue> kvs,
+      List<float[]> vectors,
+      float[][][] centroids,
+      int[][] neighbors,
+      int start,
+      boolean wroteCodebook,
+      long softLimit,
+      int checkEvery) {
+    if (start >= kvs.size() && wroteCodebook) return completedFuture(null);
+    final boolean writeCbThisTxn = !wroteCodebook;
+    return db.runAsync(tr -> {
+          if (writeCbThisTxn) {
+            tr.set(dirs.segmentKeys(segStr).pqCodebookKey(), buildCodebookBytes(centroids));
+          }
+          FdbDirectories.SegmentKeys sk = dirs.segmentKeys(segStr);
+          return writeSome(tr, sk, dirs, kvs, vectors, centroids, neighbors, start, checkEvery, softLimit)
+              .thenApply(next -> next);
+        })
+        .thenCompose(next -> writeChunk(
+            db, dirs, segStr, kvs, vectors, centroids, neighbors, next, true, softLimit, checkEvery));
+  }
+
+  private CompletableFuture<Integer> writeSome(
+      Transaction tr,
+      FdbDirectories.SegmentKeys sk,
+      FdbDirectories.IndexDirectories dirs,
+      List<KeyValue> kvs,
+      List<float[]> vectors,
+      float[][][] centroids,
+      int[][] neighbors,
+      int j,
+      int checkEvery,
+      long softLimit) {
+    int wroteSinceCheck = 0;
+    while (j < kvs.size()) {
+      KeyValue kv = kvs.get(j);
+      long vecId = vectorsPrefixUnpackId(dirs, kv.getKey());
+      byte[] codes = PqEncoder.encode(centroids, vectors.get(j));
+      tr.set(sk.pqCodeKey((int) vecId), codes);
+      Adjacency adj = Adjacency.newBuilder()
+          .addAllNeighborIds(java.util.Arrays.stream(neighbors[(int) vecId])
+              .boxed()
+              .toList())
+          .build();
+      tr.set(sk.graphKey((int) vecId), adj.toByteArray());
+      wroteSinceCheck++;
+      j++;
+      if ((wroteSinceCheck % checkEvery) == 0) {
+        final int jNow = j;
+        return tr.getApproximateSize().thenCompose(sz -> {
+          if (sz != null && sz >= softLimit) {
+            return CompletableFuture.completedFuture(jNow);
+          }
+          return writeSome(tr, sk, dirs, kvs, vectors, centroids, neighbors, jNow, 0, softLimit);
+        });
+      }
+    }
+    return CompletableFuture.completedFuture(j);
+  }
+
+  private byte[] buildCodebookBytes(float[][][] centroids) {
+    int m = centroids.length;
+    int k = centroids[0].length;
+    int subDim = centroids[0][0].length;
+    PQCodebook.Builder cb = PQCodebook.newBuilder().setM(m).setK(k);
+    for (int s = 0; s < m; s++) {
+      ByteBuffer bb = ByteBuffer.allocate(k * subDim * 4).order(ByteOrder.LITTLE_ENDIAN);
+      for (int ci = 0; ci < k; ci++) {
+        for (int di = 0; di < subDim; di++) bb.putFloat(centroids[s][ci][di]);
+      }
+      cb.addCentroids(ByteString.copyFrom(bb.array()));
+    }
+    return cb.build().toByteArray();
   }
 
   private long vectorsPrefixUnpackId(FdbDirectories.IndexDirectories dirs, byte[] key) {

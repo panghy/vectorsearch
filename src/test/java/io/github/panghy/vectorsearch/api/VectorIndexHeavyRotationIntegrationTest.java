@@ -86,7 +86,7 @@ class VectorIndexHeavyRotationIntegrationTest {
 
     // Pick qCount random vectors to query in parallel
     List<Integer> picks = new ArrayList<>();
-    for (int i = 0; i < qCount; i++) picks.add(rnd.nextInt(n));
+    for (int i = 0; i < queryCount; i++) picks.add(rnd.nextInt(vectorCount));
 
     System.out.println("Inserts done; waiting for indexing...");
 
@@ -95,7 +95,7 @@ class VectorIndexHeavyRotationIntegrationTest {
     System.out.println("Indexing done; querying...");
 
     List<CompletableFuture<List<SearchResult>>> futures = new ArrayList<>();
-    for (int i : picks) futures.add(index.query(inserted.get(i), k));
+    for (int i : picks) futures.add(index.query(inserted.get(i), topK));
     CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).get(60, TimeUnit.SECONDS);
 
     System.out.println("Queries done; computing recall...");
@@ -109,7 +109,7 @@ class VectorIndexHeavyRotationIntegrationTest {
       boolean found = res.stream().anyMatch(r -> r.segmentId() == gt[0] && r.vectorId() == gt[1]);
       if (found) hits++;
     }
-    double recall = hits / (double) qCount;
+    double recall = hits / (double) queryCount;
     System.out.println("Recall@k: " + recall);
     // With all segments discoverable and sealed search tuned, recall for self-queries should be high.
     assertThat(recall).isGreaterThanOrEqualTo(0.9);
