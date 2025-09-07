@@ -4,422 +4,149 @@ package vectorsearch;
 
 import "google/protobuf/timestamp.proto";
 
+// Java codegen options: place messages in a stable package and split into files.
 option java_package = "io.github.panghy.vectorsearch.proto";
 option java_multiple_files = true;
 option java_outer_classname = "VectorSearchProto";
 
-// ========================================================================================
-// CONFIGURATION & METADATA
-// ========================================================================================
+// -----------------------------------------------------------------------------
+// Overview
+// -----------------------------------------------------------------------------
+// These protos describe the on-disk (FoundationDB) representation of the vector
+// index. All data lives under DirectoryLayer-managed subspaces (see roadmap).
+//
+// Conventions:
+// - All IDs (segment_id, vec_id) are local to the segment, unless stated.
+// - Keys are built with Tuple packing to ensure natural ordering / grouping.
+// - Embeddings are stored as packed little-endian float32 in bytes fields.
+// - Timestamps are milliseconds since epoch unless specified.
+// - Messages are designed to be forward-compatible; prefer adding fields over
+//   modifying existing ones. Avoid changing semantics of existing fields.
 
-// Primary configuration for a vector collection.
-// Stored at: /C/{collection}/meta/config
-message Config {
-  // Dimensionality of the vectors in this collection.
-  // Must be set at collection creation and cannot be changed.
-  // Common values: 128, 256, 512, 768 (BERT), 1536 (OpenAI ada-002)
-  uint32 dimension = 1;
-  
-  // Distance metric used for similarity computation.
-  // Supported values: "L2" (Euclidean), "INNER_PRODUCT", "COSINE"
-  // Note: COSINE is implemented as normalized IP for efficiency
-  string metric = 2;
-  
-  // ---- Product Quantization (PQ) Parameters ----
-  
-  // Number of subvectors for PQ decomposition.
-  // Default: dimension/2 if unset (following common practice)
-  // Must divide dimension evenly. Higher m = better accuracy but larger storage.
-  // Typical range: dimension/4 to dimension/2
-  uint32 pq_subvectors = 3;
-  
-  // Bits per PQ code (per subvector).
-  // Default: 8 (256 centroids per subspace, aligns with Milvus)
-  // Only 8 is currently supported for efficiency (1 byte per subvector)
-  uint32 pq_nbits = 4;
-  
-  // ---- Graph Structure Parameters ----
-  
-  // Maximum number of neighbors per node in the proximity graph.
-  // Default: 64 (DiskANN's R parameter)
-  // Higher values improve recall but increase memory and write amplification.
-  // Must balance between search quality and update cost.
-  uint32 graph_degree = 5;
-  
-  // ---- Storage Optimization Parameters ----
-  
-  // Number of PQ codes to pack in a single storage block.
-  // Recommended: 256-512 to keep block size at 24-64KB (optimal for FDB)
-  // Block size = codes_per_block * pq_subvectors bytes
-  uint32 codes_per_block = 6;
-  
-  // ---- Search Parameters (defaults) ----
-  
-  // Default search list size when not specified in query.
-  // Will be overridden to max(search_list, topk) per Milvus behavior
-  uint32 default_search_list = 7;
-  
-  // Maximum nodes to visit during search (safety limit).
-  // Prevents runaway queries on poorly connected graphs.
-  uint32 max_search_visits = 8;
-  
-  // ---- Collection Metadata ----
-  
-  // Timestamp of collection creation
-  google.protobuf.Timestamp created_at = 9;
-  
-  // Timestamp of last configuration update
-  google.protobuf.Timestamp updated_at = 10;
-  
-  // Collection status for operational state
-  enum Status {
-    ACTIVE = 0;       // Normal operations allowed
-    READONLY = 1;     // Only searches allowed, no updates
-    MAINTENANCE = 2;  // Under maintenance, limited operations
-    DISABLED = 3;     // Collection disabled
-  }
-  Status status = 11;
-  
-  // Optional description for human reference
-  optional string description = 12;
+// -----------------------------------------------------------------------------
+// Global index metadata
+// -----------------------------------------------------------------------------
+// Stored once per index (key: (index, "meta") inside the index directory).
+// This is written at index creation and rarely changes.
+message IndexMeta {
+  // Human-readable index name; also used for DirectoryLayer naming.
+  string name = 1;
+
+  // Fixed vector dimensionality (D). Must be positive and immutable across the
+  // lifetime of the index. All inserted vectors MUST have this dimension.
+  int32 dimension = 2;
+
+  // Distance metric used for scoring / search pruning.
+  // - METRIC_L2: Euclidean distance in R^D
+  // - METRIC_COSINE: Cosine similarity (dot product on normalized vectors)
+  enum Metric { METRIC_L2 = 0; METRIC_COSINE = 1; }
+  Metric metric = 3;
+
+  // Maximum number of vectors per segment before it rotates to PENDING.
+  // Typical values: 50k–200k depending on memory and quality targets.
+  int32 max_segment_size = 4;
+
+  // Product Quantization (PQ) configuration:
+  // - m: number of subspaces (must divide dimension)
+  // - k: number of centroids per subspace (commonly 256 → 1 byte per subspace)
+  int32 pq_m = 5;
+  int32 pq_k = 6;
+
+  // Graph configuration:
+  // - graph_degree: target out-degree R for DiskANN-style neighbor graph
+  // - oversample: multiplier of K for candidate collection before exact rerank
+  int32 graph_degree = 7;
+  int32 oversample = 8;
 }
 
-// ========================================================================================
-// PRODUCT QUANTIZATION STRUCTURES
-// ========================================================================================
-
-// Codebook for a single PQ subspace.
-// Contains 2^nbits codewords (centroids), typically 256 for nbits=8.
-// Stored at: /C/{collection}/pq/codebook/{version}/{subspace_index}
-message CodebookSub {
-  // Subspace index [0, pq_subvectors-1]
-  uint32 subspace_index = 1;
-  
-  // Codebook version for tracking rotations
-  uint64 version = 2;
-  
-  // Packed codewords in fp16 format to save space.
-  // Layout: [256 codewords × (dimension/pq_subvectors) dims × 2 bytes]
-  // Using fp16 reduces storage by 50% with minimal accuracy loss.
-  bytes codewords_fp16 = 3;
-  
-  // Statistics for monitoring
-  uint64 trained_on_vectors = 4;  // Number of vectors used for training
-  optional double quantization_error = 5;   // Average reconstruction error
-  google.protobuf.Timestamp created_at = 6;  // Creation timestamp
-}
-
-// Block of PQ codes for efficient batch storage.
-// Groups multiple vectors' PQ codes to minimize read-modify-write operations.
-// Stored at: /C/{collection}/pq/block/{version}/{block_number}
-message PqCodesBlock {
-  // First node ID in this block (inclusive).
-  // Block covers NIDs [block_first_nid, block_first_nid + codes_per_block)
-  uint64 block_first_nid = 1;
-  
-  // Actual number of codes stored (may be less than codes_per_block for last block)
-  uint32 codes_in_block = 2;
-  
-  // Packed PQ codes in row-major order.
-  // Layout: [codes_in_block × pq_subvectors] bytes
-  // Access code for NID n: codes[(n - block_first_nid) * pq_subvectors : ...]
-  bytes codes = 3;
-  
-  // Codebook version these codes were encoded with
-  uint64 codebook_version = 4;
-  
-  // Block version for optimistic concurrency control
-  uint32 block_version = 5;
-  
-  // Timestamp of last modification
-  google.protobuf.Timestamp updated_at = 6;
-  
-  // Optional: Bloom filter for quick NID existence checks (future optimization)
-  optional bytes bloom_filter = 7;
-  
-  // Bitmap tracking which offsets have been written
-  // Each bit represents whether the corresponding offset has valid data
-  optional bytes written_offsets = 8;
-}
-
-// ========================================================================================
-// GRAPH STRUCTURES
-// ========================================================================================
-
-// Adjacency list for a single node in the proximity graph.
-// Stored at: /C/{collection}/graph/node/{node_id}
-message NodeAdjacency {
-  // Node ID this adjacency list belongs to
-  uint64 node_id = 1;
-  
-  // Sorted list of neighbor node IDs.
-  // Maintained invariants:
-  // - Unique (no duplicates)
-  // - Sorted for efficient binary search
-  // - Size ≤ graph_degree (enforced during updates)
-  repeated uint64 neighbors = 2;
-  
-  // Version for optimistic concurrency control.
-  // Incremented on each update to detect concurrent modifications.
-  uint32 version = 3;
-  
-  // Metadata for graph analysis
-  google.protobuf.Timestamp created_at = 4;  // When node was first added
-  google.protobuf.Timestamp updated_at = 5;  // Last modification time
-  optional uint32 in_degree_estimate = 6;    // Approximate number of incoming edges
-  
-  // Node state for soft deletes and maintenance
-  enum State {
-    ACTIVE = 0;      // Normal state, participates in search
-    DELETED = 1;     // Soft deleted, pending cleanup
-    ORPHANED = 2;    // Disconnected from main component
-    REPAIRING = 3;   // Being reconnected by repair process
-  }
-  State state = 7;
-}
-
-// Entry points for search initialization.
-// Multiple strategies ensure robust search even with poor connectivity.
-// Stored at: /C/{collection}/entry
-message EntryList {
-  // Primary entry points (medoids or high-quality representatives).
-  // These are the main seeds for search, typically 32-64 nodes.
-  // Selected via k-means clustering or graph centrality metrics.
-  repeated uint64 primary_entries = 1;
-  
-  // Random sample fallback entries for diversity.
-  // Helps when primary entries are in a local cluster.
-  // Typically 16-32 randomly selected active nodes.
-  repeated uint64 random_entries = 2;
-  
-  // High-degree nodes for good graph coverage.
-  // Nodes with many connections often provide good search starting points.
-  // Typically top 16-32 nodes by degree.
-  repeated uint64 high_degree_entries = 3;
-  
-  // Metadata for entry point quality monitoring
-  google.protobuf.Timestamp updated_at = 4;
-  uint64 version = 5;
-  
-  // Statistics from last refresh
-  optional double avg_degree = 6;           // Average degree of primary entries
-  optional double coverage_estimate = 7;    // Estimated % of graph reachable
-}
-
-// Graph-wide metadata for monitoring and repair.
-// Stored at: /C/{collection}/graph/meta/connectivity
-message GraphMeta {
-  // Connectivity analysis results
-  google.protobuf.Timestamp last_analysis_timestamp = 1;
-  uint32 connected_components = 2;      // Number of disconnected subgraphs
-  uint64 largest_component_size = 3;    // Nodes in main component
-  uint64 total_nodes = 4;              // Total active nodes
-  
-  // Nodes that need repair (disconnected from main component)
-  repeated uint64 orphaned_nodes = 5;
-  
-  // Graph statistics
-  optional double average_degree = 6;
-  optional uint64 total_edges = 7;
-  optional double clustering_coefficient = 8;   // Graph density measure
-  
-  // Repair process state
-  enum RepairState {
-    NOT_NEEDED = 0;     // Graph is well connected
-    SCHEDULED = 1;      // Repair scheduled but not started
-    IN_PROGRESS = 2;    // Repair actively running
-    COMPLETED = 3;      // Repair finished, pending verification
-  }
-  RepairState repair_state = 9;
-  optional google.protobuf.Timestamp repair_started_at = 10;
-  optional google.protobuf.Timestamp repair_completed_at = 11;
-  optional uint32 nodes_repaired = 12;
-}
-
-// ========================================================================================
-message VectorSketch {
-  uint64 node_id = 1;
-  enum SketchType {
-    SIMHASH_256 = 0;      // 256-bit SimHash (locality-sensitive)
-    PCA_PROJECTION = 1;   // First k PCA components  
-    RANDOM_PROJECTION = 2; // Random projection (Johnson-Lindenstrauss)
-    SCALAR_QUANTIZED = 3; // 8-bit scalar quantization
-  }
-  SketchType sketch_type = 2;
-  bytes sketch_data = 3;
-  optional bytes sketch_params = 4;
-  uint64 version = 5;
-  google.protobuf.Timestamp created_at = 6;
-  optional double reconstruction_error = 7;
-}
-
-// ========================================================================================
-// TASK QUEUE MESSAGES
-// ========================================================================================
-
-// PQ-encoded vector data
-message PqEncodedVector {
-  // PQ-encoded vector (already compressed, pq_subvectors bytes)
-  bytes pq_code = 1;
-  
-  // Codebook version used for encoding
-  uint64 codebook_version = 2;
-}
-
-// Raw vector data
-message RawVector {
-  // The original vector values
-  repeated float values = 1;
-}
-
-// Task payload for link operations (graph construction).
-// Enqueued during upsert operations for async processing.
-message LinkTask {
-  // Node ID to link into the graph
-  uint64 node_id = 1;
-  
-  // Either PQ-encoded or raw vector
-  oneof vector_data {
-    PqEncodedVector pq_encoded = 2;
-    RawVector raw_vector = 3;
-  }
-}
-
-// Task payload for unlink operations (node removal).
-// Enqueued during delete operations for async processing.
-message UnlinkTask {
-  // Collection name
-  string collection = 1;
-  
-  // Node ID to remove from graph
-  uint64 node_id = 2;
-  
-  // Whether to also clear PQ codes (hard delete vs soft delete)
-  bool clear_pq_codes = 3;
-  
-  // Task metadata
-  google.protobuf.Timestamp enqueued_at = 4;
-  uint32 retry_count = 5;
-  optional string request_id = 6;
-}
-
-// Task payload for graph repair operations.
-message RepairTask {
-  // Collection name
-  string collection = 1;
-  
-  // Specific nodes to repair (empty = analyze and repair all)
-  repeated uint64 target_nodes = 2;
-  
-  // Repair strategy
-  enum Strategy {
-    RECONNECT_ORPHANS = 0;    // Find and reconnect disconnected nodes
-    REBALANCE_EDGES = 1;      // Redistribute edges for better connectivity
-    FULL_ANALYSIS = 2;        // Complete connectivity analysis and repair
-  }
-  Strategy strategy = 3;
-  
-  // Task metadata
-  google.protobuf.Timestamp enqueued_at = 4;
-  optional string request_id = 5;
-}
-
-// ========================================================================================
-// OPERATIONAL MESSAGES
-// ========================================================================================
-
-// Request to rotate PQ codebooks (admin operation).
-message CodebookRotationRequest {
-  // Collection to rotate
-  string collection = 1;
-  
-  // New codebook version to create
-  uint64 new_version = 2;
-  
-  // Training parameters
-  uint32 training_samples = 3;     // Number of vectors to sample for training
-  uint32 kmeans_iterations = 4;    // K-means iterations per subspace
-  
-  // Migration strategy
-  enum Strategy {
-    LAZY = 0;        // Re-encode on next update only
-    BACKGROUND = 1;  // Re-encode all in background
-    IMMEDIATE = 2;   // Block until all re-encoded
-  }
-  Strategy migration_strategy = 5;
-  
-  // Request metadata
-  optional string request_id = 6;
-  google.protobuf.Timestamp requested_at = 7;
-}
-
-// Status of ongoing codebook rotation.
-message CodebookRotationStatus {
-  // Current state
-  enum State {
-    TRAINING = 0;           // Training new codebooks
-    STAGING = 1;           // Writing new codebooks to storage
-    MIGRATING = 2;         // Re-encoding vectors
-    ACTIVATING = 3;        // Switching to new version
-    COMPLETED = 4;         // Rotation complete
-    FAILED = 5;           // Rotation failed
-  }
-  State state = 1;
-  
-  // Progress tracking
-  uint32 vectors_migrated = 2;
-  uint32 total_vectors = 3;
-  
-  // Timing
-  google.protobuf.Timestamp started_at = 4;
-  optional google.protobuf.Timestamp completed_at = 5;
-  
-  // Error information (if failed)
-  optional string error_message = 6;
-}
-
-// ========================================================================================
-// SEGMENT METADATA
-// ========================================================================================
-
-// Metadata for a write-once segment associated with a single codebook.
+// -----------------------------------------------------------------------------
+// Per-segment metadata
+// -----------------------------------------------------------------------------
+// Stored at: (segments, <segIdStr>, "meta") or equivalent flattened key.
+// Maintains the lifecycle state and counters for a single segment.
 message SegmentMeta {
-  uint64 segment_id = 1;
-  uint32 codebook_version = 2;
-  enum Status { ACTIVE = 0; SEALED = 1; }
-  Status status = 3;
-  google.protobuf.Timestamp created_at = 4;
+  // Segment identifier (0-based, monotonically increasing number).
+  int32 segment_id = 1;
+
+  // Lifecycle state:
+  // - ACTIVE: Accepts inserts; no graph/PQ yet; queries use brute-force.
+  // - PENDING: Sealed for writes; background build (graph + PQ) in progress.
+  // - SEALED: Graph and PQ complete; queries use graph + PQ for pruning.
+  enum State { ACTIVE = 0; PENDING = 1; SEALED = 2; }
+  State state = 2;
+
+  // Number of non-deleted vectors currently in this segment.
+  // For ACTIVE segments, this is the next vec_id to assign.
+  int32 count = 3;
+
+  // Creation time (ms since epoch). Useful for TTL, compaction heuristics, and
+  // operational visibility. Not used in correctness.
+  int64 created_at_ms = 4;
+
+  // Number of vectors marked deleted in this segment. Helps maintenance tasks
+  // (vacuum/compaction) decide when to reclaim space.
+  int64 deleted_count = 5;
 }
 
-// ========================================================================================
-// MONITORING & METRICS
-// ========================================================================================
+// -----------------------------------------------------------------------------
+// Raw vector record stored under segment/vectors
+// -----------------------------------------------------------------------------
+// Keyed under: (segments, <segIdStr>, "vectors", <vecId>)
+// Embeddings are stored in raw form for exact reranking and for ACTIVE search.
+message VectorRecord {
+  // Segment-local identifiers. Together (seg_id, vec_id) uniquely identify a
+  // record. Global IDs, if needed externally, can be encoded via Tuple.
+  int32 seg_id = 1;
+  int32 vec_id = 2;
 
-// Collection-level statistics for monitoring.
-// Stored at: /C/{collection}/meta/stats
-message CollectionStats {
-  // Size metrics
-  uint64 total_vectors = 1;
-  uint64 active_vectors = 2;       // Excluding deleted
-  uint64 deleted_vectors = 3;      // Soft deleted, pending cleanup
-  
-  // Graph metrics
-  uint64 total_edges = 4;
-  double average_degree = 5;
-  uint32 connected_components = 6;
-  double graph_connectivity = 7;   // Percentage in main component
-  
-  // Storage metrics
-  uint64 pq_blocks_count = 8;
-  uint64 pq_storage_bytes = 9;
-  uint64 graph_storage_bytes = 10;
-  uint64 sketch_storage_bytes = 11;
-  
-  // Quality metrics
-  optional double estimated_recall_at_10 = 12;  // Estimated based on graph structure
-  optional double pq_quantization_error = 13;   // Average across all subspaces
-  
-  // Update tracking
-  google.protobuf.Timestamp last_updated = 14;
-  uint32 update_interval_seconds = 15;
+  // Packed little-endian float32 array of length = IndexMeta.dimension.
+  // For cosine, callers should either pre-normalize vectors or the query path
+  // should normalize on read before computing dot products.
+  bytes embedding = 3;
+
+  // Tombstone flag. True indicates the record is logically deleted. Adjacency
+  // lists are not immediately updated; queries must filter deleted results.
+  bool deleted = 4;
+
+  // Optional application payload (opaque bytes). Size should be modest — for
+  // large documents/metadata, store elsewhere keyed by (seg_id, vec_id).
+  bytes payload = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Product Quantization (codebook)
+// -----------------------------------------------------------------------------
+// Stored once per SEALED segment:
+//   (segments, <segIdStr>, "pq", "codebook")
+// Each entry in `centroids` is a packed float32 array for one subspace that
+// concatenates its K centroids (size = K * (D/M)).
+message PQCodebook {
+  // Number of subspaces (M). Must divide IndexMeta.dimension.
+  int32 m = 1;
+  // Centroids per subspace (K). Typically 256.
+  int32 k = 2;
+  // Length = m. Each element packs K centroids for one subspace.
+  repeated bytes centroids = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Graph adjacency (DiskANN-style)
+// -----------------------------------------------------------------------------
+// Stored per vector for SEALED segments:
+//   (segments, <segIdStr>, "graph", <vecId>)
+// Contains IDs of neighbor vectors (segment-local). Degree is ~IndexMeta.graph_degree.
+message Adjacency {
+  // Neighbor IDs (segment-local vec_id). Order is implementation-defined; often
+  // by increasing approximate proximity during construction. Consumers may
+  // reorder or trim during search.
+  repeated int32 neighbor_ids = 1;
+}
+
+// -----------------------------------------------------------------------------
+// Task payload for background segment build
+// -----------------------------------------------------------------------------
+// Enqueued when a segment transitions from ACTIVE to PENDING.
+message BuildTask {
+  // Segment id that has been sealed (PENDING) and needs graph/PQ build.
+  int32 seg_id = 1;
 }
