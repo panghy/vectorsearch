@@ -119,52 +119,59 @@ public class SegmentBuildService {
       cb.addCentroids(ByteString.copyFrom(bb.array()));
     }
 
-    // 3) Prepare writes: codebook + codes + adjacency per vecId
-    List<Runnable> batches = new ArrayList<>();
-    List<Runnable> current = new ArrayList<>();
-
-    // codebook write
-    current.add(() -> db.run(tr -> {
-      tr.set(dirs.segmentKeys(segStr).pqCodebookKey(), cb.build().toByteArray());
-      return null;
-    }));
+    // 3) Persist: codebook + codes + adjacency per vecId
+    // Use FDB's approximate transaction size to split work before hitting the 10 MB limit.
+    final long TXN_LIMIT = 10L * 1024 * 1024; // 10 MB
+    final long SOFT_LIMIT = (long) (TXN_LIMIT * 0.9); // leave ~10% headroom
+    final int CHECK_EVERY = 32; // frequency of size checks to amortize overhead
 
     // Precompute adjacency using raw vectors
-    int[][] neighbors = buildL2Neighbors(
+    final int[][] neighbors = buildL2Neighbors(
         vectors.toArray(new float[0][]),
         Math.max(0, Math.min(config.getGraphDegree(), Math.max(0, vectors.size() - 1))));
+    final float[][][] cCentroids = centroids;
+    final List<float[]> vVectors = vectors;
 
-    for (int i = 0; i < kvs.size(); i++) {
-      KeyValue kv = kvs.get(i);
-      // vecId is last tuple element for prefix (segStr, "vectors", vecId)
-      long vecId = vectorsPrefixUnpackId(dirs, kv.getKey());
-      float[] v = vectors.get(i);
-      byte[] codes = PqEncoder.encode(centroids, v);
-      current.add(() -> db.run(tr -> {
+    int idx = 0;
+    boolean wroteCodebook = false;
+    while (idx < kvs.size() || !wroteCodebook) {
+      final int start = idx;
+      final boolean writeCb = !wroteCodebook;
+      int next = db.run(tr -> {
+        // Optionally write codebook in this transaction
+        if (writeCb) {
+          tr.set(dirs.segmentKeys(segStr).pqCodebookKey(), cb.build().toByteArray());
+        }
         FdbDirectories.SegmentKeys sk = dirs.segmentKeys(segStr);
-        tr.set(sk.pqCodeKey((int) vecId), codes);
-        // Adjacency with nearest neighbors
-        Adjacency adj = Adjacency.newBuilder()
-            .addAllNeighborIds(java.util.Arrays.stream(neighbors[(int) vecId])
-                .boxed()
-                .toList())
-            .build();
-        tr.set(sk.graphKey((int) vecId), adj.toByteArray());
-        return null;
-      }));
-      if (current.size() >= 500) { // commit batch
-        batches.addAll(current);
-        current = new ArrayList<>();
-      }
+        int wrote = 0;
+        int j = start;
+        for (; j < kvs.size(); j++) {
+          KeyValue kv = kvs.get(j);
+          long vecId = vectorsPrefixUnpackId(dirs, kv.getKey());
+          byte[] codes = PqEncoder.encode(cCentroids, vVectors.get(j));
+          tr.set(sk.pqCodeKey((int) vecId), codes);
+          Adjacency adj = Adjacency.newBuilder()
+              .addAllNeighborIds(java.util.Arrays.stream(neighbors[(int) vecId])
+                  .boxed()
+                  .toList())
+              .build();
+          tr.set(sk.graphKey((int) vecId), adj.toByteArray());
+          wrote++;
+          if ((wrote % CHECK_EVERY) == 0) {
+            Long approx = tr.getApproximateSize().join();
+            if (approx != null && approx >= SOFT_LIMIT) {
+              j++; // include this write and split
+              break;
+            }
+          }
+        }
+        return j;
+      });
+      wroteCodebook = true;
+      idx = next;
     }
-    batches.addAll(current);
 
-    // 4) Execute batches sequentially
-    CompletableFuture<Void> chain = completedFuture(null);
-    for (Runnable r : batches) {
-      chain = chain.thenRun(r);
-    }
-    return chain;
+    return completedFuture(null);
   }
 
   private long vectorsPrefixUnpackId(FdbDirectories.IndexDirectories dirs, byte[] key) {
