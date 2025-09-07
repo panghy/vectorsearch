@@ -63,7 +63,7 @@ public class SegmentBuildService {
    * @param segId segment identifier
    * @return future that completes when the build is persisted and the segment is sealed
    */
-  public CompletableFuture<Void> build(int segId) {
+  public CompletableFuture<Void> build(long segId) {
     Database db = config.getDatabase();
     String segStr = String.format("%06d", segId);
     FdbDirectories.IndexDirectories dirs = indexDirs;
