@@ -114,6 +114,7 @@ public final class MaintenanceService {
     return db.runAsync(tr -> {
           int wrote = 0;
           int removedThis = 0;
+          final int cadence = Math.max(1, checkEvery);
           int i;
           for (i = j; i < kvs.size(); i++) {
             KeyValue kv = kvs.get(i);
@@ -131,7 +132,7 @@ public final class MaintenanceService {
               throw new RuntimeException(e);
             }
             wrote++;
-            if ((wrote % Math.max(1, checkEvery)) == 0) {
+            if ((wrote % cadence) == 0) {
               Long size = tr.getApproximateSize().join();
               if (size != null && size >= softLimit) {
                 return completedFuture(new Res(i + 1, removedAcc + removedThis));
@@ -140,7 +141,7 @@ public final class MaintenanceService {
           }
           return completedFuture(new Res(i, removedAcc + removedThis));
         })
-        .thenCompose(res -> deleteSome(db, sk, kvs, res.next, res.removed, 0, softLimit));
+        .thenCompose(res -> deleteSome(db, sk, kvs, res.next, res.removed, checkEvery, softLimit));
   }
 
   private CompletableFuture<Void> updateMetaAfterVacuum(
