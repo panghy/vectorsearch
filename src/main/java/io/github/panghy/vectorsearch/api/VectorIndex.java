@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch.api;
 
+import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
@@ -288,7 +289,7 @@ public class VectorIndex implements AutoCloseable {
     byte[] maxK = dirs.maxSegmentKey();
     return db.readAsync(tr -> tr.get(maxK).thenCompose(maxB -> {
       if (maxB == null) return completedFuture(List.of());
-      int maxSeg = (int) Tuple.fromBytes(maxB).getLong(0);
+      int maxSeg = (int) decodeInt(maxB);
       // Batch get meta keys for [0..maxSeg]
       List<byte[]> keys = new ArrayList<>(maxSeg + 1);
       for (int i = 0; i <= maxSeg; i++)

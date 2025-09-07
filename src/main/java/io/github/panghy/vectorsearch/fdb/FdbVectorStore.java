@@ -2,12 +2,14 @@ package io.github.panghy.vectorsearch.fdb;
 
 import static com.apple.foundationdb.async.AsyncUtil.tag;
 import static com.apple.foundationdb.async.AsyncUtil.whileTrue;
+import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
+import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
-import com.apple.foundationdb.tuple.Tuple;
+import com.apple.foundationdb.tuple.ByteArrayUtil;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.taskqueue.TaskQueue;
@@ -100,8 +102,8 @@ public final class FdbVectorStore {
         if (curSegV.join() == null) {
           // initialize first segment 0 as ACTIVE
           int segId = 0;
-          tr.set(curSegK, Tuple.from(segId).pack());
-          tr.set(maxSegK, Tuple.from(segId).pack());
+          tr.set(curSegK, encodeInt(segId));
+          tr.set(maxSegK, encodeInt(segId));
           SegmentMeta sm = SegmentMeta.newBuilder()
               .setSegmentId(segId)
               .setState(SegmentMeta.State.ACTIVE)
@@ -154,10 +156,9 @@ public final class FdbVectorStore {
   /**
    * Returns the current ACTIVE segment id.
    */
-  public CompletableFuture<Integer> getCurrentSegment() {
+  public CompletableFuture<Long> getCurrentSegment() {
     Database db = config.getDatabase();
-    return db.readAsync(tr -> tr.get(indexDirs.currentSegmentKey())
-        .thenApply(v -> (int) Tuple.fromBytes(v).getLong(0)));
+    return db.readAsync(tr -> tr.get(indexDirs.currentSegmentKey()).thenApply(ByteArrayUtil::decodeInt));
   }
 
   /**
@@ -198,7 +199,7 @@ public final class FdbVectorStore {
                 batch.clear();
                 byte[] curSegK = indexDirs.currentSegmentKey();
                 return tr.get(curSegK).thenCompose(curSegV -> {
-                  int segId = (int) Tuple.fromBytes(curSegV).getLong(0);
+                  int segId = Math.toIntExact(decodeInt(curSegV));
                   String segStr = segIdStr(segId);
                   FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segStr);
                   return tr.get(sk.metaKey()).thenCompose(segMetaBytes -> {
@@ -226,10 +227,8 @@ public final class FdbVectorStore {
                           .build();
                       tr.set(sk.metaKey(), pending.toByteArray());
                       int nextSeg = segId + 1;
-                      tr.set(curSegK, Tuple.from(nextSeg).pack());
-                      tr.set(
-                          indexDirs.maxSegmentKey(),
-                          Tuple.from(nextSeg).pack());
+                      tr.set(curSegK, encodeInt(nextSeg));
+                      tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
                       String nextStr = segIdStr(nextSeg);
                       SegmentMeta nextMeta = SegmentMeta.newBuilder()
                           .setSegmentId(nextSeg)
@@ -291,14 +290,8 @@ public final class FdbVectorStore {
                                   .build();
                               tr.set(sk.metaKey(), pending.toByteArray());
                               int nextSeg = segId + 1;
-                              tr.set(
-                                  curSegK,
-                                  Tuple.from(nextSeg)
-                                      .pack());
-                              tr.set(
-                                  indexDirs.maxSegmentKey(),
-                                  Tuple.from(nextSeg)
-                                      .pack());
+                              tr.set(curSegK, encodeInt(nextSeg));
+                              tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
                               String nextStr = segIdStr(nextSeg);
                               SegmentMeta nextMeta = SegmentMeta.newBuilder()
                                   .setSegmentId(nextSeg)
@@ -440,7 +433,7 @@ public final class FdbVectorStore {
 
   // listSegmentIds intentionally omitted in v1; DirectoryLayer listing is non-trivial and not needed yet.
 
-  private static String segIdStr(int segId) {
+  private static String segIdStr(long segId) {
     return String.format("%06d", segId);
   }
 }

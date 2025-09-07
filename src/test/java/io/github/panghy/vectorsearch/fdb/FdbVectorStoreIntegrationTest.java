@@ -97,7 +97,7 @@ class FdbVectorStoreIntegrationTest {
     assertThat(seg0Meta).isNotNull();
 
     // Initial segment must be 0 and ACTIVE
-    int cur = store.getCurrentSegment().get(5, TimeUnit.SECONDS);
+    long cur = store.getCurrentSegment().get(5, TimeUnit.SECONDS);
     assertThat(cur).isEqualTo(0);
     SegmentMeta seg0 = store.getSegmentMeta(0).get(5, TimeUnit.SECONDS);
     assertThat(seg0.getState()).isEqualTo(SegmentMeta.State.ACTIVE);
@@ -120,7 +120,7 @@ class FdbVectorStoreIntegrationTest {
     assertThat(id2[0]).isEqualTo(1);
     assertThat(id2[1]).isEqualTo(0);
 
-    int currentAfter = store.getCurrentSegment().get(5, TimeUnit.SECONDS);
+    long currentAfter = store.getCurrentSegment().get(5, TimeUnit.SECONDS);
     assertThat(currentAfter).isEqualTo(1);
     SegmentMeta seg0Final = store.getSegmentMeta(0).get(5, TimeUnit.SECONDS);
     assertThat(seg0Final.getState()).isEqualTo(SegmentMeta.State.PENDING);

@@ -9,7 +9,7 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
-import com.apple.foundationdb.tuple.Tuple;
+import com.apple.foundationdb.tuple.ByteArrayUtil;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.TaskQueues;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
@@ -58,7 +58,7 @@ class FdbVectorStoreMetaSmokeTest {
     FdbVectorStore store = new FdbVectorStore(cfg, dirs, queue);
     store.createOrOpenIndex().get(5, TimeUnit.SECONDS);
 
-    int cur = store.getCurrentSegment().get(5, TimeUnit.SECONDS);
+    long cur = store.getCurrentSegment().get(5, TimeUnit.SECONDS);
     assertThat(cur).isEqualTo(0);
     var meta = store.getSegmentMeta(0).get(5, TimeUnit.SECONDS);
     assertThat(meta.getSegmentId()).isEqualTo(0);
@@ -86,9 +86,9 @@ class FdbVectorStoreMetaSmokeTest {
     store.add(new float[] {4, 3, 2, 1}, null).get(5, TimeUnit.SECONDS);
 
     byte[] maxBytes = db.readAsync(tr -> tr.get(dirs.maxSegmentKey())).get(5, TimeUnit.SECONDS);
-    long maxSeg = Tuple.fromBytes(maxBytes).getLong(0);
+    long maxSeg = ByteArrayUtil.decodeInt(maxBytes);
     assertThat(maxSeg).isGreaterThanOrEqualTo(1);
-    int current = store.getCurrentSegment().get(5, TimeUnit.SECONDS);
+    long current = store.getCurrentSegment().get(5, TimeUnit.SECONDS);
     assertThat(current).isGreaterThanOrEqualTo(1);
   }
 }
