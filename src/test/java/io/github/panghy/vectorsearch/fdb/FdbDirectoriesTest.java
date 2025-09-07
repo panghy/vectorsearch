@@ -4,12 +4,9 @@ package io.github.panghy.vectorsearch.fdb;
  * Unit tests for FdbDirectories key helpers and real packing/unpacking behavior.
  */
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
-import com.apple.foundationdb.directory.DirectorySubspace;
 import com.apple.foundationdb.tuple.Tuple;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -20,27 +17,38 @@ import org.junit.jupiter.api.Test;
 class FdbDirectoriesTest {
 
   @Test
-  void helperKeyPackers() {
-    // Validate IndexDirectories exposes key helpers and SegmentKeys builds flattened keys
-    // Use Mockito to mock DirectorySubspace pack behavior
-    DirectorySubspace idx = mock(DirectorySubspace.class);
-    DirectorySubspace segs = mock(DirectorySubspace.class);
-    when(idx.pack(Tuple.from("meta"))).thenReturn(new byte[] {1});
-    when(idx.pack(Tuple.from("currentSegment"))).thenReturn(new byte[] {2});
-    when(segs.pack(Tuple.from("000123", "meta"))).thenReturn(new byte[] {3});
-    when(segs.pack(Tuple.from("000123", "vectors", 1))).thenReturn(new byte[] {4});
-    when(segs.pack(Tuple.from("000123", "pq", "codebook"))).thenReturn(new byte[] {5});
-    when(segs.pack(Tuple.from("000123", "pq", "codes", 1))).thenReturn(new byte[] {6});
-    when(segs.pack(Tuple.from("000123", "graph", 1))).thenReturn(new byte[] {7});
-    FdbDirectories.IndexDirectories dirs = new FdbDirectories.IndexDirectories(idx, segs, idx);
-    assertThat(dirs.metaKey()).isNotNull();
-    assertThat(dirs.currentSegmentKey()).isNotNull();
-    var sk = dirs.segmentKeys("000123");
-    assertThat(sk.metaKey()).isNotNull();
-    assertThat(sk.vectorKey(1)).isNotNull();
-    assertThat(sk.pqCodebookKey()).isNotNull();
-    assertThat(sk.pqCodeKey(1)).isNotNull();
-    assertThat(sk.graphKey(1)).isNotNull();
+  void helperKeyPackers() throws Exception {
+    var db = FDB.selectAPIVersion(730).open();
+    var root = db.runAsync(tr -> DirectoryLayer.getDefault()
+            .createOrOpen(
+                tr,
+                List.of("vs-keys-pack", UUID.randomUUID().toString()),
+                "vectorsearch".getBytes(StandardCharsets.UTF_8)))
+        .get(5, TimeUnit.SECONDS);
+    try {
+      var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+      // Index-level keys
+      Tuple tMeta = dirs.indexDir().unpack(dirs.metaKey());
+      Tuple tCur = dirs.indexDir().unpack(dirs.currentSegmentKey());
+      Tuple tMax = dirs.indexDir().unpack(dirs.maxSegmentKey());
+      assertThat(tMeta.getString(0)).isEqualTo("meta");
+      assertThat(tCur.getString(0)).isEqualTo("currentSegment");
+      assertThat(tMax.getString(0)).isEqualTo(FdbPathUtil.MAX_SEGMENT);
+
+      // Segment-level helpers
+      var sk = dirs.segmentKeys("000123");
+      assertThat(sk.metaKey()).isNotNull();
+      assertThat(sk.vectorKey(1)).isNotNull();
+      assertThat(sk.pqCodebookKey()).isNotNull();
+      assertThat(sk.pqCodeKey(1)).isNotNull();
+      assertThat(sk.graphKey(1)).isNotNull();
+    } finally {
+      db.run(tr -> {
+        root.remove(tr);
+        return null;
+      });
+      db.close();
+    }
   }
 
   @Test
