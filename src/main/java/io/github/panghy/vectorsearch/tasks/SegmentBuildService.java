@@ -121,10 +121,10 @@ public class SegmentBuildService {
     }
 
     // 3) Persist: codebook + codes + adjacency per vecId
-    // Use FDB's approximate transaction size to split work before hitting the 10 MB limit.
-    final long TXN_LIMIT = 10L * 1024 * 1024; // 10 MB
-    final long SOFT_LIMIT = (long) (TXN_LIMIT * 0.9); // leave ~10% headroom
-    final int CHECK_EVERY = 32; // frequency of size checks to amortize overhead
+    // Use FDB's approximate transaction size to split work before hitting the configured limit.
+    final long TXN_LIMIT = config.getBuildTxnLimitBytes();
+    final long SOFT_LIMIT = (long) (TXN_LIMIT * config.getBuildTxnSoftLimitRatio());
+    final int CHECK_EVERY = config.getBuildSizeCheckEvery();
 
     // Precompute adjacency using raw vectors
     final int[][] neighbors = buildL2Neighbors(

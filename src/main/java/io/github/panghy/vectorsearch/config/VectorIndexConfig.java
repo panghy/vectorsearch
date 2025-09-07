@@ -44,6 +44,11 @@ public final class VectorIndexConfig {
   private final java.util.Map<String, String> metricAttributes;
   private final boolean prefetchCodebooksEnabled;
 
+  // Build batching/size control
+  private final long buildTxnLimitBytes;
+  private final double buildTxnSoftLimitRatio;
+  private final int buildSizeCheckEvery;
+
   private VectorIndexConfig(Builder b) {
     this.database = Objects.requireNonNull(b.database, "database must not be null");
     this.indexDir = Objects.requireNonNull(b.indexDir, "indexDir must not be null");
@@ -82,6 +87,14 @@ public final class VectorIndexConfig {
     this.adjacencyBatchLoadSize = b.adjacencyBatchLoadSize;
     this.metricAttributes = java.util.Map.copyOf(b.metricAttributes);
     this.prefetchCodebooksEnabled = b.prefetchCodebooksEnabled;
+
+    if (b.buildTxnLimitBytes <= 0) throw new IllegalArgumentException("buildTxnLimitBytes must be positive");
+    if (!(b.buildTxnSoftLimitRatio > 0.0 && b.buildTxnSoftLimitRatio < 1.0))
+      throw new IllegalArgumentException("buildTxnSoftLimitRatio must be in (0,1)");
+    if (b.buildSizeCheckEvery <= 0) throw new IllegalArgumentException("buildSizeCheckEvery must be positive");
+    this.buildTxnLimitBytes = b.buildTxnLimitBytes;
+    this.buildTxnSoftLimitRatio = b.buildTxnSoftLimitRatio;
+    this.buildSizeCheckEvery = b.buildSizeCheckEvery;
   }
 
   private static String requireNonBlank(String s, String name) {
@@ -185,6 +198,21 @@ public final class VectorIndexConfig {
     return prefetchCodebooksEnabled;
   }
 
+  /** Upper bound for FDB transaction size (bytes) used by segment build batching. */
+  public long getBuildTxnLimitBytes() {
+    return buildTxnLimitBytes;
+  }
+
+  /** Ratio of limit where we split (e.g., 0.9 => leave 10% headroom). */
+  public double getBuildTxnSoftLimitRatio() {
+    return buildTxnSoftLimitRatio;
+  }
+
+  /** Writes between approximate-size checks during build batching. */
+  public int getBuildSizeCheckEvery() {
+    return buildSizeCheckEvery;
+  }
+
   /** Creates a new builder for {@link VectorIndexConfig}. */
   public static Builder builder(Database database, DirectorySubspace indexDir) {
     return new Builder(database, indexDir);
@@ -211,6 +239,9 @@ public final class VectorIndexConfig {
     private int adjacencyBatchLoadSize = 10_000;
     private java.util.Map<String, String> metricAttributes = new java.util.HashMap<>();
     private boolean prefetchCodebooksEnabled = true;
+    private long buildTxnLimitBytes = 10L * 1024 * 1024; // 10 MB
+    private double buildTxnSoftLimitRatio = 0.9; // leave 10% headroom
+    private int buildSizeCheckEvery = 32;
 
     private Builder(Database database, DirectorySubspace indexDir) {
       this.database = database;
@@ -317,6 +348,24 @@ public final class VectorIndexConfig {
     /** Enables/disables query-time codebook prefetch for SEALED segments. */
     public Builder prefetchCodebooksEnabled(boolean enabled) {
       this.prefetchCodebooksEnabled = enabled;
+      return this;
+    }
+
+    /** Sets the assumed FDB transaction hard limit in bytes (default 10MB). */
+    public Builder buildTxnLimitBytes(long bytes) {
+      this.buildTxnLimitBytes = bytes;
+      return this;
+    }
+
+    /** Sets the soft ratio of the limit where we split the build write (default 0.9). */
+    public Builder buildTxnSoftLimitRatio(double ratio) {
+      this.buildTxnSoftLimitRatio = ratio;
+      return this;
+    }
+
+    /** Sets how many writes between approximate-size checks during build (default 32). */
+    public Builder buildSizeCheckEvery(int n) {
+      this.buildSizeCheckEvery = n;
       return this;
     }
 
