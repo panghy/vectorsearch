@@ -3,6 +3,7 @@ package io.github.panghy.vectorsearch.tasks;
 import com.google.protobuf.ByteString;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.vectorsearch.proto.BuildTask;
+import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import java.nio.charset.StandardCharsets;
 
 /** Utility TaskQueue serializers for {@link BuildTask} and String keys. */
@@ -46,6 +47,24 @@ public final class ProtoSerializers {
         return bytes == null ? BuildTask.getDefaultInstance() : BuildTask.parseFrom(bytes);
       } catch (com.google.protobuf.InvalidProtocolBufferException e) {
         throw new IllegalArgumentException("Failed to parse BuildTask", e);
+      }
+    }
+  }
+
+  /** Protobuf serializer for {@link MaintenanceTask} payloads. */
+  public static final class MaintenanceTaskSerializer implements TaskQueueConfig.TaskSerializer<MaintenanceTask> {
+    @Override
+    public ByteString serialize(MaintenanceTask value) {
+      if (value == null) return ByteString.EMPTY;
+      return value.toByteString();
+    }
+
+    @Override
+    public MaintenanceTask deserialize(ByteString bytes) {
+      try {
+        return bytes == null ? MaintenanceTask.getDefaultInstance() : MaintenanceTask.parseFrom(bytes);
+      } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+        throw new IllegalArgumentException("Failed to parse MaintenanceTask", e);
       }
     }
   }

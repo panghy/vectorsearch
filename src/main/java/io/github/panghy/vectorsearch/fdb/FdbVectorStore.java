@@ -1,5 +1,13 @@
 package io.github.panghy.vectorsearch.fdb;
 
+import static com.apple.foundationdb.async.AsyncUtil.tag;
+import static com.apple.foundationdb.async.AsyncUtil.whileTrue;
+import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
+import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
+import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.CompletableFuture.allOf;
+import static java.util.concurrent.CompletableFuture.completedFuture;
+
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.tuple.ByteArrayUtil;
@@ -12,21 +20,15 @@ import io.github.panghy.vectorsearch.proto.IndexMeta;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import io.github.panghy.vectorsearch.proto.VectorRecord;
 import io.github.panghy.vectorsearch.util.FloatPacker;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import static com.apple.foundationdb.async.AsyncUtil.tag;
-import static com.apple.foundationdb.async.AsyncUtil.whileTrue;
-import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
-import static com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt;
-import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.CompletableFuture.completedFuture;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Directory-based storage operations for ACTIVE segment CRUD and rotation.
@@ -76,7 +78,7 @@ public final class FdbVectorStore {
       CompletableFuture<byte[]> metaV = tr.get(metaK);
       CompletableFuture<byte[]> curSegV = tr.get(curSegK);
       CompletableFuture<byte[]> maxSegV = tr.get(maxSegK);
-      return CompletableFuture.allOf(metaV, curSegV, maxSegV).thenCompose(v -> {
+      return allOf(metaV, curSegV, maxSegV).thenCompose(v -> {
         if (metaV.join() == null) {
           IndexMeta meta = IndexMeta.newBuilder()
               .setDimension(config.getDimension())
@@ -134,7 +136,7 @@ public final class FdbVectorStore {
     }
     if (existing.getMaxSegmentSize() != config.getMaxSegmentSize()) {
       throw new IllegalArgumentException("maxSegmentSize mismatch: existing=" + existing.getMaxSegmentSize()
-                                         + ", requested=" + config.getMaxSegmentSize());
+          + ", requested=" + config.getMaxSegmentSize());
     }
     if (existing.getPqM() != config.getPqM()) {
       throw new IllegalArgumentException(
@@ -146,11 +148,11 @@ public final class FdbVectorStore {
     }
     if (existing.getGraphDegree() != config.getGraphDegree()) {
       throw new IllegalArgumentException("graphDegree mismatch: existing=" + existing.getGraphDegree()
-                                         + ", requested=" + config.getGraphDegree());
+          + ", requested=" + config.getGraphDegree());
     }
     if (existing.getOversample() != config.getOversample()) {
       throw new IllegalArgumentException("oversample mismatch: existing=" + existing.getOversample()
-                                         + ", requested=" + config.getOversample());
+          + ", requested=" + config.getOversample());
     }
   }
 
@@ -174,7 +176,7 @@ public final class FdbVectorStore {
    * @return future with [segmentId, vectorId]
    */
   public CompletableFuture<int[]> add(float[] embedding, byte[] payload) {
-    return addBatch(new float[][]{embedding}, new byte[][]{payload}).thenApply(ids -> ids.get(0));
+    return addBatch(new float[][] {embedding}, new byte[][] {payload}).thenApply(ids -> ids.get(0));
   }
 
   /**
@@ -247,7 +249,7 @@ public final class FdbVectorStore {
                           nextMeta.toByteArray());
                       LOGGER.debug(
                           "Rotated segment: {} -> {} (sealed PENDING seg {}), enqueuing"
-                          + " build task",
+                              + " build task",
                           segId,
                           nextSeg,
                           segId);
@@ -256,21 +258,21 @@ public final class FdbVectorStore {
                       int toWrite = Math.min(remaining, Math.max(capacity, 0));
                       // Use approximate transaction size to limit writes in this txn.
                       long softLimit = (long) (config.getBuildTxnLimitBytes()
-                                               * config.getBuildTxnSoftLimitRatio());
+                          * config.getBuildTxnSoftLimitRatio());
                       int checkEvery = config.getBuildSizeCheckEvery();
                       List<int[]> local = new ArrayList<>();
                       return writeSomeVectors(
-                          tr,
-                          sk,
-                          segId,
-                          count,
-                          pos.get(),
-                          toWrite,
-                          embeddings,
-                          payloads,
-                          checkEvery,
-                          softLimit,
-                          local)
+                              tr,
+                              sk,
+                              segId,
+                              count,
+                              pos.get(),
+                              toWrite,
+                              embeddings,
+                              payloads,
+                              checkEvery,
+                              softLimit,
+                              local)
                           .thenCompose(wroteN -> {
                             // Update meta with actual written count.
                             SegmentMeta updated = sm.toBuilder()
@@ -310,7 +312,7 @@ public final class FdbVectorStore {
                                   nextMeta.toByteArray());
                               LOGGER.debug(
                                   "Rotated segment: {} -> {} (sealed PENDING seg"
-                                  + " {}), enqueuing build task",
+                                      + " {}), enqueuing build task",
                                   segId,
                                   nextSeg,
                                   segId);
@@ -331,6 +333,69 @@ public final class FdbVectorStore {
               });
         }),
         assigned);
+  }
+
+  /** Marks a single vector as deleted and updates segment counters. */
+  public CompletableFuture<Void> delete(int segId, int vecId) {
+    return deleteBatch(new int[][] {{segId, vecId}});
+  }
+
+  /** Batch delete: each element is [segId, vecId]. */
+  public CompletableFuture<Void> deleteBatch(int[][] ids) {
+    if (ids == null || ids.length == 0) return completedFuture(null);
+    Database db = config.getDatabase();
+    // Group by segment to update SegmentMeta efficiently
+    Map<Integer, List<Integer>> bySeg = new HashMap<>();
+    for (int[] id : ids)
+      bySeg.computeIfAbsent(id[0], k -> new ArrayList<>()).add(id[1]);
+    List<CompletableFuture<Void>> writes = new ArrayList<>();
+    for (var e : bySeg.entrySet()) {
+      int segId = e.getKey();
+      List<Integer> vecIds = e.getValue();
+      writes.add(db.runAsync(tr -> {
+        String segStr = segIdStr(segId);
+        FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segStr);
+        // Load meta
+        return tr.get(sk.metaKey()).thenCompose(metaBytes -> {
+          try {
+            SegmentMeta sm = SegmentMeta.parseFrom(metaBytes);
+            // Gather reads for the ids
+            List<CompletableFuture<byte[]>> reads = new ArrayList<>();
+            for (int vId : vecIds) reads.add(tr.get(sk.vectorKey(vId)));
+            return allOf(reads.toArray(CompletableFuture[]::new)).thenApply($ -> {
+              int dec = 0;
+              int incDel = 0;
+              for (int i = 0; i < vecIds.size(); i++) {
+                byte[] bytes = reads.get(i).join();
+                if (bytes == null) continue;
+                try {
+                  VectorRecord rec = VectorRecord.parseFrom(bytes);
+                  if (!rec.getDeleted()) {
+                    VectorRecord updated =
+                        rec.toBuilder().setDeleted(true).build();
+                    tr.set(sk.vectorKey(vecIds.get(i)), updated.toByteArray());
+                    dec++;
+                    incDel++;
+                  }
+                } catch (InvalidProtocolBufferException ex) {
+                  throw new RuntimeException(ex);
+                }
+              }
+              // Update meta with computed deltas
+              SegmentMeta updated = sm.toBuilder()
+                  .setCount(Math.max(0, sm.getCount() - dec))
+                  .setDeletedCount(Math.max(0, sm.getDeletedCount() + incDel))
+                  .build();
+              tr.set(sk.metaKey(), updated.toByteArray());
+              return null;
+            });
+          } catch (InvalidProtocolBufferException ex) {
+            throw new RuntimeException(ex);
+          }
+        });
+      }));
+    }
+    return allOf(writes.toArray(CompletableFuture[]::new));
   }
 
   private CompletableFuture<Integer> writeSomeVectors(
@@ -387,7 +452,7 @@ public final class FdbVectorStore {
           .setPayload(p == null ? ByteString.EMPTY : ByteString.copyFrom(p))
           .build();
       tr.set(sk.vectorKey(startVecCount + i), rec.toByteArray());
-      outIds.add(new int[]{segId, startVecCount + i});
+      outIds.add(new int[] {segId, startVecCount + i});
       if (((i + 1) % Math.max(1, checkEvery)) == 0) {
         int nextCount = i + 1;
         return tr.getApproximateSize().thenCompose(sz -> {

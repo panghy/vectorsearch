@@ -4,6 +4,8 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.directory.DirectorySubspace;
 import java.time.Duration;
 import java.time.InstantSource;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -34,6 +36,8 @@ public final class VectorIndexConfig {
 
   private final int estimatedWorkerCount;
   private final int localWorkerThreads;
+  private final int localMaintenanceWorkerThreads;
+  private final double vacuumMinDeletedRatio;
   private final Duration defaultTtl;
   private final Duration defaultThrottle;
   private final InstantSource instantSource;
@@ -41,7 +45,7 @@ public final class VectorIndexConfig {
   // Batch sizes for async cache bulk loads
   private final int codebookBatchLoadSize;
   private final int adjacencyBatchLoadSize;
-  private final java.util.Map<String, String> metricAttributes;
+  private final Map<String, String> metricAttributes;
   private final boolean prefetchCodebooksEnabled;
 
   // Build batching/size control
@@ -72,6 +76,12 @@ public final class VectorIndexConfig {
     this.estimatedWorkerCount = b.estimatedWorkerCount;
     if (b.localWorkerThreads < 0) throw new IllegalArgumentException("localWorkerThreads must be >= 0");
     this.localWorkerThreads = b.localWorkerThreads;
+    if (b.localMaintenanceWorkerThreads < 0)
+      throw new IllegalArgumentException("localMaintenanceWorkerThreads must be >= 0");
+    this.localMaintenanceWorkerThreads = b.localMaintenanceWorkerThreads;
+    if (!(b.vacuumMinDeletedRatio >= 0.0 && b.vacuumMinDeletedRatio <= 1.0))
+      throw new IllegalArgumentException("vacuumMinDeletedRatio must be in [0,1]");
+    this.vacuumMinDeletedRatio = b.vacuumMinDeletedRatio;
 
     this.defaultTtl = requirePositive(b.defaultTtl, "defaultTtl");
     if (b.defaultThrottle.isNegative()) {
@@ -85,7 +95,7 @@ public final class VectorIndexConfig {
       throw new IllegalArgumentException("adjacencyBatchLoadSize must be positive");
     this.codebookBatchLoadSize = b.codebookBatchLoadSize;
     this.adjacencyBatchLoadSize = b.adjacencyBatchLoadSize;
-    this.metricAttributes = java.util.Map.copyOf(b.metricAttributes);
+    this.metricAttributes = Map.copyOf(b.metricAttributes);
     this.prefetchCodebooksEnabled = b.prefetchCodebooksEnabled;
 
     if (b.buildTxnLimitBytes <= 0) throw new IllegalArgumentException("buildTxnLimitBytes must be positive");
@@ -97,128 +107,186 @@ public final class VectorIndexConfig {
     this.buildSizeCheckEvery = b.buildSizeCheckEvery;
   }
 
-  private static String requireNonBlank(String s, String name) {
-    if (s == null || s.isBlank()) throw new IllegalArgumentException(name + " must not be blank");
-    return s;
-  }
-
   private static Duration requirePositive(Duration d, String name) {
     if (d == null) throw new IllegalArgumentException(name + " must not be null");
     if (d.isZero() || d.isNegative()) throw new IllegalArgumentException(name + " must be positive");
     return d;
   }
 
-  /** Returns the FoundationDB database handle. */
+  /**
+   * Returns the FoundationDB database handle.
+   */
   public Database getDatabase() {
     return database;
   }
 
-  /** Returns the DirectorySubspace representing this index's root directory. */
+  /**
+   * Returns the DirectorySubspace representing this index's root directory.
+   */
   public DirectorySubspace getIndexDir() {
     return indexDir;
   }
 
-  /** Returns the fixed embedding dimension. */
+  /**
+   * Returns the fixed embedding dimension.
+   */
   public int getDimension() {
     return dimension;
   }
 
-  /** Returns the distance metric. */
+  /**
+   * Returns the distance metric.
+   */
   public Metric getMetric() {
     return metric;
   }
 
-  /** Returns the maximum number of vectors per segment. */
+  /**
+   * Returns the maximum number of vectors per segment.
+   */
   public int getMaxSegmentSize() {
     return maxSegmentSize;
   }
 
-  /** Returns the number of PQ subspaces (M). */
+  /**
+   * Returns the number of PQ subspaces (M).
+   */
   public int getPqM() {
     return pqM;
   }
 
-  /** Returns the number of PQ centroids per subspace (K). */
+  /**
+   * Returns the number of PQ centroids per subspace (K).
+   */
   public int getPqK() {
     return pqK;
   }
 
-  /** Returns the target graph out-degree (R). */
+  /**
+   * Returns the target graph out-degree (R).
+   */
   public int getGraphDegree() {
     return graphDegree;
   }
 
-  /** Returns the oversample multiplier for merging candidates. */
+  /**
+   * Returns the oversample multiplier for merging candidates.
+   */
   public int getOversample() {
     return oversample;
   }
 
-  /** Returns the estimated number of background workers. */
+  /**
+   * Returns the estimated number of background workers.
+   */
   public int getEstimatedWorkerCount() {
     return estimatedWorkerCount;
   }
 
-  /** Returns the number of local worker threads to auto-start. */
+  /**
+   * Returns the number of local worker threads to auto-start.
+   */
   public int getLocalWorkerThreads() {
     return localWorkerThreads;
   }
 
-  /** Returns the default claim TTL used by background tasks. */
+  /**
+   * Returns the number of local maintenance worker threads to auto-start.
+   */
+  public int getLocalMaintenanceWorkerThreads() {
+    return localMaintenanceWorkerThreads;
+  }
+
+  /**
+   * Minimum deleted ratio [0, 1] that triggers auto-enqueue of a vacuum task after deletes.
+   *
+   * <p>Example: 0.25 means enqueue a threshold-aware vacuum when at least 25% of a segment's
+   * rows are tombstoned. Use 0.0 to enqueue immediately; 1.0 to effectively disable.</p>
+   */
+  public double getVacuumMinDeletedRatio() {
+    return vacuumMinDeletedRatio;
+  }
+
+  /**
+   * Returns the default claim TTL used by background tasks.
+   */
   public Duration getDefaultTtl() {
     return defaultTtl;
   }
 
-  /** Returns the default throttle between tasks for the same key. */
+  /**
+   * Returns the default throttle between tasks for the same key.
+   */
   public Duration getDefaultThrottle() {
     return defaultThrottle;
   }
 
-  /** Returns the time source (injectable for tests). */
+  /**
+   * Returns the time source (injectable for tests).
+   */
   public InstantSource getInstantSource() {
     return instantSource;
   }
 
-  /** Returns batch size for async codebook bulk loads. */
+  /**
+   * Returns batch size for async codebook bulk loads.
+   */
   public int getCodebookBatchLoadSize() {
     return codebookBatchLoadSize;
   }
 
-  /** Returns batch size for async adjacency bulk loads. */
+  /**
+   * Returns batch size for async adjacency bulk loads.
+   */
   public int getAdjacencyBatchLoadSize() {
     return adjacencyBatchLoadSize;
   }
 
-  /** Additional metric attributes to add to emitted metrics/spans. */
-  public java.util.Map<String, String> getMetricAttributes() {
+  /**
+   * Additional metric attributes to add to emitted metrics/spans.
+   */
+  public Map<String, String> getMetricAttributes() {
     return metricAttributes;
   }
 
-  /** Returns whether query-time codebook prefetch is enabled. */
+  /**
+   * Returns whether query-time codebook prefetch is enabled.
+   */
   public boolean isPrefetchCodebooksEnabled() {
     return prefetchCodebooksEnabled;
   }
 
-  /** Upper bound for FDB transaction size (bytes) used by segment build batching. */
+  /**
+   * Upper bound for FDB transaction size (bytes) used by segment build batching.
+   */
   public long getBuildTxnLimitBytes() {
     return buildTxnLimitBytes;
   }
 
-  /** Ratio of limit where we split (e.g., 0.9 => leave 10% headroom). */
+  /**
+   * Ratio of limit where we split (e.g., 0.9 => leave 10% headroom).
+   */
   public double getBuildTxnSoftLimitRatio() {
     return buildTxnSoftLimitRatio;
   }
 
-  /** Writes between approximate-size checks during build batching. */
+  /**
+   * Writes between approximate-size checks during build batching.
+   */
   public int getBuildSizeCheckEvery() {
     return buildSizeCheckEvery;
   }
 
-  /** Creates a new builder for {@link VectorIndexConfig}. */
+  /**
+   * Creates a new builder for {@link VectorIndexConfig}.
+   */
   public static Builder builder(Database database, DirectorySubspace indexDir) {
     return new Builder(database, indexDir);
   }
 
-  /** Builder for {@link VectorIndexConfig}. */
+  /**
+   * Builder for {@link VectorIndexConfig}.
+   */
   public static final class Builder {
     private final Database database;
     private final DirectorySubspace indexDir;
@@ -232,12 +300,14 @@ public final class VectorIndexConfig {
     private int oversample = 2;
     private int estimatedWorkerCount = 1;
     private int localWorkerThreads = 0;
+    private int localMaintenanceWorkerThreads = 0;
+    private double vacuumMinDeletedRatio = 0.25;
     private Duration defaultTtl = Duration.ofMinutes(5);
     private Duration defaultThrottle = Duration.ofSeconds(1);
     private InstantSource instantSource = InstantSource.system();
     private int codebookBatchLoadSize = 10_000;
     private int adjacencyBatchLoadSize = 10_000;
-    private java.util.Map<String, String> metricAttributes = new java.util.HashMap<>();
+    private final Map<String, String> metricAttributes = new HashMap<>();
     private boolean prefetchCodebooksEnabled = true;
     private long buildTxnLimitBytes = 10L * 1024 * 1024; // 10 MB
     private double buildTxnSoftLimitRatio = 0.9; // leave 10% headroom
@@ -248,128 +318,186 @@ public final class VectorIndexConfig {
       this.indexDir = indexDir;
     }
 
-    /** Sets the embedding dimension. */
+    /**
+     * Sets the embedding dimension.
+     */
     public Builder dimension(int dimension) {
       this.dimension = dimension;
       return this;
     }
 
-    /** Sets the distance metric. */
+    /**
+     * Sets the distance metric.
+     */
     public Builder metric(Metric metric) {
       this.metric = metric;
       return this;
     }
 
-    /** Sets the maximum number of vectors per segment. */
+    /**
+     * Sets the maximum number of vectors per segment.
+     */
     public Builder maxSegmentSize(int maxSegmentSize) {
       this.maxSegmentSize = maxSegmentSize;
       return this;
     }
 
-    /** Sets the PQ subspace count (M). */
+    /**
+     * Sets the PQ subspace count (M).
+     */
     public Builder pqM(int pqM) {
       this.pqM = pqM;
       return this;
     }
 
-    /** Sets the PQ centroid count per subspace (K). */
+    /**
+     * Sets the PQ centroid count per subspace (K).
+     */
     public Builder pqK(int pqK) {
       this.pqK = pqK;
       return this;
     }
 
-    /** Sets the target graph out-degree (R). */
+    /**
+     * Sets the target graph out-degree (R).
+     */
     public Builder graphDegree(int graphDegree) {
       this.graphDegree = graphDegree;
       return this;
     }
 
-    /** Sets the oversample multiplier for candidate merging. */
+    /**
+     * Sets the oversample multiplier for candidate merging.
+     */
     public Builder oversample(int oversample) {
       this.oversample = oversample;
       return this;
     }
 
-    /** Sets the estimated number of background workers. */
+    /**
+     * Sets the estimated number of background workers.
+     */
     public Builder estimatedWorkerCount(int estimatedWorkerCount) {
       this.estimatedWorkerCount = estimatedWorkerCount;
       return this;
     }
 
-    /** Sets how many local worker threads to auto-start (0 to disable). */
+    /**
+     * Sets how many local worker threads to auto-start (0 to disable).
+     */
     public Builder localWorkerThreads(int localWorkerThreads) {
       this.localWorkerThreads = localWorkerThreads;
       return this;
     }
 
-    /** Sets the default claim TTL used by background tasks. */
+    /**
+     * Sets how many local maintenance worker threads to auto-start (0 to disable).
+     */
+    public Builder localMaintenanceWorkerThreads(int localMaintenanceWorkerThreads) {
+      this.localMaintenanceWorkerThreads = localMaintenanceWorkerThreads;
+      return this;
+    }
+
+    /**
+     * Sets min deleted ratio [0,1] to auto-enqueue vacuum after deletes.
+     */
+    public Builder vacuumMinDeletedRatio(double ratio) {
+      this.vacuumMinDeletedRatio = ratio;
+      return this;
+    }
+
+    /**
+     * Sets the default claim TTL used by background tasks.
+     */
     public Builder defaultTtl(Duration defaultTtl) {
       this.defaultTtl = defaultTtl;
       return this;
     }
 
-    /** Sets the default throttle between tasks for the same key. */
+    /**
+     * Sets the default throttle between tasks for the same key.
+     */
     public Builder defaultThrottle(Duration defaultThrottle) {
       this.defaultThrottle = defaultThrottle;
       return this;
     }
 
-    /** Sets the time source used to obtain the current time. */
+    /**
+     * Sets the time source used to obtain the current time.
+     */
     public Builder instantSource(InstantSource instantSource) {
       this.instantSource = instantSource;
       return this;
     }
 
-    /** Sets batch size for async codebook bulk loads. */
+    /**
+     * Sets batch size for async codebook bulk loads.
+     */
     public Builder codebookBatchLoadSize(int size) {
       this.codebookBatchLoadSize = size;
       return this;
     }
 
-    /** Sets batch size for async adjacency bulk loads. */
+    /**
+     * Sets batch size for async adjacency bulk loads.
+     */
     public Builder adjacencyBatchLoadSize(int size) {
       this.adjacencyBatchLoadSize = size;
       return this;
     }
 
-    /** Adds a metric attribute (key/value) to be included on metrics/spans. */
+    /**
+     * Adds a metric attribute (key/value) to be included on metrics/spans.
+     */
     public Builder metricAttribute(String key, String value) {
       this.metricAttributes.put(key, value);
       return this;
     }
 
-    /** Sets metric attributes in bulk (copied). */
-    public Builder metricAttributes(java.util.Map<String, String> attrs) {
+    /**
+     * Sets metric attributes in bulk (copied).
+     */
+    public Builder metricAttributes(Map<String, String> attrs) {
       this.metricAttributes.clear();
       if (attrs != null) this.metricAttributes.putAll(attrs);
       return this;
     }
 
-    /** Enables/disables query-time codebook prefetch for SEALED segments. */
+    /**
+     * Enables/disables query-time codebook prefetch for SEALED segments.
+     */
     public Builder prefetchCodebooksEnabled(boolean enabled) {
       this.prefetchCodebooksEnabled = enabled;
       return this;
     }
 
-    /** Sets the assumed FDB transaction hard limit in bytes (default 10MB). */
+    /**
+     * Sets the assumed FDB transaction hard limit in bytes (default 10MB).
+     */
     public Builder buildTxnLimitBytes(long bytes) {
       this.buildTxnLimitBytes = bytes;
       return this;
     }
 
-    /** Sets the soft ratio of the limit where we split the build write (default 0.9). */
+    /**
+     * Sets the soft ratio of the limit where we split the build write (default 0.9).
+     */
     public Builder buildTxnSoftLimitRatio(double ratio) {
       this.buildTxnSoftLimitRatio = ratio;
       return this;
     }
 
-    /** Sets how many writes between approximate-size checks during build (default 32). */
+    /**
+     * Sets how many writes between approximate-size checks during build (default 32).
+     */
     public Builder buildSizeCheckEvery(int n) {
       this.buildSizeCheckEvery = n;
       return this;
     }
 
-    /** Builds the immutable {@link VectorIndexConfig}. */
+    /**
+     * Builds the immutable {@link VectorIndexConfig}.
+     */
     public VectorIndexConfig build() {
       return new VectorIndexConfig(this);
     }

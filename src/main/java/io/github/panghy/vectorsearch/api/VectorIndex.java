@@ -20,8 +20,11 @@ import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories;
 import io.github.panghy.vectorsearch.fdb.FdbVectorStore;
 import io.github.panghy.vectorsearch.proto.BuildTask;
+import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import io.github.panghy.vectorsearch.proto.VectorRecord;
+import io.github.panghy.vectorsearch.tasks.MaintenanceWorkerPool;
+import io.github.panghy.vectorsearch.tasks.ProtoSerializers;
 import io.github.panghy.vectorsearch.tasks.ProtoSerializers.BuildTaskSerializer;
 import io.github.panghy.vectorsearch.tasks.ProtoSerializers.StringSerializer;
 import io.github.panghy.vectorsearch.tasks.SegmentBuildWorkerPool;
@@ -55,7 +58,9 @@ public class VectorIndex implements AutoCloseable {
   private final FdbVectorStore store;
   private final SegmentCaches caches;
   private final FdbDirectories.IndexDirectories indexDirs;
-  private TaskQueue<String, BuildTask> taskQueue;
+  private TaskQueue<String, BuildTask> buildQueue;
+  private TaskQueue<String, MaintenanceTask> maintenanceQueue;
+  private MaintenanceWorkerPool maintenancePool;
 
   private SegmentBuildWorkerPool workerPool;
 
@@ -72,32 +77,61 @@ public class VectorIndex implements AutoCloseable {
    */
   public static CompletableFuture<VectorIndex> createOrOpen(VectorIndexConfig config) {
     return FdbDirectories.openIndex(config.getIndexDir(), config.getDatabase())
-        .thenCompose(dirs -> {
-          // Single TaskQueue for all background build tasks
-          var tqc = TaskQueueConfig.builder(
+        .thenCompose(dirs -> createBuildQueue(config, dirs).thenCompose(buildQ -> {
+          FdbVectorStore store = new FdbVectorStore(config, dirs, buildQ);
+          return store.createOrOpenIndex()
+              .thenCompose($ -> createMaintenanceQueue(config, dirs))
+              .thenApply(maintQ -> {
+                VectorIndex ix = new VectorIndex(config, store, dirs);
+                ix.buildQueue = buildQ;
+                int n = config.getLocalWorkerThreads();
+                if (n > 0) {
+                  ix.workerPool = new SegmentBuildWorkerPool(config, dirs, buildQ);
+                  ix.workerPool.start(n);
+                  LOG.info("Started local SegmentBuildWorkerPool with threads={}.", n);
+                }
+                ix.maintenanceQueue = maintQ;
+                int m = config.getLocalMaintenanceWorkerThreads();
+                if (m > 0) {
+                  ix.maintenancePool = new MaintenanceWorkerPool(config, ix.indexDirs, maintQ);
+                  ix.maintenancePool.start(m);
+                  LOG.info("Started local MaintenanceWorkerPool with threads={}", m);
+                }
+                return ix;
+              });
+        }));
+  }
+
+  private static CompletableFuture<TaskQueue<String, BuildTask>> createBuildQueue(
+      VectorIndexConfig config, FdbDirectories.IndexDirectories dirs) {
+    TaskQueueConfig<String, BuildTask> tqc = TaskQueueConfig.builder(
+            config.getDatabase(), dirs.tasksDir(), new StringSerializer(), new BuildTaskSerializer())
+        .estimatedWorkerCount(config.getEstimatedWorkerCount())
+        .defaultTtl(config.getDefaultTtl())
+        .defaultThrottle(config.getDefaultThrottle())
+        .taskNameExtractor(bt -> "build-segment:" + bt.getSegId())
+        .build();
+    return TaskQueues.createTaskQueue(tqc);
+  }
+
+  private static CompletableFuture<TaskQueue<String, MaintenanceTask>> createMaintenanceQueue(
+      VectorIndexConfig config, FdbDirectories.IndexDirectories dirs) {
+    return dirs.tasksDir()
+        .createOrOpen(config.getDatabase(), List.of("maint"))
+        .thenCompose(maintDir -> {
+          TaskQueueConfig<String, MaintenanceTask> tqc = TaskQueueConfig.builder(
                   config.getDatabase(),
-                  dirs.tasksDir(),
+                  maintDir,
                   new StringSerializer(),
-                  new BuildTaskSerializer())
+                  new ProtoSerializers.MaintenanceTaskSerializer())
               .estimatedWorkerCount(config.getEstimatedWorkerCount())
               .defaultTtl(config.getDefaultTtl())
               .defaultThrottle(config.getDefaultThrottle())
-              .taskNameExtractor(bt -> "build-segment:" + bt.getSegId())
+              .taskNameExtractor(mt -> mt.hasVacuum()
+                  ? ("vacuum-segment:" + mt.getVacuum().getSegId())
+                  : "compact")
               .build();
-          return TaskQueues.createTaskQueue(tqc).thenCompose(queue -> {
-            FdbVectorStore fdbVectorStore = new FdbVectorStore(config, dirs, queue);
-            return fdbVectorStore.createOrOpenIndex().thenApply($ -> {
-              VectorIndex ix = new VectorIndex(config, fdbVectorStore, dirs);
-              ix.taskQueue = queue;
-              int n = config.getLocalWorkerThreads();
-              if (n > 0) {
-                ix.workerPool = new SegmentBuildWorkerPool(config, dirs, queue);
-                ix.workerPool.start(n);
-                LOG.info("Started local SegmentBuildWorkerPool with threads={}.", n);
-              }
-              return ix;
-            });
-          });
+          return TaskQueues.createTaskQueue(tqc);
         });
   }
 
@@ -109,6 +143,10 @@ public class VectorIndex implements AutoCloseable {
     if (workerPool != null) {
       workerPool.close();
       workerPool = null;
+    }
+    if (maintenancePool != null) {
+      maintenancePool.close();
+      maintenancePool = null;
     }
   }
 
@@ -122,6 +160,25 @@ public class VectorIndex implements AutoCloseable {
    */
   public CompletableFuture<int[]> add(float[] embedding, byte[] payload) {
     return store.add(embedding, payload);
+  }
+
+  /**
+   * Marks a single vector as deleted (tombstone) and updates segment counters.
+   */
+  public CompletableFuture<Void> delete(int segId, int vecId) {
+    // Marks the record deleted and, if the per-segment deleted ratio is high enough,
+    // enqueues a maintenance vacuum task to reclaim storage for that segment.
+    return store.delete(segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(Set.of(segId)));
+  }
+
+  /**
+   * Batch delete convenience; each element is [segId, vecId].
+   */
+  public CompletableFuture<Void> deleteAll(int[][] ids) {
+    // Collect affected segments so we can evaluate and enqueue one vacuum task per segment.
+    Set<Integer> segs = new HashSet<>();
+    if (ids != null) for (int[] id : ids) if (id != null && id.length > 0) segs.add(id[0]);
+    return store.deleteBatch(ids).thenCompose(v -> scheduleVacuumIfNeeded(segs));
   }
 
   /**
@@ -269,16 +326,50 @@ public class VectorIndex implements AutoCloseable {
    * will reappear if needed.</p>
    */
   public CompletableFuture<Void> awaitIndexingComplete() {
-    if (taskQueue == null) return completedFuture(null);
+    if (buildQueue == null) return completedFuture(null);
     Database db = config.getDatabase();
     final long pollDelayMs = 50L;
-    return AsyncUtil.whileTrue(() -> db.runAsync(tr -> taskQueue.hasVisibleUnclaimedTasks(tr))
+    return AsyncUtil.whileTrue(() -> db.runAsync(tr -> buildQueue.hasVisibleUnclaimedTasks(tr))
             .thenCompose(has -> Boolean.TRUE.equals(has)
                 ? CompletableFuture.supplyAsync(
                     () -> true,
                     CompletableFuture.delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
                 : completedFuture(false)))
         .thenApply(v -> null);
+  }
+
+  private CompletableFuture<Void> scheduleVacuumIfNeeded(Set<Integer> segIds) {
+    if (maintenanceQueue == null || segIds == null || segIds.isEmpty()) return completedFuture(null);
+    Database db = config.getDatabase();
+    double thr = config.getVacuumMinDeletedRatio();
+    List<CompletableFuture<Void>> fs = new ArrayList<>();
+    for (int segId : segIds) {
+      String segStr = String.format("%06d", segId);
+      fs.add(db.runAsync(
+          tr -> tr.get(indexDirs.segmentKeys(segStr).metaKey()).thenCompose(bytes -> {
+            if (bytes == null) return completedFuture(null);
+            try {
+              SegmentMeta sm = SegmentMeta.parseFrom(bytes);
+              long live = sm.getCount();
+              long del = sm.getDeletedCount();
+              double ratio = (live + del) == 0 ? 0.0 : ((double) del) / ((double) (live + del));
+              if (ratio < thr) return completedFuture(null);
+              MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
+                  .setSegId(segId)
+                  .setMinDeletedRatio(thr)
+                  .build();
+              MaintenanceTask mt =
+                  MaintenanceTask.newBuilder().setVacuum(v).build();
+              String key = "vacuum-if-needed:" + segId;
+              return maintenanceQueue
+                  .enqueueIfNotExists(tr, key, mt)
+                  .thenApply(x -> null);
+            } catch (InvalidProtocolBufferException e) {
+              throw new RuntimeException(e);
+            }
+          })));
+    }
+    return allOf(fs.toArray(CompletableFuture[]::new)).thenApply(x -> null);
   }
 
   /**
@@ -582,13 +673,13 @@ public class VectorIndex implements AutoCloseable {
         if (expand.isEmpty()) return completedFuture(null);
 
         // Batch load adjacency for missing entries using asyncLoadAll via getAll
-        java.util.Set<Long> miss2 = new java.util.HashSet<>();
+        Set<Long> miss2 = new HashSet<>();
         for (Approx cur : expand) {
           long ckey = SegmentCaches.adjKey(segId, cur.vecId());
           if (caches.getAdjacencyCache().getIfPresent(ckey) == null) miss2.add(ckey);
         }
-        java.util.concurrent.CompletableFuture<java.util.Map<Long, int[]>> bulk2 = miss2.isEmpty()
-            ? java.util.concurrent.CompletableFuture.completedFuture(java.util.Map.of())
+        CompletableFuture<Map<Long, int[]>> bulk2 = miss2.isEmpty()
+            ? CompletableFuture.completedFuture(Map.of())
             : caches.getAdjacencyCacheAsync().getAll(miss2);
         return bulk2.thenRun(() -> {
           int m = lut.length;
