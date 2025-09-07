@@ -204,8 +204,7 @@ class VectorIndexQueryIntegrationTest {
     index.add(new float[] {1f, 0f, 0f, 0f}, null).get(5, TimeUnit.SECONDS);
     index.add(new float[] {0f, 1f, 0f, 0f}, null).get(5, TimeUnit.SECONDS);
     index.add(new float[] {0f, 0f, 1f, 0f}, null).get(5, TimeUnit.SECONDS);
-    var dirs = io.github.panghy.vectorsearch.fdb.FdbDirectories.openIndex(root, db)
-        .get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     var tqc = io.github.panghy.taskqueue.TaskQueueConfig.builder(
             db,
             dirs.tasksDir(),
@@ -301,7 +300,7 @@ class VectorIndexQueryIntegrationTest {
     index.awaitIndexingComplete().get(10, TimeUnit.SECONDS);
 
     // seg0 should be SEALED now
-    var dirs = io.github.panghy.vectorsearch.fdb.FdbDirectories.openIndex(root, db)
+    var dirs = FdbDirectories.openIndex(root, db)
         .get(5, TimeUnit.SECONDS);
     byte[] seg0Meta =
         db.readAsync(tr -> tr.get(dirs.segmentKeys("000000").metaKey())).get(5, TimeUnit.SECONDS);
@@ -361,8 +360,7 @@ class VectorIndexQueryIntegrationTest {
     for (int i = 0; i < 12; i++) {
       index.add(new float[] {i, 0f, 0f, 0f}, null).get(5, TimeUnit.SECONDS);
     }
-    var dirs = io.github.panghy.vectorsearch.fdb.FdbDirectories.openIndex(root, db)
-        .get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     new io.github.panghy.vectorsearch.tasks.SegmentBuildService(cfg, dirs)
         .build(0)
         .get(5, TimeUnit.SECONDS);
@@ -396,8 +394,7 @@ class VectorIndexQueryIntegrationTest {
     for (int i = 0; i < 16; i++) {
       index.add(new float[] {i, 0f, 0f, 0f}, null).get(5, TimeUnit.SECONDS);
     }
-    var dirs = io.github.panghy.vectorsearch.fdb.FdbDirectories.openIndex(root, db)
-        .get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     new io.github.panghy.vectorsearch.tasks.SegmentBuildService(cfg, dirs)
         .build(0)
         .get(5, TimeUnit.SECONDS);
@@ -464,8 +461,7 @@ class VectorIndexQueryIntegrationTest {
     VectorIndex index = VectorIndex.createOrOpen(cfg).get(5, TimeUnit.SECONDS);
     // Single vector sealed -> adjacency empty
     index.add(new float[] {1f, 0f, 0f, 0f}, null).get(5, TimeUnit.SECONDS);
-    var dirs = io.github.panghy.vectorsearch.fdb.FdbDirectories.openIndex(root, db)
-        .get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     new io.github.panghy.vectorsearch.tasks.SegmentBuildService(cfg, dirs)
         .build(0)
         .get(5, TimeUnit.SECONDS);
@@ -520,8 +516,7 @@ class VectorIndexQueryIntegrationTest {
     index.add(new float[] {0f, 1f, 0f, 0f}, null).get(5, TimeUnit.SECONDS);
     index.add(new float[] {0f, 0f, 1f, 0f}, null).get(5, TimeUnit.SECONDS);
 
-    var dirs = io.github.panghy.vectorsearch.fdb.FdbDirectories.openIndex(root, db)
-        .get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     var tqc = io.github.panghy.taskqueue.TaskQueueConfig.builder(
             db,
             dirs.tasksDir(),
@@ -549,8 +544,7 @@ class VectorIndexQueryIntegrationTest {
     index.add(new float[] {0f, 1f, 0f}, null).get(5, TimeUnit.SECONDS); // id 1
 
     // Flip deleted flag for vec 0 in seg 0
-    var dirs = io.github.panghy.vectorsearch.fdb.FdbDirectories.openIndex(root, db)
-        .get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     byte[] v0key = dirs.segmentKeys("000000").vectorKey(0);
     byte[] v0bytes = db.readAsync(tr -> tr.get(v0key)).get(5, TimeUnit.SECONDS);
     io.github.panghy.vectorsearch.proto.VectorRecord rec =
@@ -611,8 +605,7 @@ class VectorIndexQueryIntegrationTest {
     index.add(new float[] {0f, 1f, 0f, 0f}, null).get(5, TimeUnit.SECONDS); // id 1 (triggers rotate)
 
     // Explicitly process build task instead of sleeping
-    var dirs2 = io.github.panghy.vectorsearch.fdb.FdbDirectories.openIndex(root, db)
-        .get(5, TimeUnit.SECONDS);
+    var dirs2 = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     var tqc2 = io.github.panghy.taskqueue.TaskQueueConfig.builder(
             db,
             dirs2.tasksDir(),
