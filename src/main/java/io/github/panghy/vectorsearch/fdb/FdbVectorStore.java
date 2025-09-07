@@ -216,10 +216,40 @@ public final class FdbVectorStore {
                     int remaining = embeddings.length - pos.get();
                     int count = sm.getCount();
                     int capacity = config.getMaxSegmentSize() - count;
-                    boolean rotate = false;
 
                     if (capacity <= 0 && remaining > 0) {
-                      rotate = true;
+                      // capacity exhausted; rotate below after writing zero in this txn
+                      // by returning immediately with rotate path
+                      SegmentMeta pending = sm.toBuilder()
+                          .setState(SegmentMeta.State.PENDING)
+                          .setCount(sm.getCount())
+                          .build();
+                      tr.set(sk.metaKey(), pending.toByteArray());
+                      int nextSeg = segId + 1;
+                      tr.set(curSegK, Tuple.from(nextSeg).pack());
+                      tr.set(
+                          indexDirs.maxSegmentKey(),
+                          Tuple.from(nextSeg).pack());
+                      String nextStr = segIdStr(nextSeg);
+                      SegmentMeta nextMeta = SegmentMeta.newBuilder()
+                          .setSegmentId(nextSeg)
+                          .setState(SegmentMeta.State.ACTIVE)
+                          .setCount(0)
+                          .setCreatedAtMs(
+                              Instant.now().toEpochMilli())
+                          .build();
+                      tr.set(
+                          indexDirs
+                              .segmentKeys(nextStr)
+                              .metaKey(),
+                          nextMeta.toByteArray());
+                      LOGGER.debug(
+                          "Rotated segment: {} -> {} (sealed PENDING seg {}), enqueuing"
+                              + " build task",
+                          segId,
+                          nextSeg,
+                          segId);
+                      return enqueueBuildTask(tr, segId).thenApply($ -> true);
                     } else {
                       int toWrite = Math.min(remaining, Math.max(capacity, 0));
                       // Use approximate transaction size to limit writes in this txn.
@@ -245,15 +275,15 @@ public final class FdbVectorStore {
                                 .setCount(count + wroteN)
                                 .build();
                             tr.set(sk.metaKey(), updated.toByteArray());
-                            if (updated.getCount() >= config.getMaxSegmentSize())
-                              rotate = true;
+                            boolean willRotate =
+                                updated.getCount() >= config.getMaxSegmentSize();
                             LOGGER.debug(
                                 "Writing {} vectors to segment {} (rotate: {})",
                                 wroteN,
                                 segId,
-                                rotate);
+                                willRotate);
                             batch.addAll(local);
-                            if (rotate) {
+                            if (willRotate) {
                               // Seal current and open next
                               SegmentMeta pending = sm.toBuilder()
                                   .setState(SegmentMeta.State.PENDING)
@@ -294,7 +324,6 @@ public final class FdbVectorStore {
                             return completedFuture(true);
                           });
                     }
-                    return completedFuture(true);
                   });
                 });
               })

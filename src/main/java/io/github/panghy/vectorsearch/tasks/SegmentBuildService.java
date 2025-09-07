@@ -105,8 +105,9 @@ public class SegmentBuildService {
     try {
       centroids = PqTrainer.train(vectors, d, m, k, 5, 42L);
     } catch (IllegalArgumentException ex) {
-      int sub = Math.max(1, d / Math.max(1, m));
-      centroids = new float[m][k][sub];
+      // Fail the build so TaskQueue can retry later rather than sealing with a degenerate codebook.
+      throw new IllegalStateException(
+          "PQ training failed for segment " + segStr + " (m=" + m + ", k=" + k + ", d=" + d + ")", ex);
     }
 
     // Build PQCodebook proto
