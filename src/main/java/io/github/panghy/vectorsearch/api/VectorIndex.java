@@ -289,7 +289,7 @@ public class VectorIndex implements AutoCloseable {
     byte[] maxK = dirs.maxSegmentKey();
     return db.readAsync(tr -> tr.get(maxK).thenCompose(maxB -> {
       if (maxB == null) return completedFuture(List.of());
-      int maxSeg = (int) decodeInt(maxB);
+      int maxSeg = Math.toIntExact(decodeInt(maxB));
       // Batch get meta keys for [0..maxSeg]
       List<byte[]> keys = new ArrayList<>(maxSeg + 1);
       for (int i = 0; i <= maxSeg; i++)
