@@ -1,4 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
+
+This project uses a terminal-first workflow. Below is a concise guide for contributors and AI agents working on the codebase.
 
 ## Commands
 
@@ -98,13 +100,39 @@ The `.github/workflows/publish.yml` workflow automatically:
   - PATCH (Z): Bug fixes, backward compatible
 
 ## Code Style
-- Uses Palantir Java Format via Spotless
-- 90% instruction coverage requirement (currently 91%)
-- 75% branch coverage requirement (currently 81%)
-- Line coverage currently at 93%
-- Protobuf generated classes are excluded from coverage
+- Formatting: Palantir Java Format via Spotless (use `spotlessApply`).
+- Imports:
+  - Prefer static imports for assertions (AssertJ/JUnit) and Mockito.
+  - Do not use fully qualified references (always use imports, static or otherwise)
+- Comments: Add Javadoc for public classes and methods (purpose, params, returns). Add class-level Javadocs to tests describing intent.
+- Overloads: Provide both transaction-scoped APIs (accepting `Transaction`/`ReadTransaction`) and convenience overloads that run their own transaction so callers can choose boundaries.
+- Coverage: Maintain line coverage >= 90% and branch coverage >= 75% (JaCoCo verification). Protobuf-generated classes are excluded.
 
-## Architecture Patterns
+## Architecture Snapshot (2025-09-07)
+
+- Segments and rotation: ACTIVE → PENDING → SEALED. Strict-cap rotation is enforced; when `count >= maxSegmentSize`, the next insert rotates and becomes `vecId=0` in the new ACTIVE segment.
+- Search defaults: `SearchParams.defaults(...)` now use BEST_FIRST with higher `ef`, conservative `maxExplore`, and optional refinement. BEAM is retained but marked deprecated, with a one-time WARN if used.
+- Caches: `SegmentCaches` provides AsyncLoadingCache for PQ codebooks and adjacency with `asyncLoadAll` (batched by configurable sizes). Query code uses `getAll` to trigger async bulk loads; adjacency accesses are batched per frontier.
+- Prefetch: Query fire-and-forgets codebook prefetch for all SEALED segments; toggle via `VectorIndexConfig.prefetchCodebooksEnabled`.
+- Observability: OpenTelemetry gauges exposed for caches:
+  - `vectorsearch.cache.size{cache=codebook|adjacency}`
+  - `vectorsearch.cache.hit_count{cache=...}`
+  - `vectorsearch.cache.miss_count{cache=...}`
+  - `vectorsearch.cache.load_success_count{cache=...}`
+  - `vectorsearch.cache.load_failure_count{cache=...}`
+  Additional attributes may be injected via `VectorIndexConfig.metricAttribute(...)`.
+- Logging: Per-query logs are DEBUG. Worker lifecycle logs are DEBUG. BEAM usage emits WARN once. Keep INFO quiet by default.
+- Segment discovery: queries enumerate segments using a `maxSegmentKey` sentinel and meta probes to avoid missing sealed segments.
+
+## Key Config Knobs
+
+- `VectorIndexConfig` builder:
+  - `codebookBatchLoadSize`, `adjacencyBatchLoadSize` (defaults 10_000)
+  - `prefetchCodebooksEnabled` (default true)
+  - `metricAttribute(key, value)` to annotate OTel metrics
+  - `oversample`, `graphDegree`, `pqM`, `pqK`, `maxSegmentSize`, `dimension`, `metric`
+
+## Testing Patterns
 
 ### Async Operations
 - **Never use `.join()` or blocking calls** within storage layer methods
@@ -139,14 +167,6 @@ The `.github/workflows/publish.yml` workflow automatically:
 - Caffeine cache handles its own thread safety
 - FoundationDB transactions provide isolation between concurrent operations
 
-### Storage Components
-- **CodebookStorage** - Manages PQ codebooks with versioning and rotation support
-- **PqBlockStorage** - Stores quantized vectors in blocks for efficient batch operations
-- **NodeAdjacencyStorage** - Manages graph adjacency lists with robust pruning
-- **GraphMetaStorage** - Tracks connectivity metadata and repair state
-- **EntryPointStorage** - Manages search entry points with multiple strategies
-- All storage classes follow async patterns with `CompletableFuture<T>` returns
-
 ### FoundationDB Constraints
 - **5-second transaction limit** - All operations must complete within 5 seconds
 - **10MB transaction size limit** - Cannot read/write more than 10MB in a single transaction
@@ -156,58 +176,8 @@ The `.github/workflows/publish.yml` workflow automatically:
   - Implement cursor-based pagination for large result sets
   - Use range-splitting for distributed sampling
 
-### Graph Algorithms
-- **Robust Pruning (DiskANN-style)**
-  - Maintains diversity in neighbor lists through dominance testing
-  - Alpha parameter controls diversity vs proximity trade-off (typical: 0.95-1.2)
-  - Lower alpha = more diverse neighbors, higher alpha = closer neighbors
-  - Algorithm pattern:
-    ```java
-    // Use RobustPruning for diverse neighbor selection
-    List<Candidate> candidates = /* sorted by distance */;
-    PruningConfig config = PruningConfig.builder()
-        .maxDegree(64)
-        .alpha(1.2)
-        .build();
-    List<Long> pruned = RobustPruning.prune(candidates, config);
-    ```
-  - Integrated into NodeAdjacencyStorage for automatic neighbor management
-
-- **Graph Connectivity Monitoring**
-  - Sampling-based connectivity analysis to work within FDB's 5-second transaction limit
-  - Uses intelligent range-splitting algorithm for unbiased random sampling
-  - Key constraints:
-    - Cannot load all nodes (would exceed transaction limits)
-    - Sample size: 10,000 nodes maximum
-    - BFS limited to 1,000 visits per starting node
-  - Implementation pattern:
-    ```java
-    // Analyze and repair graph connectivity
-    GraphConnectivityMonitor monitor = new GraphConnectivityMonitor(...);
-    monitor.analyzeAndRepair(codebookVersion)
-        .thenAccept(v -> System.out.println("Repair complete"));
-    ```
-  - Automatic repair reconnects orphaned nodes using PQ-based distance calculations
-
-### Maintenance Operations
-- **Background Tasks**: Scheduled maintenance for entry point refresh and connectivity monitoring
-- **Package-Private Methods**: Maintenance operations exposed as package-private for testing
-- **Async Design**: All maintenance methods return `CompletableFuture<Void>` for proper composition
-- **Example pattern**:
-  ```java
-  // Package-private maintenance method for testing
-  CompletableFuture<Void> refreshEntryPoints() {
-      return db.runAsync(tx -> 
-          connectivityMonitor.refreshEntryPoints(tx)
-      );
-  }
-  
-  // Test usage
-  index.refreshEntryPoints().join(); // Test can call directly
-  ```
-
 ## Testing Patterns
-- Use `db.runAsync()` for all database operations in tests
+- Use `db.runAsync()` for write operations and `db.read()` for read-only tests to exercise both overload styles.
 - Chain futures properly to ensure operations complete in order
 - Always verify test coverage meets requirements before committing
 - Integration tests should use unique test collections to avoid conflicts
@@ -217,6 +187,32 @@ The `.github/workflows/publish.yml` workflow automatically:
 - **Cache Testing**: Use accessor methods like `getPqBlockCache()` to verify cache behavior
 - **Async Testing**: All maintenance operations should be properly tested with future composition
 
+### OpenTelemetry Testing
+
+- Use the official SDK testing utilities. In each test class that asserts metrics:
+  - Create an `InMemoryMetricReader` and `SdkMeterProvider`, set it via `OpenTelemetrySdk` and `GlobalOpenTelemetry.set(...)` in `@BeforeEach`.
+  - After exercising the code, call `reader.collectAllMetrics()` and assert on `MetricData` (e.g., presence of `vectorsearch.cache.size`).
+  - Close the meter provider and `GlobalOpenTelemetry.resetForTest()` in `@AfterEach`.
+
+Example snippet:
+
+InMemoryMetricReader reader = InMemoryMetricReader.create();
+SdkMeterProvider mp = SdkMeterProvider.builder().registerMetricReader(reader).build();
+OpenTelemetrySdk sdk = OpenTelemetrySdk.builder().setMeterProvider(mp).build();
+GlobalOpenTelemetry.resetForTest();
+GlobalOpenTelemetry.set(sdk);
+// ... run code ...
+boolean present = reader.collectAllMetrics().stream()
+    .anyMatch(m -> m.getName().equals("vectorsearch.cache.size"));
+assertThat(present).isTrue();
+sdk.getSdkMeterProvider().close();
+GlobalOpenTelemetry.resetForTest();
+
+## Practical Tips
+- Prefer static imports; avoid fully qualified references in code/tests.
+- Provide transactional and non-transactional overloads for storage methods to give callers control over boundaries.
+- Keep build green and coverage above thresholds: run `./gradlew build` frequently.
+
 ## Debugging Tips
 - When tests fail, use `./gradlew test -i` to see detailed output
 - For flaky tests, check for proper future composition and transaction boundaries
@@ -224,4 +220,4 @@ The `.github/workflows/publish.yml` workflow automatically:
   - Forgetting to handle empty results from sampling operations
   - Not checking for division by zero in statistical calculations
   - Missing synchronization in batch operations with shared state
-- Use `LOGGER.fine()` for debug output that won't clutter production logs
+- Prefer DEBUG logs; keep INFO sparse. Per-query and per-segment search details are DEBUG-only.

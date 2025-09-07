@@ -69,6 +69,12 @@ dependencies {
 
   testImplementation 'org.assertj:assertj-core:3.25.1'
 
+  // OpenTelemetry testing
+  testImplementation 'io.opentelemetry:opentelemetry-sdk:1.40.0'
+  testImplementation 'io.opentelemetry:opentelemetry-sdk-testing:1.40.0'
+  testImplementation 'io.opentelemetry:opentelemetry-sdk-metrics:1.40.0'
+  testImplementation 'io.opentelemetry:opentelemetry-sdk-trace:1.40.0'
+
   testImplementation 'org.mockito:mockito-core:5.19.0'
   testImplementation 'org.mockito:mockito-subclass:5.19.0'
   testImplementation 'org.mockito:mockito-junit-jupiter:5.19.0'
