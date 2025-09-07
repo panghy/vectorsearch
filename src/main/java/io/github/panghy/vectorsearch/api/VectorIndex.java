@@ -329,13 +329,41 @@ public class VectorIndex implements AutoCloseable {
     if (buildQueue == null) return completedFuture(null);
     Database db = config.getDatabase();
     final long pollDelayMs = 50L;
-    return AsyncUtil.whileTrue(() -> db.runAsync(tr -> buildQueue.hasVisibleUnclaimedTasks(tr))
-            .thenCompose(has -> Boolean.TRUE.equals(has)
-                ? CompletableFuture.supplyAsync(
-                    () -> true,
-                    CompletableFuture.delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
-                : completedFuture(false)))
+    return AsyncUtil.whileTrue(() ->
+            // Continue while there are visible unclaimed tasks OR any segment is still PENDING
+            db.runAsync(tr -> buildQueue.hasVisibleUnclaimedTasks(tr))
+                .thenCompose(hasVisible ->
+                    Boolean.TRUE.equals(hasVisible) ? completedFuture(true) : anyPendingSegments())
+                .thenCompose(keep -> keep
+                    ? CompletableFuture.supplyAsync(
+                        () -> true,
+                        CompletableFuture.delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
+                    : completedFuture(false)))
         .thenApply(v -> null);
+  }
+
+  private CompletableFuture<Boolean> anyPendingSegments() {
+    return listSegmentsWithMeta(indexDirs).thenCompose(ids -> {
+      if (ids.isEmpty()) return completedFuture(false);
+      Database db = config.getDatabase();
+      List<CompletableFuture<byte[]>> gets = new ArrayList<>(ids.size());
+      for (int sid : ids)
+        gets.add(db.readAsync(tr ->
+            tr.get(indexDirs.segmentKeys(String.format("%06d", sid)).metaKey())));
+      return allOf(gets.toArray(CompletableFuture[]::new)).thenApply(v -> {
+        for (int i = 0; i < ids.size(); i++) {
+          byte[] b = gets.get(i).join();
+          if (b == null) continue;
+          try {
+            SegmentMeta sm = SegmentMeta.parseFrom(b);
+            if (sm.getState() == SegmentMeta.State.PENDING) return true;
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+        }
+        return false;
+      });
+    });
   }
 
   private CompletableFuture<Void> scheduleVacuumIfNeeded(Set<Integer> segIds) {

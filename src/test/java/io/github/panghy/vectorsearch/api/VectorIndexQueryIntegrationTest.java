@@ -300,8 +300,7 @@ class VectorIndexQueryIntegrationTest {
     index.awaitIndexingComplete().get(10, TimeUnit.SECONDS);
 
     // seg0 should be SEALED now
-    var dirs = FdbDirectories.openIndex(root, db)
-        .get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     byte[] seg0Meta =
         db.readAsync(tr -> tr.get(dirs.segmentKeys("000000").metaKey())).get(5, TimeUnit.SECONDS);
     var sm = SegmentMeta.parseFrom(seg0Meta);
