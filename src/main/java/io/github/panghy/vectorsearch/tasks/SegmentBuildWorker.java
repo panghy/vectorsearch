@@ -45,10 +45,11 @@ public class SegmentBuildWorker {
           if (task.getSegId() < 0) {
             return claim.complete().thenApply(v -> true);
           }
-          // Build artifacts and seal the segment.
+          // Build artifacts and seal the segment. On failure, mark task failed for immediate retry.
           return new SegmentBuildService(config, indexDirs)
               .build(task.getSegId())
-              .thenCompose(v -> claim.complete())
+              .handle((v, ex) -> ex)
+              .thenCompose(ex -> (ex == null) ? claim.complete() : claim.fail())
               .thenApply(v -> true);
         }));
   }
