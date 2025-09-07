@@ -51,32 +51,32 @@ class VectorIndexHeavyRotationIntegrationTest {
 
   @Test
   void inserts_10k_vectors_and_parallel_queries_have_high_recall() throws Exception {
-    final int dim = 8;
-    final int n = Integer.getInteger("VS_HEAVY_N", 1_000);
-    final int segSize = 200; // aggressive rotation (~50 segments)
-    final int qCount = 100;
-    final int k = 10;
+    final int dimension = 8;
+    final int vectorCount = Integer.getInteger("VS_HEAVY_N", 1_000);
+    final int segmentSize = 200; // aggressive rotation (~50 segments)
+    final int queryCount = 100;
+    final int topK = 10;
 
     VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
-        .dimension(dim)
+        .dimension(dimension)
         .pqM(4)
         .pqK(16)
         .graphDegree(16)
-        .maxSegmentSize(segSize)
+        .maxSegmentSize(segmentSize)
         .localWorkerThreads(2)
         .build();
     VectorIndex index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
 
     Random rnd = new Random(1234);
-    List<float[]> inserted = new ArrayList<>(n);
-    List<int[]> ids = new ArrayList<>(n);
+    List<float[]> inserted = new ArrayList<>(vectorCount);
+    List<int[]> ids = new ArrayList<>(vectorCount);
     int batchSize = Integer.getInteger("VS_HEAVY_BATCH", 200);
-    for (int start = 0; start < n; start += batchSize) {
-      int end = Math.min(n, start + batchSize);
-      float[][] batch = new float[end - start][dim];
+    for (int start = 0; start < vectorCount; start += batchSize) {
+      int end = Math.min(vectorCount, start + batchSize);
+      float[][] batch = new float[end - start][dimension];
       for (int i = start; i < end; i++) {
-        float[] v = new float[dim];
-        for (int d = 0; d < dim; d++) v[d] = (float) rnd.nextGaussian();
+        float[] v = new float[dimension];
+        for (int d = 0; d < dimension; d++) v[d] = (float) rnd.nextGaussian();
         batch[i - start] = v;
         inserted.add(v);
       }
