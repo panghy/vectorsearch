@@ -271,13 +271,42 @@ public class VectorIndex implements AutoCloseable {
     if (taskQueue == null) return completedFuture(null);
     Database db = config.getDatabase();
     final long pollDelayMs = 50L;
-    return AsyncUtil.whileTrue(() -> db.runAsync(tr -> taskQueue.hasVisibleUnclaimedTasks(tr))
-            .thenCompose(has -> Boolean.TRUE.equals(has)
+    return AsyncUtil.whileTrue(() -> hasPendingOrUnclaimed(db)
+            .thenCompose(pending -> pending
                 ? CompletableFuture.supplyAsync(
                     () -> true,
                     CompletableFuture.delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
                 : completedFuture(false)))
         .thenApply(v -> null);
+  }
+
+  private CompletableFuture<Boolean> hasPendingOrUnclaimed(Database db) {
+    return db.runAsync(tr -> taskQueue.hasVisibleUnclaimedTasks(tr).thenCompose(unclaimed -> {
+      if (Boolean.TRUE.equals(unclaimed)) return completedFuture(true);
+      // Also check for any PENDING segments
+      byte[] maxK = indexDirs.maxSegmentKey();
+      return tr.get(maxK).thenCompose(maxB -> {
+        if (maxB == null) return completedFuture(false);
+        int maxSeg = (int) Tuple.fromBytes(maxB).getLong(0);
+        List<CompletableFuture<byte[]>> metas = new ArrayList<>(maxSeg + 1);
+        for (int i = 0; i <= maxSeg; i++)
+          metas.add(tr.get(
+              indexDirs.segmentKeys(String.format("%06d", i)).metaKey()));
+        return allOf(metas.toArray(CompletableFuture[]::new)).thenApply(v -> {
+          for (int i = 0; i < metas.size(); i++) {
+            byte[] b = metas.get(i).join();
+            if (b == null) continue;
+            try {
+              SegmentMeta sm = SegmentMeta.parseFrom(b);
+              if (sm.getState() == SegmentMeta.State.PENDING) return true;
+            } catch (InvalidProtocolBufferException e) {
+              throw new RuntimeException(e);
+            }
+          }
+          return false;
+        });
+      });
+    }));
   }
 
   /**
@@ -386,8 +415,8 @@ public class VectorIndex implements AutoCloseable {
     String segStr = String.format("%06d", segId);
     return caches.getCodebookCacheAsync().get(segId).thenCompose(centroids -> {
       if (centroids == null) {
-        LOG.warn("Missing PQ codebook for sealed segment segId={}", segId);
-        return completedFuture(List.of());
+        LOG.debug("Missing PQ codebook for sealed segment segId={}, falling back to brute-force.", segId);
+        return searchBruteForceSegment(db, dirs, segId, q, k);
       }
       double[][] lut = buildLut(centroids, q);
       Subspace codesPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segStr, "pq", "codes")));
@@ -415,7 +444,10 @@ public class VectorIndex implements AutoCloseable {
               }
               approxAll.add(new Approx(vecId, ad));
             }
-            if (approxAll.isEmpty()) return completedFuture(List.of());
+            if (approxAll.isEmpty()) {
+              LOG.debug("No PQ codes present for segId={}, falling back to brute-force.", segId);
+              return searchBruteForceSegment(db, dirs, segId, q, k);
+            }
 
             approxAll.sort(Comparator.comparingDouble(a -> a.approx));
             int nCodes = approxAll.size();
