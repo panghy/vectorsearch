@@ -188,6 +188,7 @@ public class SegmentBuildService {
       int checkEvery,
       long softLimit) {
     int wroteSinceCheck = 0;
+    int ce = Math.max(1, checkEvery);
     while (j < kvs.size()) {
       KeyValue kv = kvs.get(j);
       long vecId = vectorsPrefixUnpackId(dirs, kv.getKey());
@@ -201,7 +202,7 @@ public class SegmentBuildService {
       tr.set(sk.graphKey((int) vecId), adj.toByteArray());
       wroteSinceCheck++;
       j++;
-      if ((wroteSinceCheck % checkEvery) == 0) {
+      if ((wroteSinceCheck % ce) == 0) {
         final int jNow = j;
         return tr.getApproximateSize().thenCompose(sz -> {
           if (sz != null && sz >= softLimit) {
