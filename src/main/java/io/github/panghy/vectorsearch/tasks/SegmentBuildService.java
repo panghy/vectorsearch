@@ -122,9 +122,8 @@ public class SegmentBuildService {
 
     // 3) Persist: codebook + codes + adjacency per vecId
     // Use FDB's approximate transaction size to split work before hitting the configured limit.
-    final long TXN_LIMIT = config.getBuildTxnLimitBytes();
-    final long SOFT_LIMIT = (long) (TXN_LIMIT * config.getBuildTxnSoftLimitRatio());
-    final int CHECK_EVERY = config.getBuildSizeCheckEvery();
+    final long softLimit = (long) (config.getBuildTxnLimitBytes() * config.getBuildTxnSoftLimitRatio());
+    final int checkEvery = config.getBuildSizeCheckEvery();
 
     // Precompute adjacency using raw vectors
     final int[][] neighbors = buildL2Neighbors(
@@ -134,7 +133,7 @@ public class SegmentBuildService {
     final List<float[]> vVectors = vectors;
 
     // Asynchronously write chunks until all records (and codebook) are persisted.
-    return writeChunkLoop(db, dirs, segStr, kvs, vVectors, cCentroids, neighbors, SOFT_LIMIT, CHECK_EVERY);
+    return writeChunkLoop(db, dirs, segStr, kvs, vVectors, cCentroids, neighbors, softLimit, checkEvery);
   }
 
   private CompletableFuture<Void> writeChunkLoop(
