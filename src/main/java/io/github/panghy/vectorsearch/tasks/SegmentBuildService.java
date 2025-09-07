@@ -201,7 +201,8 @@ public class SegmentBuildService {
       tr.set(sk.graphKey((int) vecId), adj.toByteArray());
       wroteSinceCheck++;
       j++;
-      if ((wroteSinceCheck % checkEvery) == 0) {
+      // Only perform approximate-size checks when a positive cadence is configured.
+      if (checkEvery > 0 && (wroteSinceCheck % checkEvery) == 0) {
         final int jNow = j;
         return tr.getApproximateSize().thenCompose(sz -> {
           if (sz != null && sz >= softLimit) {

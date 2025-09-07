@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.google.protobuf.ByteString;
 import io.github.panghy.vectorsearch.proto.BuildTask;
+import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import org.junit.jupiter.api.Test;
 
 class ProtoSerializersTest {
@@ -38,5 +39,24 @@ class ProtoSerializersTest {
     assertThat(bs.serialize(null)).isEqualTo(EMPTY);
     // null -> default instance
     assertThat(bs.deserialize(null)).isEqualTo(BuildTask.getDefaultInstance());
+
+    ProtoSerializers.MaintenanceTaskSerializer ms = new ProtoSerializers.MaintenanceTaskSerializer();
+    assertThat(ms.serialize(null)).isEqualTo(EMPTY);
+    assertThat(ms.deserialize(null)).isEqualTo(MaintenanceTask.getDefaultInstance());
+  }
+
+  @Test
+  void maintenance_task_serializer_round_trip() {
+    ProtoSerializers.MaintenanceTaskSerializer s = new ProtoSerializers.MaintenanceTaskSerializer();
+    MaintenanceTask t = MaintenanceTask.newBuilder()
+        .setVacuum(MaintenanceTask.Vacuum.newBuilder()
+            .setSegId(7)
+            .setMinDeletedRatio(0.2)
+            .build())
+        .build();
+    ByteString bs = s.serialize(t);
+    MaintenanceTask back = s.deserialize(bs);
+    assertThat(back.hasVacuum()).isTrue();
+    assertThat(back.getVacuum().getSegId()).isEqualTo(7);
   }
 }

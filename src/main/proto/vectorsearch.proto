@@ -150,3 +150,26 @@ message BuildTask {
   // Segment id that has been sealed (PENDING) and needs graph/PQ build.
   int32 seg_id = 1;
 }
+
+// -----------------------------------------------------------------------------
+// Maintenance tasks (vacuum, compaction)
+// -----------------------------------------------------------------------------
+// Enqueued out-of-band to reclaim space from tombstoned vectors and (later) merge
+// small segments. Vacuum is safe for v1; compaction is a no-op skeleton for now.
+message MaintenanceTask {
+  oneof task {
+    Vacuum vacuum = 1;
+    Compact compact = 2;
+  }
+
+  message Vacuum {
+    int32 seg_id = 1;
+    // Optional guard: only vacuum if deleted_count / (deleted_count + count) >= threshold.
+    // Use 0 to always vacuum.
+    double min_deleted_ratio = 2;
+  }
+
+  message Compact {
+    repeated int32 seg_ids = 1;
+  }
+}
