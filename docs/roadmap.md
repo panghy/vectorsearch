@@ -204,9 +204,8 @@ Status:
 
 This section outlines the additional work needed to comfortably scale to billions of vectors while meeting low-latency targets and keeping operational complexity in check.
 
-1) Segment catalog and listing at scale
-- Problem: linear probe of `[0..maxSeg]` metas does not scale when segment count is high.
-- Plan: maintain a compact segment registry under `indexDir/segments/meta/{active|pending|sealed}` sets, or a range with a single key per existing segment (e.g., `segments/index`). Keep a monotonic `maxSegmentId`, but list from the registry to avoid O(n) null probes.
+1) Segment catalog and listing at scale (shipped)
+- Implemented: a compact `segmentsIndex/<segId>` range under the index root. All queries list segments from this registry; no legacy fallback scans. A monotonic `maxSegmentId` is still maintained for rotation bookkeeping.
 
 2) Compaction/merge planner (sealed→sealed)
 - Merge many small sealed segments into larger targets to reduce per-segment overhead and search fan-out.
@@ -254,7 +253,7 @@ Deliverables:
 - Spans/metrics wired; README/CLAUDE updated with Directory examples.
 
 Status:
-- Metrics done (gauges); tests in place using OTel SDK testing.
+- Metrics done (gauges); tests in place using OTel SDK testing. Codebook prefetch can be enabled/disabled; a test‑only `prefetchCodebooksSync` option makes prefetch blocking to simplify deterministic tests.
 
 ## 9) Tests, Benchmarks, Hardening
 
