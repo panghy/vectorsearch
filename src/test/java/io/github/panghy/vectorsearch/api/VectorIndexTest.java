@@ -98,7 +98,6 @@ class VectorIndexTest {
     }
   }
 
-  // ---------- Former: VectorIndexBatchDeleteIntegrationTest ----------
   /**
    * Deletes a batch of vectors and verifies:
    * - Deleted vectors do not appear in query results.
@@ -229,7 +228,6 @@ class VectorIndexTest {
     }
   }
 
-  // ---------- Former: VectorIndexBestFirstRecallTest ----------
   static class BestFirstRecall {
     Database db;
     DirectorySubspace root;
@@ -464,7 +462,6 @@ class VectorIndexTest {
     }
   }
 
-  // ---------- Former: VectorIndexDeleteAndVacuumTest ----------
   static class DeleteAndVacuum {
     private Database db;
     private DirectorySubspace root;
@@ -535,7 +532,6 @@ class VectorIndexTest {
     }
   }
 
-  // ---------- Former: VectorIndexHeavyRotationIntegrationTest ----------
   static class HeavyRotationIntegration {
     Database db;
     DirectorySubspace root;
@@ -612,7 +608,6 @@ class VectorIndexTest {
     }
   }
 
-  // ---------- Former: VectorIndexPrefetchSmokeTest ----------
   static class PrefetchSmoke {
     Database db;
     DirectorySubspace root;
@@ -686,7 +681,6 @@ class VectorIndexTest {
     }
   }
 
-  // ---------- Former: VectorIndexQueryIntegrationTest (selected methods) ----------
   static class QueryIntegration {
     Database db;
     DirectorySubspace root;
