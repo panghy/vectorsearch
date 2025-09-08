@@ -70,16 +70,29 @@ public class SegmentBuildService {
     Subspace vectorsPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segStr, "vectors")));
     Range vr = vectorsPrefix.range();
     LOGGER.debug("Building segment {}", segId);
-    return db.readAsync(tr -> tr.getRange(vr).asList())
-        .thenCompose(kvs -> {
-          if (kvs.isEmpty()) {
-            // Nothing to build for this segment yet; just seal it to avoid repeated retries.
-            // An empty sealed segment is harmless and ignored by query paths.
+    // Only build PENDING segments. ACTIVE segments must never be sealed here.
+    return db.readAsync(tr -> tr.get(dirs.segmentKeys(segStr).metaKey()))
+        .thenCompose(metaB -> {
+          if (metaB == null) return completedFuture(null);
+          SegmentMeta sm;
+          try {
+            sm = SegmentMeta.parseFrom(metaB);
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+          if (sm.getState() != SegmentMeta.State.PENDING) {
+            LOGGER.debug("Segment {} not PENDING (state={}); skipping build", segId, sm.getState());
             return completedFuture(null);
           }
-          return writeBuildArtifacts(dirs, segStr, kvs);
+          return db.readAsync(tr -> tr.getRange(vr).asList())
+              .thenCompose(kvs -> {
+                if (!kvs.isEmpty()) {
+                  return writeBuildArtifacts(dirs, segStr, kvs);
+                }
+                return completedFuture(null);
+              })
+              .thenCompose(v -> sealSegment(dirs, segStr));
         })
-        .thenCompose(v -> sealSegment(dirs, segStr))
         .whenComplete((v, ex) -> {
           if (ex != null) {
             LOGGER.error("Failed to build segment {}", segId, ex);
@@ -250,7 +263,7 @@ public class SegmentBuildService {
       if (bytes == null) return null;
       try {
         SegmentMeta sm = SegmentMeta.parseFrom(bytes);
-        if (sm.getState() == SegmentMeta.State.SEALED) return null;
+        if (sm.getState() != SegmentMeta.State.PENDING) return null; // only seal PENDING
         SegmentMeta sealed = sm.toBuilder()
             .setState(SegmentMeta.State.SEALED)
             .setCreatedAtMs(sm.getCreatedAtMs() == 0 ? Instant.now().toEpochMilli() : sm.getCreatedAtMs())
