@@ -33,8 +33,6 @@ import io.github.panghy.vectorsearch.tasks.SegmentBuildWorkerPool;
 import io.github.panghy.vectorsearch.util.Distances;
 import io.github.panghy.vectorsearch.util.FloatPacker;
 import io.opentelemetry.api.GlobalOpenTelemetry;
-import io.opentelemetry.api.common.AttributeKey;
-import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.Meter;
 import java.util.ArrayList;
@@ -82,47 +80,11 @@ public class VectorIndex implements AutoCloseable {
     this.caches = new SegmentCaches(config, indexDirs);
     this.caches.registerMetrics(config);
     // Register index-level metrics
-    try {
-      this.meter = GlobalOpenTelemetry.getMeter("io.github.panghy.vectorsearch");
-      this.vacScheduled = meter.counterBuilder("vectorsearch.maintenance.vacuum.scheduled")
-          .build();
-      this.vacSkipped = meter.counterBuilder("vectorsearch.maintenance.vacuum.skipped")
-          .build();
-      meter.gaugeBuilder("vectorsearch.segments.state_count").ofLongs().buildWithCallback(obs -> {
-        listSegmentsWithMeta(this.indexDirs)
-            .thenAccept(ids -> {
-              long active = 0, pending = 0, sealed = 0;
-              Database db = config.getDatabase();
-              List<CompletableFuture<byte[]>> gets = new ArrayList<>();
-              for (int sid : ids)
-                gets.add(db.readAsync(tr -> tr.get(indexDirs
-                    .segmentKeys(String.format("%06d", sid))
-                    .metaKey())));
-              CompletableFuture.allOf(gets.toArray(CompletableFuture[]::new))
-                  .join();
-              for (var f : gets) {
-                byte[] b = f.join();
-                if (b == null) continue;
-                try {
-                  SegmentMeta sm = SegmentMeta.parseFrom(b);
-                  switch (sm.getState()) {
-                    case ACTIVE -> active++;
-                    case PENDING -> pending++;
-                    case SEALED -> sealed++;
-                  }
-                } catch (InvalidProtocolBufferException ignored) {
-                }
-              }
-              AttributeKey<String> state = AttributeKey.stringKey("state");
-              obs.record(active, Attributes.of(state, "ACTIVE"));
-              obs.record(pending, Attributes.of(state, "PENDING"));
-              obs.record(sealed, Attributes.of(state, "SEALED"));
-            })
-            .join();
-      });
-    } catch (Throwable ignored) {
-      /* metrics optional */
-    }
+    this.meter = GlobalOpenTelemetry.getMeter("io.github.panghy.vectorsearch");
+    this.vacScheduled = meter.counterBuilder("vectorsearch.maintenance.vacuum.scheduled")
+        .build();
+    this.vacSkipped =
+        meter.counterBuilder("vectorsearch.maintenance.vacuum.skipped").build();
   }
 
   /**
@@ -394,30 +356,6 @@ public class VectorIndex implements AutoCloseable {
               return completedFuture(false);
             }))
         .thenApply(v -> null);
-  }
-
-  private CompletableFuture<Boolean> anyPendingSegments() {
-    return listSegmentsWithMeta(indexDirs).thenCompose(ids -> {
-      if (ids.isEmpty()) return completedFuture(false);
-      Database db = config.getDatabase();
-      List<CompletableFuture<byte[]>> gets = new ArrayList<>(ids.size());
-      for (int sid : ids)
-        gets.add(db.readAsync(tr ->
-            tr.get(indexDirs.segmentKeys(String.format("%06d", sid)).metaKey())));
-      return allOf(gets.toArray(CompletableFuture[]::new)).thenApply(v -> {
-        for (int i = 0; i < ids.size(); i++) {
-          byte[] b = gets.get(i).join();
-          if (b == null) continue;
-          try {
-            SegmentMeta sm = SegmentMeta.parseFrom(b);
-            if (sm.getState() == SegmentMeta.State.PENDING) return true;
-          } catch (InvalidProtocolBufferException e) {
-            throw new RuntimeException(e);
-          }
-        }
-        return false;
-      });
-    });
   }
 
   private CompletableFuture<Void> scheduleVacuumIfNeeded(Set<Integer> segIds) {
