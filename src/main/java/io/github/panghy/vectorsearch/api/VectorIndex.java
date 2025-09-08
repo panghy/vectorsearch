@@ -1,6 +1,7 @@
 package io.github.panghy.vectorsearch.api;
 
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
+import io.github.panghy.vectorsearch.fdb.FdbVectorIndex;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 

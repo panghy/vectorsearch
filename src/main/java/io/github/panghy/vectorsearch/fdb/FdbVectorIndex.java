@@ -1,7 +1,5 @@
-package io.github.panghy.vectorsearch.api;
+package io.github.panghy.vectorsearch.fdb;
 
-import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
-import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
@@ -18,10 +16,11 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.TaskQueues;
+import io.github.panghy.vectorsearch.api.SearchParams;
+import io.github.panghy.vectorsearch.api.SearchResult;
+import io.github.panghy.vectorsearch.api.VectorIndex;
 import io.github.panghy.vectorsearch.cache.SegmentCaches;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
-import io.github.panghy.vectorsearch.fdb.FdbDirectories;
-import io.github.panghy.vectorsearch.fdb.FdbVectorStore;
 import io.github.panghy.vectorsearch.proto.BuildTask;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
@@ -175,6 +174,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    * @param payload   optional payload bytes to store alongside the embedding
    * @return a future with [segmentId, vectorId]
    */
+  @Override
   public CompletableFuture<int[]> add(float[] embedding, byte[] payload) {
     return store.add(embedding, payload);
   }
@@ -182,6 +182,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   /**
    * Marks a single vector as deleted (tombstone) and updates segment counters.
    */
+  @Override
   public CompletableFuture<Void> delete(int segId, int vecId) {
     // Marks the record deleted and, if the per-segment deleted ratio is high enough,
     // enqueues a maintenance vacuum task to reclaim storage for that segment.
@@ -191,6 +192,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   /**
    * Batch delete convenience; each element is [segId, vecId].
    */
+  @Override
   public CompletableFuture<Void> deleteAll(int[][] ids) {
     // Collect affected segments so we can evaluate and enqueue one vacuum task per segment.
     Set<Integer> segs = new HashSet<>();
@@ -204,6 +206,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    * <p>Writes are chunked per transaction by ACTIVE segment capacity; rotates and enqueues
    * builds as needed.</p>
    */
+  @Override
   public CompletableFuture<List<int[]>> addAll(float[][] embeddings, byte[][] payloads) {
     return store.addBatch(embeddings, payloads);
   }
@@ -215,6 +218,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    * @param k the number of results to return
    * @return a future with up to K results ordered by descending score
    */
+  @Override
   public CompletableFuture<List<SearchResult>> query(float[] q, int k) {
     return query(q, k, SearchParams.defaults(k, config.getOversample()));
   }
@@ -222,6 +226,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   /**
    * Queries with per-call traversal knobs.
    */
+  @Override
   public CompletableFuture<List<SearchResult>> query(float[] q, int k, SearchParams params) {
     Database db = config.getDatabase();
     LOG.debug(
@@ -325,6 +330,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   /**
    * Approximate size of the codebook cache (for tests/observability).
    */
+  @Override
   public long getCodebookCacheSize() {
     return caches.getCodebookCacheAsync().synchronous().estimatedSize();
   }
@@ -332,6 +338,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   /**
    * Approximate size of the adjacency cache (for tests/observability).
    */
+  @Override
   public long getAdjacencyCacheSize() {
     return caches.getAdjacencyCache().estimatedSize();
   }
@@ -344,6 +351,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    * in typical usage with local workers running, claimed tasks should quickly finish and unclaimed
    * will reappear if needed.</p>
    */
+  @Override
   public CompletableFuture<Void> awaitIndexingComplete() {
     if (buildQueue == null) return completedFuture(null);
     Database db = config.getDatabase();
@@ -416,26 +424,16 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     Database db = config.getDatabase();
     Subspace reg = dirs.segmentsIndexSubspace();
     Range r = reg.range();
-    return db.readAsync(tr -> {
-          CompletableFuture<List<KeyValue>> kvsF = tr.getRange(r).asList();
-          CompletableFuture<byte[]> maxF = tr.get(dirs.maxSegmentKey());
-          return kvsF.thenCombine(maxF, (kvs, maxB) -> {
-            Set<Integer> set = new HashSet<>();
-            for (KeyValue kv : kvs) {
-              Tuple t = reg.unpack(kv.getKey());
-              String segStr = t.getString(0);
-              set.add(Integer.parseInt(segStr));
-            }
-            if (maxB != null) {
-              int maxSeg = toIntExact(decodeInt(maxB));
-              for (int i = 0; i <= maxSeg; i++) set.add(i);
-            }
-            List<Integer> ids = new ArrayList<>(set);
-            ids.sort(Integer::compareTo);
-            return ids;
-          });
-        })
-        .thenApply(ids -> ids);
+    return db.readAsync(tr -> tr.getRange(r).asList()).thenApply(kvs -> {
+      List<Integer> ids = new ArrayList<>(kvs.size());
+      for (KeyValue kv : kvs) {
+        Tuple t = reg.unpack(kv.getKey());
+        String segStr = t.getString(0);
+        ids.add(Integer.parseInt(segStr));
+      }
+      ids.sort(Integer::compareTo);
+      return ids;
+    });
   }
 
   /**
