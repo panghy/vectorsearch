@@ -91,8 +91,6 @@ public final class FdbVectorStore {
               .setPqK(config.getPqK())
               .setGraphDegree(config.getGraphDegree())
               .setOversample(config.getOversample())
-              .setVacuumCooldownMs(
-                  Math.max(0, config.getVacuumCooldown().toMillis()))
               .build();
           tr.set(metaK, meta.toByteArray());
         } else {
@@ -156,11 +154,7 @@ public final class FdbVectorStore {
       throw new IllegalArgumentException("oversample mismatch: existing=" + existing.getOversample()
           + ", requested=" + config.getOversample());
     }
-    long existingCooldownMs = existing.getVacuumCooldownMs();
-    if (existingCooldownMs != Math.max(0, config.getVacuumCooldown().toMillis())) {
-      throw new IllegalArgumentException("vacuumCooldown mismatch: existing=" + existingCooldownMs
-          + ", requested=" + config.getVacuumCooldown().toMillis());
-    }
+    // vacuumCooldown is runtime-only and not persisted in IndexMeta; no validation.
   }
 
   /**

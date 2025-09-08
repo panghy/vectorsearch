@@ -1,9 +1,5 @@
 package io.github.panghy.vectorsearch.api;
 
-/**
- * Prefetch smoke test: verifies query-time codebook prefetch (fire-and-forget) warms
- * the codebook cache when multiple segments are SEALED.
- */
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.apple.foundationdb.Database;
@@ -28,6 +24,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Prefetch smoke test: verifies query-time codebook prefetch (fire-and-forget) warms
+ * the codebook cache when multiple segments are SEALED.
+ */
 class VectorIndexPrefetchSmokeTest {
   Database db;
   DirectorySubspace root;

@@ -147,9 +147,11 @@ public final class MaintenanceService {
   private CompletableFuture<Void> updateMetaAfterVacuum(
       Database db, FdbDirectories.SegmentKeys sk, SegmentMeta sm, int removed) {
     if (removed <= 0) return completedFuture(null);
+    long now = config.getInstantSource().instant().toEpochMilli();
     return db.runAsync(tr -> {
       SegmentMeta updated = sm.toBuilder()
           .setDeletedCount(Math.max(0, sm.getDeletedCount() - removed))
+          .setLastVacuumAtMs(now)
           .build();
       tr.set(sk.metaKey(), updated.toByteArray());
       return completedFuture(null);

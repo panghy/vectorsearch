@@ -58,9 +58,6 @@ message IndexMeta {
   int32 graph_degree = 7;
   int32 oversample = 8;
 
-  // Vacuum cooldown to coalesce repeated maintenance enqueues for the same segment.
-  // Value is milliseconds. 0 disables cooldown.
-  int64 vacuum_cooldown_ms = 9;
 }
 
 // -----------------------------------------------------------------------------
@@ -90,6 +87,9 @@ message SegmentMeta {
   // Number of vectors marked deleted in this segment. Helps maintenance tasks
   // (vacuum/compaction) decide when to reclaim space.
   int64 deleted_count = 5;
+
+  // Last time a vacuum job completed for this segment (ms since epoch). Optional.
+  int64 last_vacuum_at_ms = 6;
 }
 
 // -----------------------------------------------------------------------------
