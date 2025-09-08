@@ -4,6 +4,8 @@ import static com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.CompletableFuture.delayedExecutor;
+import static java.util.concurrent.CompletableFuture.supplyAsync;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.KeyValue;
@@ -386,11 +388,11 @@ public class VectorIndex implements AutoCloseable {
               return visF.thenCombine(
                   clmF, (vis, clm) -> Boolean.TRUE.equals(vis) || Boolean.TRUE.equals(clm));
             })
-            .thenCompose(keep -> keep
-                ? CompletableFuture.supplyAsync(
-                    () -> true,
-                    CompletableFuture.delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
-                : completedFuture(false)))
+            .thenCompose(keepTrying -> {
+              if (keepTrying)
+                return supplyAsync(() -> true, delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS));
+              return completedFuture(false);
+            }))
         .thenApply(v -> null);
   }
 
