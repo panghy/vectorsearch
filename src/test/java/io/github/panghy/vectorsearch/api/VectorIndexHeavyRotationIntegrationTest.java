@@ -1,9 +1,5 @@
 package io.github.panghy.vectorsearch.api;
 
-/**
- * Integration stress test inserting many vectors with small segment size to force rotation,
- * and running parallel queries to assert recall under heavy rotation.
- */
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.apple.foundationdb.Database;
@@ -23,7 +19,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Integration test that stresses heavy rotation and parallel search.
+ * Integration stress test inserting many vectors with small segment size to force rotation,
+ * and running parallel queries to assert recall under heavy rotation.
  */
 class VectorIndexHeavyRotationIntegrationTest {
   Database db;

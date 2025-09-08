@@ -1,9 +1,5 @@
 package io.github.panghy.vectorsearch.api;
 
-/**
- * Smoke test that BEST_FIRST defaults achieve high self-recall on a small random dataset
- * once segments are sealed and indexing complete.
- */
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.apple.foundationdb.Database;
@@ -26,6 +22,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Smoke test that BEST_FIRST defaults achieve high self-recall on a small random dataset
+ * once segments are sealed and indexing complete.
+ */
 class VectorIndexBestFirstRecallTest {
   Database db;
   DirectorySubspace root;

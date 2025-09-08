@@ -1,12 +1,5 @@
 package io.github.panghy.vectorsearch.api;
 
-/**
- * Integration tests for VectorIndex covering:
- * - Basic L2/COSINE queries on tiny datasets
- * - Sealed vs active segment paths, adjacency/codebook cache usage
- * - Edge cases (missing codebook, cleared codes, empty adjacency)
- * - BEST_FIRST tuning behavior and deterministic pivots
- */
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.apple.foundationdb.Database;
@@ -36,6 +29,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Integration tests for VectorIndex covering:
+ * - Basic L2/COSINE queries on tiny datasets
+ * - Sealed vs active segment paths, adjacency/codebook cache usage
+ * - Edge cases (missing codebook, cleared codes, empty adjacency)
+ * - BEST_FIRST tuning behavior and deterministic pivots
+ */
 class VectorIndexQueryIntegrationTest {
   Database db;
   DirectorySubspace root;

@@ -1,10 +1,5 @@
 package io.github.panghy.vectorsearch.api;
 
-/**
- * Verifies that addAll/addBatch preserves input ordering when assigning (segId, vecId)
- * across rotations and internal transaction chunking. For strict-cap rotation, the
- * expected mapping for the i-th vector is (i / maxSegmentSize, i % maxSegmentSize).
- */
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.apple.foundationdb.Database;
@@ -20,6 +15,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Verifies that addAll/addBatch preserves input ordering when assigning (segId, vecId)
+ * across rotations and internal transaction chunking. For strict-cap rotation, the
+ * expected mapping for the i-th vector is (i / maxSegmentSize, i % maxSegmentSize).
+ */
 class VectorIndexAddBatchOrderingTest {
   Database db;
   DirectorySubspace root;
