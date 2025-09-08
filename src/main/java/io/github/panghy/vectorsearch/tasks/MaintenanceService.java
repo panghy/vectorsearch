@@ -59,8 +59,7 @@ public final class MaintenanceService {
    */
   public CompletableFuture<Void> vacuumSegment(int segId, double minDeletedRatio) {
     Database db = config.getDatabase();
-    String segStr = String.format("%06d", segId);
-    var sk = indexDirs.segmentKeys(segStr);
+    var sk = indexDirs.segmentKeys(segId);
     return db.readAsync(tr -> tr.get(sk.metaKey())).thenCompose(metaBytes -> {
       if (metaBytes == null) return completedFuture(null);
       SegmentMeta sm;
@@ -77,7 +76,7 @@ public final class MaintenanceService {
         return completedFuture(null);
       }
       // Scan vectors
-      Subspace vprefix = new Subspace(indexDirs.segmentsDir().pack(Tuple.from(segStr, "vectors")));
+      Subspace vprefix = new Subspace(indexDirs.segmentsDir().pack(Tuple.from(segId, "vectors")));
       Range vr = vprefix.range();
       return db.readAsync(tr -> tr.getRange(vr).asList())
           .thenCompose(kvs -> deleteTombstones(db, sk, kvs))

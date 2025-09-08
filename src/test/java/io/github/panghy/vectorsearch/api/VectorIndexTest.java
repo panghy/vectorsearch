@@ -233,8 +233,8 @@ class VectorIndexTest {
     var segKvs = db.readAsync(tr -> tr.getRange(reg.range()).asList()).get(5, TimeUnit.SECONDS);
     var builder = new SegmentBuildService(cfg, dirs);
     for (var kv : segKvs) {
-      String segStr = reg.unpack(kv.getKey()).getString(0);
-      builder.build(Integer.parseInt(segStr)).get(10, TimeUnit.SECONDS);
+      int segId = Math.toIntExact(reg.unpack(kv.getKey()).getLong(0));
+      builder.build(segId).get(10, TimeUnit.SECONDS);
     }
     List<Integer> picks = new ArrayList<>();
     for (int i = 0; i < qCount; i++) picks.add(rnd.nextInt(n));
@@ -364,8 +364,7 @@ class VectorIndexTest {
     index.add(new float[] {0f, 1f, 0f, 0f}, null).get(5, TimeUnit.SECONDS);
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     new SegmentBuildService(cfg, dirs).build(0).get(5, TimeUnit.SECONDS);
-    String segStr = "000000";
-    Subspace codes = new Subspace(dirs.segmentsDir().pack(Tuple.from(segStr, "pq", "codes")));
+    Subspace codes = new Subspace(dirs.segmentsDir().pack(Tuple.from(0, "pq", "codes")));
     Range cr = codes.range();
     db.run(tr -> {
       tr.clear(cr.begin, cr.end);
@@ -467,8 +466,8 @@ class VectorIndexTest {
     var segKvs = db.readAsync(tr -> tr.getRange(reg.range()).asList()).get(10, TimeUnit.SECONDS);
     var builder = new SegmentBuildService(cfg, dirs);
     for (var kv : segKvs) {
-      String segStr = reg.unpack(kv.getKey()).getString(0);
-      builder.build(Integer.parseInt(segStr)).get(30, TimeUnit.SECONDS);
+      int segId = Math.toIntExact(reg.unpack(kv.getKey()).getLong(0));
+      builder.build(segId).get(30, TimeUnit.SECONDS);
     }
     List<CompletableFuture<List<SearchResult>>> futures = new ArrayList<>();
     for (int i : picks) futures.add(index.query(inserted.get(i), topK));

@@ -208,9 +208,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                 List<CompletableFuture<byte[]>> gets = new ArrayList<>();
                 List<Integer> ids = new ArrayList<>();
                 for (int segId : segIds) {
-                  String segStr = String.format("%06d", segId);
-                  gets.add(
-                      tr.get(indexDirs.segmentKeys(segStr).metaKey()));
+                  gets.add(tr.get(indexDirs.segmentKeys(segId).metaKey()));
                   ids.add(segId);
                 }
                 return allOf(gets.toArray(CompletableFuture[]::new))
@@ -322,9 +320,8 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     double thr = config.getVacuumMinDeletedRatio();
     List<CompletableFuture<Void>> fs = new ArrayList<>();
     for (int segId : segIds) {
-      String segStr = String.format("%06d", segId);
       fs.add(db.runAsync(
-          tr -> tr.get(indexDirs.segmentKeys(segStr).metaKey()).thenCompose(bytes -> {
+          tr -> tr.get(indexDirs.segmentKeys(segId).metaKey()).thenCompose(bytes -> {
             if (bytes == null) return completedFuture(null);
             try {
               SegmentMeta sm = SegmentMeta.parseFrom(bytes);
@@ -374,8 +371,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
       List<Integer> ids = new ArrayList<>(kvs.size());
       for (KeyValue kv : kvs) {
         Tuple t = reg.unpack(kv.getKey());
-        String segStr = t.getString(0);
-        ids.add(Integer.parseInt(segStr));
+        ids.add(Math.toIntExact(t.getLong(0)));
       }
       ids.sort(Integer::compareTo);
       return ids;
@@ -387,8 +383,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    */
   private CompletableFuture<List<SearchResult>> searchSegment(
       Database db, FdbDirectories.IndexDirectories dirs, int segId, float[] q, int k, SearchParams params) {
-    String segStr = String.format("%06d", segId);
-    return db.readAsync(tr -> tr.get(dirs.segmentKeys(segStr).metaKey()).thenCompose(metaB -> {
+    return db.readAsync(tr -> tr.get(dirs.segmentKeys(segId).metaKey()).thenCompose(metaB -> {
       if (metaB == null) return completedFuture(List.of());
       try {
         SegmentMeta sm = SegmentMeta.parseFrom(metaB);
@@ -408,8 +403,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    */
   private CompletableFuture<List<SearchResult>> searchBruteForceSegment(
       Database db, FdbDirectories.IndexDirectories dirs, int segId, float[] q, int k) {
-    String segStr = String.format("%06d", segId);
-    Subspace vectorsPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segStr, "vectors")));
+    Subspace vectorsPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segId, "vectors")));
     Range vr = vectorsPrefix.range();
     return db.readAsync(tr -> tr.getRange(vr).asList().thenApply(kvs -> {
       LOG.debug("Brute-force segId={} loaded {} vector records", segId, kvs.size());
@@ -462,14 +456,13 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    */
   private CompletableFuture<List<SearchResult>> searchSealedSegment(
       Database db, FdbDirectories.IndexDirectories dirs, int segId, float[] q, int k, SearchParams params) {
-    String segStr = String.format("%06d", segId);
     return caches.getCodebookCacheAsync().get(segId).thenCompose(centroids -> {
       if (centroids == null) {
         LOG.warn("Missing PQ codebook for sealed segment segId={}", segId);
         return completedFuture(List.of());
       }
       double[][] lut = buildLut(centroids, q);
-      Subspace codesPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segStr, "pq", "codes")));
+      Subspace codesPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segId, "pq", "codes")));
       Range cr = codesPrefix.range();
       return config.getDatabase()
           .readAsync(tr -> tr.getRange(cr).asList())
@@ -705,12 +698,11 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
       boolean normalizeOnRead,
       List<Approx> cand,
       int k) {
-    String segStr = String.format("%06d", segId);
     LOG.debug("Exact rerank segId={} candidates={}", segId, cand.size());
     return db.readAsync(tr -> {
       List<CompletableFuture<VectorRecord>> recF = new ArrayList<>();
       for (Approx a : cand) {
-        byte[] key = dirs.segmentKeys(segStr).vectorKey(a.vecId());
+        byte[] key = dirs.segmentKeys(segId).vectorKey(a.vecId());
         recF.add(tr.get(key).thenApply(v -> {
           if (v == null) return null;
           try {

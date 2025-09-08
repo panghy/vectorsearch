@@ -114,8 +114,8 @@ public final class FdbVectorStore {
               .setCreatedAtMs(Instant.now().toEpochMilli())
               .setDeletedCount(0)
               .build();
-          tr.set(indexDirs.segmentKeys(segIdStr(segId)).metaKey(), sm.toByteArray());
-          tr.set(indexDirs.segmentsIndexKey(segIdStr(segId)), new byte[0]);
+          tr.set(indexDirs.segmentKeys(segId).metaKey(), sm.toByteArray());
+          tr.set(indexDirs.segmentsIndexKey(segId), new byte[0]);
         }
         return completedFuture(null);
       });
@@ -207,8 +207,7 @@ public final class FdbVectorStore {
                 byte[] curSegK = indexDirs.currentSegmentKey();
                 return tr.get(curSegK).thenCompose(curSegV -> {
                   int segId = Math.toIntExact(decodeInt(curSegV));
-                  String segStr = segIdStr(segId);
-                  FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segStr);
+                  FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segId);
                   return tr.get(sk.metaKey()).thenCompose(segMetaBytes -> {
                     SegmentMeta sm;
                     try {
@@ -236,7 +235,6 @@ public final class FdbVectorStore {
                       int nextSeg = segId + 1;
                       tr.set(curSegK, encodeInt(nextSeg));
                       tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
-                      String nextStr = segIdStr(nextSeg);
                       SegmentMeta nextMeta = SegmentMeta.newBuilder()
                           .setSegmentId(nextSeg)
                           .setState(SegmentMeta.State.ACTIVE)
@@ -246,10 +244,10 @@ public final class FdbVectorStore {
                           .build();
                       tr.set(
                           indexDirs
-                              .segmentKeys(nextStr)
+                              .segmentKeys(nextSeg)
                               .metaKey(),
                           nextMeta.toByteArray());
-                      tr.set(indexDirs.segmentsIndexKey(nextStr), new byte[0]);
+                      tr.set(indexDirs.segmentsIndexKey(nextSeg), new byte[0]);
                       LOGGER.debug(
                           "Rotated segment: {} -> {} (sealed PENDING seg {}), enqueuing"
                               + " build task",
@@ -300,7 +298,6 @@ public final class FdbVectorStore {
                               int nextSeg = segId + 1;
                               tr.set(curSegK, encodeInt(nextSeg));
                               tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
-                              String nextStr = segIdStr(nextSeg);
                               SegmentMeta nextMeta = SegmentMeta.newBuilder()
                                   .setSegmentId(nextSeg)
                                   .setState(SegmentMeta.State.ACTIVE)
@@ -310,10 +307,10 @@ public final class FdbVectorStore {
                                   .build();
                               tr.set(
                                   indexDirs
-                                      .segmentKeys(nextStr)
+                                      .segmentKeys(nextSeg)
                                       .metaKey(),
                                   nextMeta.toByteArray());
-                              tr.set(indexDirs.segmentsIndexKey(nextStr), new byte[0]);
+                              tr.set(indexDirs.segmentsIndexKey(nextSeg), new byte[0]);
                               LOGGER.debug(
                                   "Rotated segment: {} -> {} (sealed PENDING seg"
                                       + " {}), enqueuing build task",
@@ -361,8 +358,7 @@ public final class FdbVectorStore {
       int segId = e.getKey();
       List<Integer> vecIds = e.getValue();
       writes.add(db.runAsync(tr -> {
-        String segStr = segIdStr(segId);
-        FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segStr);
+        FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segId);
         // Load meta
         return tr.get(sk.metaKey()).thenCompose(metaBytes -> {
           try {
@@ -497,17 +493,14 @@ public final class FdbVectorStore {
    */
   public CompletableFuture<SegmentMeta> getSegmentMeta(int segId) {
     Database db = config.getDatabase();
-    return db.readAsync(
-        tr -> tr.get(indexDirs.segmentKeys(segIdStr(segId)).metaKey()).thenApply(bytes -> {
-          try {
-            return SegmentMeta.parseFrom(bytes);
-          } catch (InvalidProtocolBufferException e) {
-            throw new RuntimeException(e);
-          }
-        }));
+    return db.readAsync(tr -> tr.get(indexDirs.segmentKeys(segId).metaKey()).thenApply(bytes -> {
+      try {
+        return SegmentMeta.parseFrom(bytes);
+      } catch (InvalidProtocolBufferException e) {
+        throw new RuntimeException(e);
+      }
+    }));
   }
 
-  private static String segIdStr(long segId) {
-    return String.format("%06d", segId);
-  }
+  // segId is encoded directly in tuple keys; no zero-padding.
 }
