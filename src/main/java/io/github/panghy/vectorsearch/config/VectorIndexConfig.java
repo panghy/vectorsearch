@@ -48,6 +48,7 @@ public final class VectorIndexConfig {
   private final int adjacencyBatchLoadSize;
   private final Map<String, String> metricAttributes;
   private final boolean prefetchCodebooksEnabled;
+  private final boolean prefetchCodebooksSync;
 
   // Build batching/size control
   private final long buildTxnLimitBytes;
@@ -100,6 +101,7 @@ public final class VectorIndexConfig {
     this.adjacencyBatchLoadSize = b.adjacencyBatchLoadSize;
     this.metricAttributes = Map.copyOf(b.metricAttributes);
     this.prefetchCodebooksEnabled = b.prefetchCodebooksEnabled;
+    this.prefetchCodebooksSync = b.prefetchCodebooksSync;
 
     if (b.buildTxnLimitBytes <= 0) throw new IllegalArgumentException("buildTxnLimitBytes must be positive");
     if (!(b.buildTxnSoftLimitRatio > 0.0 && b.buildTxnSoftLimitRatio < 1.0))
@@ -264,6 +266,13 @@ public final class VectorIndexConfig {
   }
 
   /**
+   * When true, query waits for codebook prefetch to complete before searching (test-only).
+   */
+  public boolean isPrefetchCodebooksSync() {
+    return prefetchCodebooksSync;
+  }
+
+  /**
    * Upper bound for FDB transaction size (bytes) used by segment build batching.
    */
   public long getBuildTxnLimitBytes() {
@@ -317,6 +326,7 @@ public final class VectorIndexConfig {
     private int adjacencyBatchLoadSize = 10_000;
     private final Map<String, String> metricAttributes = new HashMap<>();
     private boolean prefetchCodebooksEnabled = true;
+    private boolean prefetchCodebooksSync = false;
     private long buildTxnLimitBytes = 10L * 1024 * 1024; // 10 MB
     private double buildTxnSoftLimitRatio = 0.9; // leave 10% headroom
     private int buildSizeCheckEvery = 32;
@@ -482,6 +492,15 @@ public final class VectorIndexConfig {
      */
     public Builder prefetchCodebooksEnabled(boolean enabled) {
       this.prefetchCodebooksEnabled = enabled;
+      return this;
+    }
+
+    /**
+     * If enabled, query blocks until codebook prefetch completes. Useful in tests to avoid
+     * polling/sleeps. Default false.
+     */
+    public Builder prefetchCodebooksSync(boolean sync) {
+      this.prefetchCodebooksSync = sync;
       return this;
     }
 

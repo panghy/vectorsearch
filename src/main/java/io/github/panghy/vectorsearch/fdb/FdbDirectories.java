@@ -45,6 +45,16 @@ public final class FdbDirectories {
     public SegmentKeys segmentKeys(String segIdStr) {
       return new SegmentKeys(segmentsDir, segIdStr);
     }
+
+    /** Registry key to mark a segment as existent. */
+    public byte[] segmentsIndexKey(String segIdStr) {
+      return indexDir.pack(Tuple.from(FdbPathUtil.SEGMENTS_INDEX, segIdStr));
+    }
+
+    /** Subspace for the segments index prefix. */
+    public com.apple.foundationdb.subspace.Subspace segmentsIndexSubspace() {
+      return new com.apple.foundationdb.subspace.Subspace(indexDir.pack(Tuple.from(FdbPathUtil.SEGMENTS_INDEX)));
+    }
   }
 
   /**

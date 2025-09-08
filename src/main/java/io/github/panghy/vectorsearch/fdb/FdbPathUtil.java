@@ -19,6 +19,7 @@ public final class FdbPathUtil {
   public static final String GRAPH = "graph";
   public static final String TASKS = "tasks";
   public static final String BUILD_REQUESTED = "buildRequested";
+  public static final String SEGMENTS_INDEX = "segmentsIndex";
 
   public static final String META = "meta";
   public static final String CURRENT_SEGMENT = "currentSegment";

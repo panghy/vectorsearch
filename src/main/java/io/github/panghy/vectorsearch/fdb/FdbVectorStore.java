@@ -115,6 +115,7 @@ public final class FdbVectorStore {
               .setDeletedCount(0)
               .build();
           tr.set(indexDirs.segmentKeys(segIdStr(segId)).metaKey(), sm.toByteArray());
+          tr.set(indexDirs.segmentsIndexKey(segIdStr(segId)), new byte[0]);
         }
         return completedFuture(null);
       });
@@ -248,6 +249,7 @@ public final class FdbVectorStore {
                               .segmentKeys(nextStr)
                               .metaKey(),
                           nextMeta.toByteArray());
+                      tr.set(indexDirs.segmentsIndexKey(nextStr), new byte[0]);
                       LOGGER.debug(
                           "Rotated segment: {} -> {} (sealed PENDING seg {}), enqueuing"
                               + " build task",
