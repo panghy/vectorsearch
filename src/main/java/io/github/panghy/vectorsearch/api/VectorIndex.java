@@ -329,16 +329,17 @@ public class VectorIndex implements AutoCloseable {
     if (buildQueue == null) return completedFuture(null);
     Database db = config.getDatabase();
     final long pollDelayMs = 50L;
-    return AsyncUtil.whileTrue(() ->
-            // Continue while there are visible unclaimed tasks OR any segment is still PENDING
-            db.runAsync(tr -> buildQueue.hasVisibleUnclaimedTasks(tr))
-                .thenCompose(hasVisible ->
-                    Boolean.TRUE.equals(hasVisible) ? completedFuture(true) : anyPendingSegments())
-                .thenCompose(keep -> keep
-                    ? CompletableFuture.supplyAsync(
-                        () -> true,
-                        CompletableFuture.delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
-                    : completedFuture(false)))
+    return AsyncUtil.whileTrue(() -> db.runAsync(tr -> {
+              var visF = buildQueue.hasVisibleUnclaimedTasks(tr);
+              var clmF = buildQueue.hasClaimedTasks(tr);
+              return visF.thenCombine(
+                  clmF, (vis, clm) -> Boolean.TRUE.equals(vis) || Boolean.TRUE.equals(clm));
+            })
+            .thenCompose(keep -> keep
+                ? CompletableFuture.supplyAsync(
+                    () -> true,
+                    CompletableFuture.delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
+                : completedFuture(false)))
         .thenApply(v -> null);
   }
 
