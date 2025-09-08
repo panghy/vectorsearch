@@ -61,6 +61,10 @@ public class VectorIndex implements AutoCloseable {
   private TaskQueue<String, BuildTask> buildQueue;
   private TaskQueue<String, MaintenanceTask> maintenanceQueue;
   private MaintenanceWorkerPool maintenancePool;
+  // Metrics instruments (lazy optional)
+  private io.opentelemetry.api.metrics.Meter meter;
+  private io.opentelemetry.api.metrics.LongCounter vacScheduled;
+  private io.opentelemetry.api.metrics.LongCounter vacSkipped;
 
   private SegmentBuildWorkerPool workerPool;
 
@@ -70,6 +74,58 @@ public class VectorIndex implements AutoCloseable {
     this.indexDirs = requireNonNull(indexDirs, "indexDirs");
     this.caches = new SegmentCaches(config, indexDirs);
     this.caches.registerMetrics(config);
+    // Register index-level metrics
+    try {
+      this.meter = io.opentelemetry.api.GlobalOpenTelemetry.getMeter("io.github.panghy.vectorsearch");
+      this.vacScheduled = meter.counterBuilder("vectorsearch.maintenance.vacuum.scheduled")
+          .build();
+      this.vacSkipped = meter.counterBuilder("vectorsearch.maintenance.vacuum.skipped")
+          .build();
+      meter.gaugeBuilder("vectorsearch.segments.state_count").ofLongs().buildWithCallback(obs -> {
+        listSegmentsWithMeta(this.indexDirs)
+            .thenAccept(ids -> {
+              long active = 0, pending = 0, sealed = 0;
+              Database db = config.getDatabase();
+              List<CompletableFuture<byte[]>> gets = new ArrayList<>();
+              for (int sid : ids)
+                gets.add(db.readAsync(tr -> tr.get(indexDirs
+                    .segmentKeys(String.format("%06d", sid))
+                    .metaKey())));
+              CompletableFuture.allOf(gets.toArray(CompletableFuture[]::new))
+                  .join();
+              for (var f : gets) {
+                byte[] b = f.join();
+                if (b == null) continue;
+                try {
+                  SegmentMeta sm = SegmentMeta.parseFrom(b);
+                  switch (sm.getState()) {
+                    case ACTIVE -> active++;
+                    case PENDING -> pending++;
+                    case SEALED -> sealed++;
+                  }
+                } catch (InvalidProtocolBufferException ignored) {
+                }
+              }
+              io.opentelemetry.api.common.Attributes base =
+                  io.opentelemetry.api.common.Attributes.empty();
+              obs.record(
+                  active,
+                  io.opentelemetry.api.common.Attributes.of(
+                      io.opentelemetry.api.common.AttributeKey.stringKey("state"), "ACTIVE"));
+              obs.record(
+                  pending,
+                  io.opentelemetry.api.common.Attributes.of(
+                      io.opentelemetry.api.common.AttributeKey.stringKey("state"), "PENDING"));
+              obs.record(
+                  sealed,
+                  io.opentelemetry.api.common.Attributes.of(
+                      io.opentelemetry.api.common.AttributeKey.stringKey("state"), "SEALED"));
+            })
+            .join();
+      });
+    } catch (Throwable ignored) {
+      /* metrics optional */
+    }
   }
 
   /**
@@ -374,6 +430,7 @@ public class VectorIndex implements AutoCloseable {
     List<CompletableFuture<Void>> fs = new ArrayList<>();
     for (int segId : segIds) {
       String segStr = String.format("%06d", segId);
+      byte[] lastK = indexDirs.tasksDir().pack(Tuple.from("maint", "vacuum", "last", segStr));
       fs.add(db.runAsync(
           tr -> tr.get(indexDirs.segmentKeys(segStr).metaKey()).thenCompose(bytes -> {
             if (bytes == null) return completedFuture(null);
@@ -382,17 +439,43 @@ public class VectorIndex implements AutoCloseable {
               long live = sm.getCount();
               long del = sm.getDeletedCount();
               double ratio = (live + del) == 0 ? 0.0 : ((double) del) / ((double) (live + del));
-              if (ratio < thr) return completedFuture(null);
-              MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
-                  .setSegId(segId)
-                  .setMinDeletedRatio(thr)
-                  .build();
-              MaintenanceTask mt =
-                  MaintenanceTask.newBuilder().setVacuum(v).build();
-              String key = "vacuum-if-needed:" + segId;
-              return maintenanceQueue
-                  .enqueueIfNotExists(tr, key, mt)
-                  .thenApply(x -> null);
+              if (ratio < thr) {
+                if (vacSkipped != null) vacSkipped.add(1);
+                return completedFuture(null);
+              }
+              // Cooldown: skip if last enqueue is within cooldown window
+              CompletableFuture<byte[]> lastF = tr.get(lastK);
+              return lastF.thenCompose(last -> {
+                long cdMs =
+                    Math.max(0, config.getVacuumCooldown().toMillis());
+                if (last != null && cdMs > 0) {
+                  long prev = com.apple.foundationdb.tuple.Tuple.fromBytes(last)
+                      .getLong(0);
+                  long now =
+                      config.getInstantSource().instant().toEpochMilli();
+                  if (now - prev < cdMs) {
+                    if (vacSkipped != null) vacSkipped.add(1);
+                    return completedFuture(null);
+                  }
+                }
+                MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
+                    .setSegId(segId)
+                    .setMinDeletedRatio(thr)
+                    .build();
+                MaintenanceTask mt = MaintenanceTask.newBuilder()
+                    .setVacuum(v)
+                    .build();
+                String key = "vacuum-if-needed:" + segId;
+                if (vacScheduled != null) vacScheduled.add(1);
+                long now2 = config.getInstantSource().instant().toEpochMilli();
+                tr.set(
+                    lastK,
+                    com.apple.foundationdb.tuple.Tuple.from(now2)
+                        .pack());
+                return maintenanceQueue
+                    .enqueueIfNotExists(tr, key, mt)
+                    .thenApply(x -> null);
+              });
             } catch (InvalidProtocolBufferException e) {
               throw new RuntimeException(e);
             }

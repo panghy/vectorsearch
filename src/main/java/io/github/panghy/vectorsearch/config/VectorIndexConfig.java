@@ -37,6 +37,7 @@ public final class VectorIndexConfig {
   private final int estimatedWorkerCount;
   private final int localWorkerThreads;
   private final int localMaintenanceWorkerThreads;
+  private final Duration vacuumCooldown;
   private final double vacuumMinDeletedRatio;
   private final Duration defaultTtl;
   private final Duration defaultThrottle;
@@ -79,6 +80,8 @@ public final class VectorIndexConfig {
     if (b.localMaintenanceWorkerThreads < 0)
       throw new IllegalArgumentException("localMaintenanceWorkerThreads must be >= 0");
     this.localMaintenanceWorkerThreads = b.localMaintenanceWorkerThreads;
+    if (b.vacuumCooldown.isNegative()) throw new IllegalArgumentException("vacuumCooldown must be >= 0");
+    this.vacuumCooldown = b.vacuumCooldown;
     if (!(b.vacuumMinDeletedRatio >= 0.0 && b.vacuumMinDeletedRatio <= 1.0))
       throw new IllegalArgumentException("vacuumMinDeletedRatio must be in [0,1]");
     this.vacuumMinDeletedRatio = b.vacuumMinDeletedRatio;
@@ -196,6 +199,10 @@ public final class VectorIndexConfig {
   public int getLocalMaintenanceWorkerThreads() {
     return localMaintenanceWorkerThreads;
   }
+  /** Returns the cooldown between repeated vacuum enqueues for the same segment. */
+  public Duration getVacuumCooldown() {
+    return vacuumCooldown;
+  }
 
   /**
    * Minimum deleted ratio [0, 1] that triggers auto-enqueue of a vacuum task after deletes.
@@ -301,6 +308,7 @@ public final class VectorIndexConfig {
     private int estimatedWorkerCount = 1;
     private int localWorkerThreads = 0;
     private int localMaintenanceWorkerThreads = 0;
+    private Duration vacuumCooldown = Duration.ZERO;
     private double vacuumMinDeletedRatio = 0.25;
     private Duration defaultTtl = Duration.ofMinutes(5);
     private Duration defaultThrottle = Duration.ofSeconds(1);
@@ -403,6 +411,12 @@ public final class VectorIndexConfig {
      */
     public Builder vacuumMinDeletedRatio(double ratio) {
       this.vacuumMinDeletedRatio = ratio;
+      return this;
+    }
+
+    /** Sets the cooldown between repeated vacuum enqueues for the same segment. */
+    public Builder vacuumCooldown(Duration cooldown) {
+      this.vacuumCooldown = cooldown;
       return this;
     }
 

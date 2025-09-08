@@ -57,6 +57,10 @@ message IndexMeta {
   // - oversample: multiplier of K for candidate collection before exact rerank
   int32 graph_degree = 7;
   int32 oversample = 8;
+
+  // Vacuum cooldown to coalesce repeated maintenance enqueues for the same segment.
+  // Value is milliseconds. 0 disables cooldown.
+  int64 vacuum_cooldown_ms = 9;
 }
 
 // -----------------------------------------------------------------------------
