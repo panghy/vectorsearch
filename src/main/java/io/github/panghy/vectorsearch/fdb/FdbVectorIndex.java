@@ -50,13 +50,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * Public API façade for performing vector operations against an index.
- *
- * <p>Provides async methods for index initialization, insertion, and KNN queries.
- * For now, queries perform a brute-force scan across segments and will be
- * upgraded to use graph+PQ for SEALED segments in later milestones.</p>
- */
+// Implementation of VectorIndex using FoundationDB. See VectorIndex for API documentation.
 public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(FdbVectorIndex.class);
 
@@ -88,9 +82,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         meter.counterBuilder("vectorsearch.maintenance.vacuum.skipped").build();
   }
 
-  /**
-   * Creates or opens the index asynchronously and returns a ready VectorIndex.
-   */
+  // Creates or opens the index asynchronously and returns a ready VectorIndex.
   public static CompletableFuture<FdbVectorIndex> createOrOpen(VectorIndexConfig config) {
     return FdbDirectories.openIndex(config.getIndexDir(), config.getDatabase())
         .thenCompose(dirs -> createBuildQueue(config, dirs).thenCompose(buildQ -> {
@@ -151,9 +143,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         });
   }
 
-  /**
-   * Shuts down any auto-started background workers.
-   */
+  // Shuts down any auto-started background workers.
   @Override
   public void close() {
     if (workerPool != null) {
@@ -166,22 +156,11 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     }
   }
 
-  /**
-   * Inserts a vector into the current ACTIVE segment, rotating when the segment threshold is exceeded.
-   * Also, enqueues a background build task when a segment flips to PENDING.
-   *
-   * @param embedding the vector embedding (length must equal configured dimension)
-   * @param payload   optional payload bytes to store alongside the embedding
-   * @return a future with [segmentId, vectorId]
-   */
   @Override
   public CompletableFuture<int[]> add(float[] embedding, byte[] payload) {
     return store.add(embedding, payload);
   }
 
-  /**
-   * Marks a single vector as deleted (tombstone) and updates segment counters.
-   */
   @Override
   public CompletableFuture<Void> delete(int segId, int vecId) {
     // Marks the record deleted and, if the per-segment deleted ratio is high enough,
@@ -189,9 +168,6 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     return store.delete(segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(Set.of(segId)));
   }
 
-  /**
-   * Batch delete convenience; each element is [segId, vecId].
-   */
   @Override
   public CompletableFuture<Void> deleteAll(int[][] ids) {
     // Collect affected segments so we can evaluate and enqueue one vacuum task per segment.
@@ -200,32 +176,16 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     return store.deleteBatch(ids).thenCompose(v -> scheduleVacuumIfNeeded(segs));
   }
 
-  /**
-   * Batched insert API to reduce contention and improve throughput.
-   *
-   * <p>Writes are chunked per transaction by ACTIVE segment capacity; rotates and enqueues
-   * builds as needed.</p>
-   */
   @Override
   public CompletableFuture<List<int[]>> addAll(float[][] embeddings, byte[][] payloads) {
     return store.addBatch(embeddings, payloads);
   }
 
-  /**
-   * Queries the index for the top-K nearest neighbors to a query vector.
-   *
-   * @param q the query vector (length must equal configured dimension)
-   * @param k the number of results to return
-   * @return a future with up to K results ordered by descending score
-   */
   @Override
   public CompletableFuture<List<SearchResult>> query(float[] q, int k) {
     return query(q, k, SearchParams.defaults(k, config.getOversample()));
   }
 
-  /**
-   * Queries with per-call traversal knobs.
-   */
   @Override
   public CompletableFuture<List<SearchResult>> query(float[] q, int k, SearchParams params) {
     Database db = config.getDatabase();
@@ -327,30 +287,16 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     }
   }
 
-  /**
-   * Approximate size of the codebook cache (for tests/observability).
-   */
   @Override
   public long getCodebookCacheSize() {
     return caches.getCodebookCacheAsync().synchronous().estimatedSize();
   }
 
-  /**
-   * Approximate size of the adjacency cache (for tests/observability).
-   */
   @Override
   public long getAdjacencyCacheSize() {
     return caches.getAdjacencyCache().estimatedSize();
   }
 
-  /**
-   * Asynchronously waits until the background indexing queue is drained.
-   *
-   * <p>Loops using {@code hasVisibleUnclaimedTasks} without sleeps; returns when the queue reports
-   * no visible unclaimed tasks. This does not wait for currently claimed tasks to complete, but
-   * in typical usage with local workers running, claimed tasks should quickly finish and unclaimed
-   * will reappear if needed.</p>
-   */
   @Override
   public CompletableFuture<Void> awaitIndexingComplete() {
     if (buildQueue == null) return completedFuture(null);
