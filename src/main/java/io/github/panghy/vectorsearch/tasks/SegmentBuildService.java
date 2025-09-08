@@ -65,13 +65,12 @@ public class SegmentBuildService {
    */
   public CompletableFuture<Void> build(long segId) {
     Database db = config.getDatabase();
-    String segStr = String.format("%06d", segId);
     FdbDirectories.IndexDirectories dirs = indexDirs;
-    Subspace vectorsPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segStr, "vectors")));
+    Subspace vectorsPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from((int) segId, "vectors")));
     Range vr = vectorsPrefix.range();
     LOGGER.debug("Building segment {}", segId);
     // Only build PENDING segments. ACTIVE segments must never be sealed here.
-    return db.readAsync(tr -> tr.get(dirs.segmentKeys(segStr).metaKey()))
+    return db.readAsync(tr -> tr.get(dirs.segmentKeys((int) segId).metaKey()))
         .thenCompose(metaB -> {
           if (metaB == null) return completedFuture(null);
           SegmentMeta sm;
@@ -87,11 +86,11 @@ public class SegmentBuildService {
           return db.readAsync(tr -> tr.getRange(vr).asList())
               .thenCompose(kvs -> {
                 if (!kvs.isEmpty()) {
-                  return writeBuildArtifacts(dirs, segStr, kvs);
+                  return writeBuildArtifacts(dirs, (int) segId, kvs);
                 }
                 return completedFuture(null);
               })
-              .thenCompose(v -> sealSegment(dirs, segStr));
+              .thenCompose(v -> sealSegment(dirs, (int) segId));
         })
         .whenComplete((v, ex) -> {
           if (ex != null) {
@@ -103,7 +102,7 @@ public class SegmentBuildService {
   }
 
   private CompletableFuture<Void> writeBuildArtifacts(
-      FdbDirectories.IndexDirectories dirs, String segStr, List<KeyValue> kvs) {
+      FdbDirectories.IndexDirectories dirs, int segId, List<KeyValue> kvs) {
     Database db = config.getDatabase();
 
     // Decode vectors
@@ -127,7 +126,7 @@ public class SegmentBuildService {
     } catch (IllegalArgumentException ex) {
       // Fail the build so TaskQueue can retry later rather than sealing with a degenerate codebook.
       throw new IllegalStateException(
-          "PQ training failed for segment " + segStr + " (m=" + m + ", k=" + k + ", d=" + d + ")", ex);
+          "PQ training failed for segment " + segId + " (m=" + m + ", k=" + k + ", d=" + d + ")", ex);
     }
 
     // Build PQCodebook proto
@@ -154,26 +153,26 @@ public class SegmentBuildService {
     final List<float[]> vVectors = vectors;
 
     // Asynchronously write chunks until all records (and codebook) are persisted.
-    return writeChunkLoop(db, dirs, segStr, kvs, vVectors, cCentroids, neighbors, softLimit, checkEvery);
+    return writeChunkLoop(db, dirs, segId, kvs, vVectors, cCentroids, neighbors, softLimit, checkEvery);
   }
 
   private CompletableFuture<Void> writeChunkLoop(
       Database db,
       FdbDirectories.IndexDirectories dirs,
-      String segStr,
+      int segId,
       List<KeyValue> kvs,
       List<float[]> vectors,
       float[][][] centroids,
       int[][] neighbors,
       long softLimit,
       int checkEvery) {
-    return writeChunk(db, dirs, segStr, kvs, vectors, centroids, neighbors, 0, false, softLimit, checkEvery);
+    return writeChunk(db, dirs, segId, kvs, vectors, centroids, neighbors, 0, false, softLimit, checkEvery);
   }
 
   private CompletableFuture<Void> writeChunk(
       Database db,
       FdbDirectories.IndexDirectories dirs,
-      String segStr,
+      int segId,
       List<KeyValue> kvs,
       List<float[]> vectors,
       float[][][] centroids,
@@ -186,14 +185,14 @@ public class SegmentBuildService {
     final boolean writeCbThisTxn = !wroteCodebook;
     return db.runAsync(tr -> {
           if (writeCbThisTxn) {
-            tr.set(dirs.segmentKeys(segStr).pqCodebookKey(), buildCodebookBytes(centroids));
+            tr.set(dirs.segmentKeys(segId).pqCodebookKey(), buildCodebookBytes(centroids));
           }
-          FdbDirectories.SegmentKeys sk = dirs.segmentKeys(segStr);
+          FdbDirectories.SegmentKeys sk = dirs.segmentKeys(segId);
           return writeSome(tr, sk, dirs, kvs, vectors, centroids, neighbors, start, checkEvery, softLimit)
               .thenApply(next -> next);
         })
         .thenCompose(next -> writeChunk(
-            db, dirs, segStr, kvs, vectors, centroids, neighbors, next, true, softLimit, checkEvery));
+            db, dirs, segId, kvs, vectors, centroids, neighbors, next, true, softLimit, checkEvery));
   }
 
   private CompletableFuture<Integer> writeSome(
@@ -257,9 +256,9 @@ public class SegmentBuildService {
     return t.getLong(t.size() - 1);
   }
 
-  private CompletableFuture<Void> sealSegment(FdbDirectories.IndexDirectories dirs, String segStr) {
+  private CompletableFuture<Void> sealSegment(FdbDirectories.IndexDirectories dirs, int segId) {
     Database db = config.getDatabase();
-    return db.runAsync(tr -> tr.get(dirs.segmentKeys(segStr).metaKey()).thenApply(bytes -> {
+    return db.runAsync(tr -> tr.get(dirs.segmentKeys(segId).metaKey()).thenApply(bytes -> {
       if (bytes == null) return null;
       try {
         SegmentMeta sm = SegmentMeta.parseFrom(bytes);
@@ -268,7 +267,7 @@ public class SegmentBuildService {
             .setState(SegmentMeta.State.SEALED)
             .setCreatedAtMs(sm.getCreatedAtMs() == 0 ? Instant.now().toEpochMilli() : sm.getCreatedAtMs())
             .build();
-        tr.set(dirs.segmentKeys(segStr).metaKey(), sealed.toByteArray());
+        tr.set(dirs.segmentKeys(segId).metaKey(), sealed.toByteArray());
         return null;
       } catch (InvalidProtocolBufferException e) {
         throw new RuntimeException(e);

@@ -43,8 +43,7 @@ public final class SegmentCaches {
         .buildAsync(new AsyncCacheLoader<>() {
           @Override
           public CompletableFuture<float[][][]> asyncLoad(Integer segId, Executor ex) {
-            return db.readAsync(tr ->
-                    tr.get(dirs.segmentKeys(segStr(segId)).pqCodebookKey()))
+            return db.readAsync(tr -> tr.get(dirs.segmentKeys(segId).pqCodebookKey()))
                 .thenApply(bytes -> bytes == null ? null : decodeCodebook(bytes));
           }
 
@@ -57,8 +56,7 @@ public final class SegmentCaches {
               fs.add(db.readAsync(tr -> {
                 Map<Integer, float[][][]> out = new HashMap<>();
                 for (Integer sid : part) {
-                  byte[] b = tr.get(dirs.segmentKeys(segStr(sid))
-                          .pqCodebookKey())
+                  byte[] b = tr.get(dirs.segmentKeys(sid).pqCodebookKey())
                       .join();
                   if (b != null) out.put(sid, decodeCodebook(b));
                 }
@@ -82,8 +80,7 @@ public final class SegmentCaches {
           public CompletableFuture<int[]> asyncLoad(Long key, Executor ex) {
             int segId = (int) (key >> 32);
             int vecId = (int) (key & 0xffffffffL);
-            return db.readAsync(tr ->
-                    tr.get(dirs.segmentKeys(segStr(segId)).graphKey(vecId)))
+            return db.readAsync(tr -> tr.get(dirs.segmentKeys(segId).graphKey(vecId)))
                 .thenApply(SegmentCaches::toAdj);
           }
 
@@ -98,8 +95,7 @@ public final class SegmentCaches {
                 for (Long key : part) {
                   int segId = (int) (key >> 32);
                   int vecId = (int) (key & 0xffffffffL);
-                  byte[] b = tr.get(dirs.segmentKeys(segStr(segId))
-                          .graphKey(vecId))
+                  byte[] b = tr.get(dirs.segmentKeys(segId).graphKey(vecId))
                       .join();
                   out.put(key, toAdj(b));
                 }
@@ -138,9 +134,7 @@ public final class SegmentCaches {
     return (((long) segId) << 32) | (vecId & 0xffffffffL);
   }
 
-  private static String segStr(int segId) {
-    return String.format("%06d", segId);
-  }
+  // segId stored directly in tuple keys
 
   private static float[][][] decodeCodebook(byte[] bytes) {
     try {

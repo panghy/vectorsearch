@@ -69,9 +69,8 @@ public class FdbVectorStoreDeleteMetaTest {
     int seg = ids[0][0];
     // Before delete
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
-    SegmentMeta before = db.readAsync(tr -> tr.get(
-                dirs.segmentKeys(String.format("%06d", seg)).metaKey())
-            .thenApply(bytes -> {
+    SegmentMeta before = db.readAsync(
+            tr -> tr.get(dirs.segmentKeys(seg).metaKey()).thenApply(bytes -> {
               try {
                 return SegmentMeta.parseFrom(bytes);
               } catch (com.google.protobuf.InvalidProtocolBufferException e) {
@@ -86,9 +85,8 @@ public class FdbVectorStoreDeleteMetaTest {
     index.delete(ids[0][0], ids[0][1]).get(5, TimeUnit.SECONDS);
     index.delete(ids[1][0], ids[1][1]).get(5, TimeUnit.SECONDS);
 
-    SegmentMeta after = db.readAsync(tr -> tr.get(
-                dirs.segmentKeys(String.format("%06d", seg)).metaKey())
-            .thenApply(bytes -> {
+    SegmentMeta after = db.readAsync(
+            tr -> tr.get(dirs.segmentKeys(seg).metaKey()).thenApply(bytes -> {
               try {
                 return SegmentMeta.parseFrom(bytes);
               } catch (com.google.protobuf.InvalidProtocolBufferException e) {
@@ -104,9 +102,8 @@ public class FdbVectorStoreDeleteMetaTest {
         VectorIndexConfig.builder(db, root).dimension(4).build(), dirs);
     svc.vacuumSegment(seg, 0.0).get(5, TimeUnit.SECONDS);
 
-    SegmentMeta postVac = db.readAsync(tr -> tr.get(
-                dirs.segmentKeys(String.format("%06d", seg)).metaKey())
-            .thenApply(bytes -> {
+    SegmentMeta postVac = db.readAsync(
+            tr -> tr.get(dirs.segmentKeys(seg).metaKey()).thenApply(bytes -> {
               try {
                 return SegmentMeta.parseFrom(bytes);
               } catch (com.google.protobuf.InvalidProtocolBufferException e) {

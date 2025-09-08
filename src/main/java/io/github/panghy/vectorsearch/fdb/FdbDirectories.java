@@ -43,13 +43,13 @@ public final class FdbDirectories {
     /**
      * Creates a segment key helper for the given zero-padded segment id.
      */
-    public SegmentKeys segmentKeys(String segIdStr) {
-      return new SegmentKeys(segmentsDir, segIdStr);
+    public SegmentKeys segmentKeys(int segId) {
+      return new SegmentKeys(segmentsDir, segId);
     }
 
     /** Registry key to mark a segment as existent. */
-    public byte[] segmentsIndexKey(String segIdStr) {
-      return indexDir.pack(Tuple.from(FdbPathUtil.SEGMENTS_INDEX, segIdStr));
+    public byte[] segmentsIndexKey(int segId) {
+      return indexDir.pack(Tuple.from(FdbPathUtil.SEGMENTS_INDEX, segId));
     }
 
     /** Subspace for the segments index prefix. */
@@ -62,26 +62,26 @@ public final class FdbDirectories {
    * Lightweight key helper for a segment using the segments container and a segment id string.
    * Avoids DirectoryLayer calls and packs keys using the container subspace.
    */
-  public record SegmentKeys(DirectorySubspace segmentsDir, String segIdStr) {
+  public record SegmentKeys(DirectorySubspace segmentsDir, int segId) {
 
     public byte[] metaKey() {
-      return segmentsDir.pack(Tuple.from(segIdStr, FdbPathUtil.META));
+      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.META));
     }
 
     public byte[] vectorKey(int vecId) {
-      return segmentsDir.pack(Tuple.from(segIdStr, FdbPathUtil.VECTORS, vecId));
+      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.VECTORS, vecId));
     }
 
     public byte[] pqCodebookKey() {
-      return segmentsDir.pack(Tuple.from(segIdStr, FdbPathUtil.PQ, FdbPathUtil.CODEBOOK));
+      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.PQ, FdbPathUtil.CODEBOOK));
     }
 
     public byte[] pqCodeKey(int vecId) {
-      return segmentsDir.pack(Tuple.from(segIdStr, FdbPathUtil.PQ, FdbPathUtil.CODES, vecId));
+      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.PQ, FdbPathUtil.CODES, vecId));
     }
 
     public byte[] graphKey(int vecId) {
-      return segmentsDir.pack(Tuple.from(segIdStr, FdbPathUtil.GRAPH, vecId));
+      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.GRAPH, vecId));
     }
   }
 
