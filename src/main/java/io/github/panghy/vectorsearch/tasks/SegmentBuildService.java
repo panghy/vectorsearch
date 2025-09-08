@@ -71,7 +71,14 @@ public class SegmentBuildService {
     Range vr = vectorsPrefix.range();
     LOGGER.debug("Building segment {}", segId);
     return db.readAsync(tr -> tr.getRange(vr).asList())
-        .thenCompose(kvs -> writeBuildArtifacts(dirs, segStr, kvs))
+        .thenCompose(kvs -> {
+          if (kvs.isEmpty()) {
+            // Nothing to build for this segment yet; just seal it to avoid repeated retries.
+            // An empty sealed segment is harmless and ignored by query paths.
+            return completedFuture(null);
+          }
+          return writeBuildArtifacts(dirs, segStr, kvs);
+        })
         .thenCompose(v -> sealSegment(dirs, segStr))
         .whenComplete((v, ex) -> {
           if (ex != null) {

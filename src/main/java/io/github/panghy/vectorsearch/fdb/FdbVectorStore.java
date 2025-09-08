@@ -313,6 +313,7 @@ public final class FdbVectorStore {
                                       .segmentKeys(nextStr)
                                       .metaKey(),
                                   nextMeta.toByteArray());
+                              tr.set(indexDirs.segmentsIndexKey(nextStr), new byte[0]);
                               LOGGER.debug(
                                   "Rotated segment: {} -> {} (sealed PENDING seg"
                                       + " {}), enqueuing build task",
@@ -338,12 +339,16 @@ public final class FdbVectorStore {
         assigned);
   }
 
-  /** Marks a single vector as deleted and updates segment counters. */
+  /**
+   * Marks a single vector as deleted and updates segment counters.
+   */
   public CompletableFuture<Void> delete(int segId, int vecId) {
     return deleteBatch(new int[][] {{segId, vecId}});
   }
 
-  /** Batch delete: each element is [segId, vecId]. */
+  /**
+   * Batch delete: each element is [segId, vecId].
+   */
   public CompletableFuture<Void> deleteBatch(int[][] ids) {
     if (ids == null || ids.length == 0) return completedFuture(null);
     Database db = config.getDatabase();
@@ -501,8 +506,6 @@ public final class FdbVectorStore {
           }
         }));
   }
-
-  // listSegmentIds intentionally omitted in v1; DirectoryLayer listing is non-trivial and not needed yet.
 
   private static String segIdStr(long segId) {
     return String.format("%06d", segId);

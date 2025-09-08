@@ -2,6 +2,7 @@ package io.github.panghy.vectorsearch.fdb;
 
 import com.apple.foundationdb.TransactionContext;
 import com.apple.foundationdb.directory.DirectorySubspace;
+import com.apple.foundationdb.subspace.Subspace;
 import com.apple.foundationdb.tuple.Tuple;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
@@ -52,8 +53,8 @@ public final class FdbDirectories {
     }
 
     /** Subspace for the segments index prefix. */
-    public com.apple.foundationdb.subspace.Subspace segmentsIndexSubspace() {
-      return new com.apple.foundationdb.subspace.Subspace(indexDir.pack(Tuple.from(FdbPathUtil.SEGMENTS_INDEX)));
+    public Subspace segmentsIndexSubspace() {
+      return new Subspace(indexDir.pack(Tuple.from(FdbPathUtil.SEGMENTS_INDEX)));
     }
   }
 
