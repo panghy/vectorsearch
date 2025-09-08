@@ -295,7 +295,7 @@ class VectorIndexTest {
         .pqM(2)
         .pqK(4)
         .graphDegree(4)
-        .maxSegmentSize(50)
+        .maxSegmentSize(12) // force seg0 -> PENDING after inserts
         .localWorkerThreads(0)
         .build();
     VectorIndex index = VectorIndex.createOrOpen(cfg).get(5, TimeUnit.SECONDS);
@@ -322,7 +322,7 @@ class VectorIndexTest {
         .pqM(2)
         .pqK(4)
         .graphDegree(8)
-        .maxSegmentSize(50)
+        .maxSegmentSize(16) // force seg0 -> PENDING after inserts
         .localWorkerThreads(0)
         .build();
     VectorIndex index = VectorIndex.createOrOpen(cfg).get(5, TimeUnit.SECONDS);
@@ -356,7 +356,7 @@ class VectorIndexTest {
         .pqM(2)
         .pqK(2)
         .graphDegree(2)
-        .maxSegmentSize(10)
+        .maxSegmentSize(2) // force seg0 -> PENDING after two inserts
         .localWorkerThreads(0)
         .build();
     VectorIndex index = VectorIndex.createOrOpen(cfg).get(5, TimeUnit.SECONDS);
