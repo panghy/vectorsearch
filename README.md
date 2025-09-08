@@ -13,6 +13,10 @@ A Java vector search library built on FoundationDB with per-segment DiskANN-styl
 - Maintenance: tombstone delete APIs and cooldown-aware vacuuming
 - 90%+ line / 75%+ branch coverage (JaCoCo gates)
 
+Implementation notes
+- Segment registry: the index maintains a compact `segmentsIndex` range under the index root to list existing segments efficiently. Queries list segments from this registry; there is no legacy per‑meta scan fallback.
+- Builder invariants: only PENDING segments are sealed by the builder; ACTIVE segments are never sealed directly.
+
 ## Quick Start
 
 ```java
@@ -89,6 +93,7 @@ VectorIndexConfig includes:
 - `oversample` (merge fan-in), `localWorkerThreads` (auto-start builders)
 - `vacuumMinDeletedRatio`, `vacuumCooldown(Duration)` for maintenance behavior
 - `codebookBatchLoadSize`, `adjacencyBatchLoadSize` (async cache loaders)
+- `prefetchCodebooksEnabled` (default true) and `prefetchCodebooksSync` (test‑only; block query until codebook prefetch completes for sealed segments)
 
 See `src/main/java/.../VectorIndexConfig.java` for the full builder.
 
@@ -102,7 +107,7 @@ See `src/main/java/.../VectorIndexConfig.java` for the full builder.
 
 ## Design Highlights
 
-- DirectoryLayer layout per index: `meta`, `currentSegment`, `segments/<segId>/{meta,vectors,pq,graph}`, `tasks/`
+ - DirectoryLayer layout per index: `meta`, `currentSegment`, `segmentsIndex/<segId>`, `segments/<segId>/{meta,vectors,pq,graph}`, `tasks/`
 - Async batched I/O with transaction size guards (FDB 10MB/5s)
 - Caffeine AsyncLoadingCache with bulk loaders, optional prefetch for codebooks
 - Deterministic seeding and auto‑tuning for BEST_FIRST traversal
