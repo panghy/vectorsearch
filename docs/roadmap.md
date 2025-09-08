@@ -58,7 +58,7 @@ Notes:
 
 ---
 
-## Status Snapshot (as of 2025-09-07)
+## Status Snapshot (as of 2025-09-08)
 
 - Completed:
   - M1 Protos + Directory scaffolding (vectorsearch.proto, FdbDirectories).
@@ -70,8 +70,15 @@ Notes:
   - M8 Observability: OpenTelemetry gauges registered for cache size and stats; configurable metric attributes; tests use InMemoryMetricReader.
   - M9 Hardening: consolidated tests, added edge-case coverage; JaCoCo gates (≥90% lines / ≥75% branches) passing.
 - Not Started / Next:
-  - M7 Vacuum + delete API + compaction skeleton wiring.
-  - M9 Benchmarks (latency harness) — pending.
+  - M7 Compaction skeleton wiring (vacuum + delete API shipped); merge planner.
+  - M8 Observability (index-level): add per-query latency histograms, SLOs — in progress.
+  - M9 Benchmarks (micro + macro latency harness) — pending.
+
+Recent additions:
+- Vacuum + delete API with cooldown-aware scheduling (runtime-configured) and
+  `last_vacuum_at_ms` tracked in `SegmentMeta`.
+- Index-level metrics: `vectorsearch.segments.state_count{state=*}` and vacuum
+  `vectorsearch.maintenance.vacuum.{scheduled|skipped}` counters.
 
 ## 1) Protos + Directory Scaffolding
 
@@ -190,7 +197,52 @@ Deliverables:
 - Vacuum job; compaction skeleton (optional for v1), both using DirectorySubspaces.
 
 Status:
-- Not started.
+- Vacuum job shipped (tombstoned vectors physically removed; `deleted_count` decremented; `last_vacuum_at_ms` stamped). Cooldown-aware enqueueing after deletes based on configurable threshold.
+- Compaction/merge: skeleton next; see Path to 1B+ for plan.
+
+## 10) Path to 1B+ vectors (prioritized)
+
+This section outlines the additional work needed to comfortably scale to billions of vectors while meeting low-latency targets and keeping operational complexity in check.
+
+1) Segment catalog and listing at scale
+- Problem: linear probe of `[0..maxSeg]` metas does not scale when segment count is high.
+- Plan: maintain a compact segment registry under `indexDir/segments/meta/{active|pending|sealed}` sets, or a range with a single key per existing segment (e.g., `segments/index`). Keep a monotonic `maxSegmentId`, but list from the registry to avoid O(n) null probes.
+
+2) Compaction/merge planner (sealed→sealed)
+- Merge many small sealed segments into larger targets to reduce per-segment overhead and search fan-out.
+- Minimal viable approach: offline read N sealed segments, produce a new sealed segment (reassign vecIds, rebuild PQ/graph), atomically swap into the registry.
+- Constraints: chunked writes, idempotency, backpressure and throttling. Keep adjacency/codebooks block-aligned for sequential I/O.
+
+3) Graph construction quality (DiskANN/Vamana)
+- Add alpha/pruning and better candidate pool management to the builder; tune `graphDegree` and build breadth.
+- Optionally adopt medoid/centroid starts and reordering to improve locality.
+- Evaluate storing adjacency in block-compressed form; consider varint/indexed blocks.
+
+4) PQ improvements
+- Support OPQ and/or IVF-PQ hybrid for high-d with better recall/latency tradeoffs.
+- Sampling strategy for training (reservoir, stratified per segment); persist training samples for reproducibility.
+
+5) Search merge and per-segment budgeting
+- Dynamic per-segment fan-in (cap) based on segment age/size; early termination when improvement stalls.
+- Learn/tune `ef`, `beam`, `perSegmentLimitMultiplier` online from latency budgets.
+
+6) Memory & I/O efficiency
+- Float16/byte quantization options for raw vectors (ACTIVE/PENDING) to cut reread costs at rerank.
+- Cache adjacency/codebooks with size/TTL caps and hot-key protection; consider Bloom filters to avoid cold misses.
+
+7) Filtered / hybrid queries (future)
+- Sparse (BM25) + dense hybrid scoring hooks; optional attribute filters via side indexes.
+
+8) Operability
+- Backpressure: limit concurrent builders and queue depth; auto-shed enqueue when FDB latency rises.
+- Fine-grained metrics: p50/p95/p99 query latency, builder durations, compaction metrics.
+- Admin accessors: list segments, deleted ratios, last vacuum time; on-demand maintenance.
+
+9) Benchmarks & continuous tuning
+- Add JMH microbenchmarks (distance, PQ encode/decode, traversal) and macro harnesses (end-to-end p50/p99 with varying K, d, segment counts).
+
+10) Multi-index / tenancy (non-goal for v1, design for v2)
+- Keep index directories isolated; ensure queues and metrics are labeled. Explore horizontal partitioning at service layer when needed.
 
 ## 8) Observability & Docs
 
