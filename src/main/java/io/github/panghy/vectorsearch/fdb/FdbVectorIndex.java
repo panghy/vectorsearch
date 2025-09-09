@@ -317,19 +317,28 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   public CompletableFuture<Void> awaitIndexingComplete() {
     if (buildQueue == null) return completedFuture(null);
     Database db = config.getDatabase();
-    final long pollDelayMs = 50L;
-    return AsyncUtil.whileTrue(() -> db.runAsync(tr -> {
-              var visF = buildQueue.hasVisibleUnclaimedTasks(tr);
-              var clmF = buildQueue.hasClaimedTasks(tr);
-              return visF.thenCombine(
-                  clmF, (vis, clm) -> Boolean.TRUE.equals(vis) || Boolean.TRUE.equals(clm));
-            })
-            .thenCompose(keepTrying -> {
-              if (keepTrying)
-                return supplyAsync(() -> true, delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS));
-              return completedFuture(false);
-            }))
-        .thenApply(v -> null);
+    try {
+      var m = buildQueue.getClass().getMethod("awaitQueueEmpty", com.apple.foundationdb.Database.class);
+      Object f = m.invoke(buildQueue, db);
+      @SuppressWarnings("unchecked")
+      CompletableFuture<?> cf = (CompletableFuture<?>) f;
+      return cf.thenApply(v -> null);
+    } catch (NoSuchMethodException nsme) {
+      // Fallback for older TaskQueue: poll visible+claimed
+      final long pollDelayMs = 50L;
+      return AsyncUtil.whileTrue(() -> db.runAsync(tr -> {
+                var visF = buildQueue.hasVisibleUnclaimedTasks(tr);
+                var clmF = buildQueue.hasClaimedTasks(tr);
+                return visF.thenCombine(
+                    clmF, (vis, clm) -> Boolean.TRUE.equals(vis) || Boolean.TRUE.equals(clm));
+              })
+              .thenCompose(keepTrying -> keepTrying
+                  ? supplyAsync(() -> true, delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
+                  : completedFuture(false)))
+          .thenApply(v -> null);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
   }
 
   private CompletableFuture<Void> scheduleVacuumIfNeeded(Set<Integer> segIds) {

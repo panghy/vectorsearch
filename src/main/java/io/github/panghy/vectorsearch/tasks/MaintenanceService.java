@@ -209,25 +209,34 @@ public final class MaintenanceService {
    * @return a completed future after logging the request
    */
   public CompletableFuture<Void> compactSegments(List<Integer> segIds) {
-    LOG.info("Compaction skeleton invoked for segIds={}", segIds);
-    // In skeleton, simply revert COMPACTING -> SEALED to release the lock.
+    LOG.info("Compaction invoked for segIds={}", segIds);
     Database db = config.getDatabase();
     return db.runAsync(tr -> {
       for (int sid : segIds) {
-        byte[] mk = indexDirs.segmentKeys(sid).metaKey();
-        byte[] mb = tr.get(mk).join();
-        if (mb == null) continue;
+        // Only operate on COMPACTING or SEALED segments
+        byte[] metaK = indexDirs.segmentKeys(sid).metaKey();
+        byte[] metaB = tr.get(metaK).join();
+        if (metaB == null) continue;
         try {
-          var sm = SegmentMeta.parseFrom(mb);
-          if (sm.getState() == SegmentMeta.State.COMPACTING) {
-            var sealed = sm.toBuilder()
-                .setState(SegmentMeta.State.SEALED)
-                .build();
-            tr.set(mk, sealed.toByteArray());
+          var sm = SegmentMeta.parseFrom(metaB);
+          if (sm.getState() != SegmentMeta.State.COMPACTING && sm.getState() != SegmentMeta.State.SEALED) {
+            continue;
           }
         } catch (InvalidProtocolBufferException e) {
           throw new RuntimeException(e);
         }
+        // Clear segment data ranges
+        Subspace vprefix = new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "vectors")));
+        tr.clear(vprefix.range().begin, vprefix.range().end);
+        Subspace cprefix = new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "pq", "codes")));
+        tr.clear(cprefix.range().begin, cprefix.range().end);
+        Subspace gprefix = new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "graph")));
+        tr.clear(gprefix.range().begin, gprefix.range().end);
+        // Clear singleton keys
+        tr.clear(indexDirs.segmentKeys(sid).pqCodebookKey());
+        tr.clear(metaK);
+        // Remove from registry
+        tr.clear(indexDirs.segmentsIndexKey(sid));
       }
       return completedFuture(null);
     });
