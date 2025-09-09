@@ -46,7 +46,7 @@ dependencies {
   implementation 'io.opentelemetry:opentelemetry-context:1.40.0'
 
   // TaskQueue
-  implementation 'io.github.panghy:taskqueue:0.9.0'
+  implementation 'io.github.panghy:taskqueue:0.10.0'
 
   implementation 'com.ibm.async:asyncutil:0.1.0'
 

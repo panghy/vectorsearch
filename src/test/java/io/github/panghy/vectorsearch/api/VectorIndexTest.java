@@ -204,7 +204,7 @@ class VectorIndexTest {
     // Second delete within cooldown should be skipped (no visible unclaimed tasks)
     index.delete(0, 1).get(5, TimeUnit.SECONDS);
     // Await empty queue; will hang and fail if a task was enqueued (no worker running here)
-    io.github.panghy.vectorsearch.testutil.Queues.awaitQueueEmpty(q, db).get(5, TimeUnit.SECONDS);
+    q.awaitQueueEmpty(db).get(5, TimeUnit.SECONDS);
     index.close();
   }
 

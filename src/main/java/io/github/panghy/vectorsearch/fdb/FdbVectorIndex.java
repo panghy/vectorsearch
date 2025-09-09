@@ -3,13 +3,10 @@ package io.github.panghy.vectorsearch.fdb;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
-import static java.util.concurrent.CompletableFuture.delayedExecutor;
-import static java.util.concurrent.CompletableFuture.supplyAsync;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.KeyValue;
 import com.apple.foundationdb.Range;
-import com.apple.foundationdb.async.AsyncUtil;
 import com.apple.foundationdb.subspace.Subspace;
 import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -45,7 +42,6 @@ import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -317,28 +313,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   public CompletableFuture<Void> awaitIndexingComplete() {
     if (buildQueue == null) return completedFuture(null);
     Database db = config.getDatabase();
-    try {
-      var m = buildQueue.getClass().getMethod("awaitQueueEmpty", com.apple.foundationdb.Database.class);
-      Object f = m.invoke(buildQueue, db);
-      @SuppressWarnings("unchecked")
-      CompletableFuture<?> cf = (CompletableFuture<?>) f;
-      return cf.thenApply(v -> null);
-    } catch (NoSuchMethodException nsme) {
-      // Fallback for older TaskQueue: poll visible+claimed
-      final long pollDelayMs = 50L;
-      return AsyncUtil.whileTrue(() -> db.runAsync(tr -> {
-                var visF = buildQueue.hasVisibleUnclaimedTasks(tr);
-                var clmF = buildQueue.hasClaimedTasks(tr);
-                return visF.thenCombine(
-                    clmF, (vis, clm) -> Boolean.TRUE.equals(vis) || Boolean.TRUE.equals(clm));
-              })
-              .thenCompose(keepTrying -> keepTrying
-                  ? supplyAsync(() -> true, delayedExecutor(pollDelayMs, TimeUnit.MILLISECONDS))
-                  : completedFuture(false)))
-          .thenApply(v -> null);
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
+    return buildQueue.awaitQueueEmpty(db).thenApply(v -> null);
   }
 
   private CompletableFuture<Void> scheduleVacuumIfNeeded(Set<Integer> segIds) {
@@ -417,6 +392,10 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         LOG.debug("searchSegment segId={} state={} count={}", segId, sm.getState(), sm.getCount());
         if (sm.getState() == SegmentMeta.State.SEALED || sm.getState() == SegmentMeta.State.COMPACTING) {
           return searchSealedSegment(db, dirs, segId, q, k, params);
+        }
+        if (sm.getState() == SegmentMeta.State.WRITING) {
+          // Destination segment under construction: not visible to search
+          return completedFuture(List.of());
         }
         return searchBruteForceSegment(db, dirs, segId, q, k);
       } catch (InvalidProtocolBufferException e) {

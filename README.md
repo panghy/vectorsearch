@@ -15,7 +15,7 @@ A Java vector search library built on FoundationDB with per-segment DiskANN-styl
 
 Implementation notes
 - Segment registry: the index maintains a compact `segmentsIndex` range under the index root to list existing segments efficiently. Queries list segments from this registry; there is no legacy per‑meta scan fallback.
-- Builder invariants: only PENDING segments are sealed by the builder; ACTIVE segments are never sealed directly.
+- Builder invariants: only PENDING and WRITING segments are sealed by the builder; ACTIVE segments are never sealed directly.
 
 ## Quick Start
 
@@ -50,6 +50,7 @@ List<SearchResult> hits = index.query(new float[]{1,0,0,0,0,0,0,0}, 10).get();
 index.delete(id[0], id[1]).get();
 
 // Optionally wait for builders to drain (uses hasVisibleUnclaimedTasks + hasClaimedTasks)
+// Waits for build queue emptiness (no polling/reflection)
 index.awaitIndexingComplete().get(10, TimeUnit.SECONDS);
 
 index.close();
@@ -57,15 +58,15 @@ index.close();
 
 ## Concepts
 
-- Segments: New vectors land in the ACTIVE segment until `maxSegmentSize` is reached; the next insert rotates, marking the previous segment PENDING. Builders seal PENDING → SEALED by writing PQ/graph artifacts.
-- Search: SEALED segments use PQ-seeded traversal + exact re-rank; ACTIVE/PENDING use brute-force.
+- Segments: New vectors land in the ACTIVE segment until `maxSegmentSize` is reached; the next insert rotates, marking the previous segment PENDING. Builders seal PENDING → SEALED by writing PQ/graph artifacts. Compaction uses a hidden WRITING destination segment that is not visible to search, then seals it to SEALED.
+- Search: SEALED (and COMPACTING sources) use PQ/graph traversal + exact re-rank; ACTIVE/PENDING use brute-force. WRITING segments are ignored by search.
 - Maintenance: Deletes set a tombstone flag and updates counters. If the deleted ratio exceeds a threshold, the index enqueues a vacuum maintenance task (with a configurable cooldown). Vacuum physically removes vector, PQ code, and adjacency, and decrements `deleted_count` while stamping `last_vacuum_at_ms`.
 
 ## Metrics
 
 - `vectorsearch.cache.size{cache=codebook|adjacency}` (gauge)
 - `vectorsearch.cache.*` hit/miss/load counters (gauges of Caffeine stats)
-- `vectorsearch.segments.state_count{state=ACTIVE|PENDING|SEALED}` (gauge)
+- `vectorsearch.segments.state_count{state=ACTIVE|PENDING|SEALED|COMPACTING|WRITING}` (gauge)
 - `vectorsearch.maintenance.vacuum.scheduled|skipped` (counters)
 
 To use OTel in tests:

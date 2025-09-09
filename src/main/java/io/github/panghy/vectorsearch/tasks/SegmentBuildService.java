@@ -69,7 +69,7 @@ public class SegmentBuildService {
     Subspace vectorsPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from((int) segId, "vectors")));
     Range vr = vectorsPrefix.range();
     LOGGER.debug("Building segment {}", segId);
-    // Only build PENDING segments. ACTIVE segments must never be sealed here.
+    // Only build PENDING/WRITING segments. ACTIVE segments must never be sealed here.
     return db.readAsync(tr -> tr.get(dirs.segmentKeys((int) segId).metaKey()))
         .thenCompose(metaB -> {
           if (metaB == null) return completedFuture(null);
@@ -79,8 +79,8 @@ public class SegmentBuildService {
           } catch (InvalidProtocolBufferException e) {
             throw new RuntimeException(e);
           }
-          if (sm.getState() != SegmentMeta.State.PENDING) {
-            LOGGER.debug("Segment {} not PENDING (state={}); skipping build", segId, sm.getState());
+          if (sm.getState() != SegmentMeta.State.PENDING && sm.getState() != SegmentMeta.State.WRITING) {
+            LOGGER.debug("Segment {} not PENDING/WRITING (state={}); skipping build", segId, sm.getState());
             return completedFuture(null);
           }
           return db.readAsync(tr -> tr.getRange(vr).asList())
@@ -262,7 +262,8 @@ public class SegmentBuildService {
       if (bytes == null) return null;
       try {
         SegmentMeta sm = SegmentMeta.parseFrom(bytes);
-        if (sm.getState() != SegmentMeta.State.PENDING) return null; // only seal PENDING
+        if (sm.getState() != SegmentMeta.State.PENDING && sm.getState() != SegmentMeta.State.WRITING)
+          return null; // only seal PENDING/WRITING
         SegmentMeta sealed = sm.toBuilder()
             .setState(SegmentMeta.State.SEALED)
             .setCreatedAtMs(sm.getCreatedAtMs() == 0 ? Instant.now().toEpochMilli() : sm.getCreatedAtMs())

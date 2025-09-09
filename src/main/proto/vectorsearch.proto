@@ -70,10 +70,12 @@ message SegmentMeta {
   int32 segment_id = 1;
 
   // Lifecycle state:
-  // - ACTIVE: Accepts inserts; no graph/PQ yet; queries use brute-force.
-  // - PENDING: Sealed for writes; background build (graph + PQ) in progress.
-  // - SEALED: Graph and PQ complete; queries use graph + PQ for pruning.
-  enum State { ACTIVE = 0; PENDING = 1; SEALED = 2; COMPACTING = 3; }
+  // ACTIVE: accepting writes and visible to queries via brute-force.
+  // PENDING: rotation happened; no more writes, visible via brute-force until sealed.
+  // SEALED: background-built with PQ/graph; visible to queries via index.
+  // COMPACTING: source of an in-progress compaction; still searched like SEALED.
+  // WRITING: destination segment for compaction writes; not visible to queries.
+  enum State { ACTIVE = 0; PENDING = 1; SEALED = 2; COMPACTING = 3; WRITING = 4; }
   State state = 2;
 
   // Number of non-deleted vectors currently in this segment.
