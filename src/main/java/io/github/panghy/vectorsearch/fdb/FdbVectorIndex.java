@@ -295,6 +295,24 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     return caches.getAdjacencyCache().estimatedSize();
   }
 
+  /**
+   * Enqueues a compaction task for the given sealed segments. This is a skeleton operation for M7
+   * that logs intent; future versions will merge segments and rewrite PQ/graph artifacts.
+   */
+  public CompletableFuture<Void> requestCompaction(List<Integer> segIds) {
+    if (maintenanceQueue == null || segIds == null || segIds.isEmpty()) return completedFuture(null);
+    // Deterministic key for idempotency
+    List<Integer> sorted = new ArrayList<>(segIds);
+    sorted.sort(Integer::compareTo);
+    String key = "compact:" + sorted.toString();
+    MaintenanceTask.Compact c =
+        MaintenanceTask.Compact.newBuilder().addAllSegIds(sorted).build();
+    MaintenanceTask mt = MaintenanceTask.newBuilder().setCompact(c).build();
+    return config.getDatabase()
+        .runAsync(tr -> maintenanceQueue.enqueueIfNotExists(tr, key, mt))
+        .thenApply(x -> null);
+  }
+
   @Override
   public CompletableFuture<Void> awaitIndexingComplete() {
     if (buildQueue == null) return completedFuture(null);
