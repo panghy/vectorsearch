@@ -5,7 +5,7 @@ This roadmap restates the implementation plan to explicitly use FoundationDB’s
 ## Goals and Non‑Goals
 
 - Goals:
-  - Directory‑backed layout for all data (no ad‑hoc tuple roots).
+  - Directory‑backed layout for all data (no ad‑hoc tuple roots). Per‑segment data is keyed under a single `segmentsDir` using integer `segId` as the first tuple field.
   - Segment lifecycle: ACTIVE → PENDING → SEALED with background build of graph + PQ.
   - Strict-cap rotation: when an ACTIVE segment reaches maxSegmentSize, the NEXT insert rotates
     immediately (before writing) so the new vector becomes vecId=0 in the new ACTIVE segment.
@@ -27,22 +27,18 @@ Tree (conceptual):
       meta                            (key in indexDir)
       currentSegment                  (key in indexDir)
       segments/                       (segmentsDir)
-        <segId>/                      (segmentDir; segId as string)
-          meta                        (key in segmentDir)
-          vectors/                    (vectorsDir)
-            <vecId>                   (VectorRecord)
-          pq/                         (pqDir)
-            codebook                  (key)
-            codes/                    (codesDir)
-              <vecId>                 (PQ code bytes)
-          graph/                      (graphDir)
-            <vecId>                   (Adjacency list bytes)
+        (segId, "meta")               SegmentMeta (segId is an integer tuple field)
+        (segId, "vectors", vecId)     VectorRecord
+        (segId, "pq", "codebook")     PQCodebook
+        (segId, "pq", "codes", vecId) PQ code bytes
+        (segId, "graph", vecId)       Adjacency list bytes
+      segmentsIndex/                  (indexDir subspace; one key per existing segId)
+        <segId>                       empty value (presence = exists)
       tasks/                          (taskQueueBaseDir for TaskQueue)
 
 Notes:
-- Directory components are strings; store `segId` as a decimal string (e.g., "000123").
-- Use keys inside a directory (e.g., `meta`) for singleton values; per‑ID items use sub‑directories (e.g., `vectors/`) with tuple keys like `(vecId)` inside that directory.
-- All key building is via `DirectorySubspace.pack(Tuple.from(...))`.
+- `segId` is now encoded as an integer in tuple keys (breaking change, no migration/back‑compat maintained).
+- All key building is via `DirectorySubspace.pack(Tuple.from(...))`. Per‑segment data is not its own DirectorySubspace; it lives under `segmentsDir` keyed by `(segId, ...)` for compact listing and scanning.
 
 ## Milestones Overview
 
@@ -58,7 +54,7 @@ Notes:
 
 ---
 
-## Status Snapshot (as of 2025-09-08)
+## Status Snapshot (as of 2025-09-09)
 
 - Completed:
   - M1 Protos + Directory scaffolding (vectorsearch.proto, FdbDirectories).
@@ -71,8 +67,8 @@ Notes:
   - M9 Hardening: consolidated tests, added edge-case coverage; JaCoCo gates (≥90% lines / ≥75% branches) passing.
 - Not Started / Next:
   - M7 Compaction skeleton wiring (vacuum + delete API shipped); merge planner.
-  - M8 Observability (index-level): add per-query latency histograms, SLOs — in progress.
-  - M9 Benchmarks (micro + macro latency harness) — pending.
+  - M8 Observability (index-level): add per-query latency histograms, SLOs.
+  - M9 Benchmarks (micro + macro latency harness): JMH + macro harness.
 
 Recent additions:
 - Vacuum + delete API with cooldown-aware scheduling (runtime-configured) and

@@ -32,13 +32,14 @@ Tombstones: Deletions are handled via tombstone markers. Instead of immediately 
 
 Figure: FoundationDB Key-Value Schema (for one segment):
 
-(indexName, "segment", segId, "meta")          -> { state: ACTIVE/PENDING/SEALED, count: N, ... }
-(indexName, "segment", segId, "vector", vecId) -> { VectorRecord proto (embedding, metadata, deleted_flag) }
-(indexName, "segment", segId, "pq", "codebook")-> { PQCodebook proto (centroids for each subspace) }
-(indexName, "segment", segId, "pq", "code", vecId) -> (binary PQ code for vector)
-(indexName, "segment", segId, "graph", vecId)  -> [ neighbor_vecId1, neighbor_vecId2, ... neighbor_vecIdR ]
+("segmentsIndex", segId)                        -> empty (presence indicates known segment)
+(segId:int, "meta")                              -> { state: ACTIVE/PENDING/SEALED, count: N, ... }
+(segId:int, "vectors", vecId:int)                -> { VectorRecord proto (embedding, metadata, deleted_flag) }
+(segId:int, "pq", "codebook")                   -> { PQCodebook proto (centroids for each subspace) }
+(segId:int, "pq", "code", vecId:int)            -> (binary PQ code for vector)
+(segId:int, "graph", vecId:int)                  -> [ neighbor_vecId1, neighbor_vecId2, ... neighbor_vecIdR ]
 
-All keys are lexicographically ordered, so all data for a segment is clustered together (enabling range reads over an entire segment’s data if needed). The schema is designed to minimize round trips: e.g. reading a batch of adjacency lists for several vectors can be done by a single range query on (indexName, "segment", segId, "graph", ...) keys, and vector metadata can be fetched in bulk similarly.
+All keys under `segmentsDir` are lexicographically ordered by `segId` then sub‑keys, so data for a segment is clustered (enabling range reads over a segment’s data). Listing segments is done by scanning `segmentsIndex/<segId>` under the index root.
 
 Segment Lifecycle and Online Indexing
 
