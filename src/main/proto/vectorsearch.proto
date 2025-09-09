@@ -73,7 +73,7 @@ message SegmentMeta {
   // - ACTIVE: Accepts inserts; no graph/PQ yet; queries use brute-force.
   // - PENDING: Sealed for writes; background build (graph + PQ) in progress.
   // - SEALED: Graph and PQ complete; queries use graph + PQ for pruning.
-  enum State { ACTIVE = 0; PENDING = 1; SEALED = 2; }
+  enum State { ACTIVE = 0; PENDING = 1; SEALED = 2; COMPACTING = 3; }
   State state = 2;
 
   // Number of non-deleted vectors currently in this segment.
@@ -164,6 +164,7 @@ message MaintenanceTask {
   oneof task {
     Vacuum vacuum = 1;
     Compact compact = 2;
+    FindCompactionCandidates find_candidates = 3;
   }
 
   message Vacuum {
@@ -175,5 +176,12 @@ message MaintenanceTask {
 
   message Compact {
     repeated int32 seg_ids = 1;
+  }
+
+  // Schedules a follow-up task to discover a compactible set of segments given an anchor.
+  // The worker will scan sealed segments and choose a small set to merge, then call
+  // requestCompaction() with the chosen seg_ids.
+  message FindCompactionCandidates {
+    int32 anchor_seg_id = 1;
   }
 }

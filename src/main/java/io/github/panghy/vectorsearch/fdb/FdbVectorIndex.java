@@ -406,7 +406,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
       try {
         SegmentMeta sm = SegmentMeta.parseFrom(metaB);
         LOG.debug("searchSegment segId={} state={} count={}", segId, sm.getState(), sm.getCount());
-        if (sm.getState() == SegmentMeta.State.SEALED) {
+        if (sm.getState() == SegmentMeta.State.SEALED || sm.getState() == SegmentMeta.State.COMPACTING) {
           return searchSealedSegment(db, dirs, segId, q, k, params);
         }
         return searchBruteForceSegment(db, dirs, segId, q, k);

@@ -11,6 +11,7 @@ import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories;
+import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import io.github.panghy.vectorsearch.proto.VectorRecord;
 import java.util.List;
@@ -145,16 +146,57 @@ public final class MaintenanceService {
 
   private CompletableFuture<Void> updateMetaAfterVacuum(
       Database db, FdbDirectories.SegmentKeys sk, SegmentMeta sm, int removed) {
-    if (removed <= 0) return completedFuture(null);
     long now = config.getInstantSource().instant().toEpochMilli();
-    return db.runAsync(tr -> {
-      SegmentMeta updated = sm.toBuilder()
-          .setDeletedCount(Math.max(0, sm.getDeletedCount() - removed))
-          .setLastVacuumAtMs(now)
-          .build();
-      tr.set(sk.metaKey(), updated.toByteArray());
-      return completedFuture(null);
-    });
+    int maxSize = config.getMaxSegmentSize();
+    return db.runAsync(tr -> tr.get(sk.metaKey()).thenApply(curBytes -> {
+          SegmentMeta base;
+          try {
+            base = curBytes == null ? sm : SegmentMeta.parseFrom(curBytes);
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+          SegmentMeta updated = base.toBuilder()
+              .setDeletedCount(Math.max(0, base.getDeletedCount() - Math.max(0, removed)))
+              .setLastVacuumAtMs(now)
+              .build();
+          tr.set(sk.metaKey(), updated.toByteArray());
+          return updated;
+        }))
+        .thenCompose(updated -> {
+          // If segment is small (<50% of max), enqueue a FindCompactionCandidates task.
+          if (config.isAutoFindCompactionCandidates() && updated.getCount() < (maxSize / 2)) {
+            MaintenanceTask.FindCompactionCandidates fcc =
+                MaintenanceTask.FindCompactionCandidates.newBuilder()
+                    .setAnchorSegId(updated.getSegmentId())
+                    .build();
+            MaintenanceTask mt = MaintenanceTask.newBuilder()
+                .setFindCandidates(fcc)
+                .build();
+            String key = "find-candidates:" + updated.getSegmentId();
+            return db.runAsync(tr -> io.github.panghy.taskqueue.TaskQueues.createTaskQueue(
+                        io.github.panghy.taskqueue.TaskQueueConfig.builder(
+                                db,
+                                indexDirs
+                                    .tasksDir()
+                                    .createOrOpen(db, java.util.List.of("maint"))
+                                    .join(),
+                                new ProtoSerializers.StringSerializer(),
+                                new ProtoSerializers.MaintenanceTaskSerializer())
+                            .estimatedWorkerCount(config.getEstimatedWorkerCount())
+                            .defaultTtl(config.getDefaultTtl())
+                            .defaultThrottle(config.getDefaultThrottle())
+                            .taskNameExtractor(t -> t.hasVacuum()
+                                ? ("vacuum-segment:"
+                                    + t.getVacuum()
+                                        .getSegId())
+                                : (t.hasCompact() ? "compact" : "find-candidates"))
+                            .build())
+                    .join()
+                    .enqueueIfNotExists(tr, key, mt))
+                .thenApply(x -> null);
+          }
+          return completedFuture(null);
+        });
   }
 
   /**
@@ -168,6 +210,84 @@ public final class MaintenanceService {
    */
   public CompletableFuture<Void> compactSegments(List<Integer> segIds) {
     LOG.info("Compaction skeleton invoked for segIds={}", segIds);
-    return completedFuture(null);
+    // In skeleton, simply revert COMPACTING -> SEALED to release the lock.
+    Database db = config.getDatabase();
+    return db.runAsync(tr -> {
+      for (int sid : segIds) {
+        byte[] mk = indexDirs.segmentKeys(sid).metaKey();
+        byte[] mb = tr.get(mk).join();
+        if (mb == null) continue;
+        try {
+          var sm = SegmentMeta.parseFrom(mb);
+          if (sm.getState() == SegmentMeta.State.COMPACTING) {
+            var sealed = sm.toBuilder()
+                .setState(SegmentMeta.State.SEALED)
+                .build();
+            tr.set(mk, sealed.toByteArray());
+          }
+        } catch (InvalidProtocolBufferException e) {
+          throw new RuntimeException(e);
+        }
+      }
+      return completedFuture(null);
+    });
+  }
+
+  /**
+   * Finds a small set of candidate segments to compact together with the anchor.
+   * Heuristic: choose SEALED segments with the smallest counts first until their
+   * combined live counts reach at least ~80% of maxSegmentSize or up to 4 segments.
+   */
+  public CompletableFuture<java.util.List<Integer>> findCompactionCandidates(int anchorSegId) {
+    Database db = config.getDatabase();
+    int maxSize = config.getMaxSegmentSize();
+    com.apple.foundationdb.subspace.Subspace reg = indexDirs.segmentsIndexSubspace();
+    return db.readAsync(tr -> tr.getRange(reg.range()).asList()).thenCompose(kvs -> {
+      java.util.List<Integer> ids = new java.util.ArrayList<>(kvs.size());
+      for (com.apple.foundationdb.KeyValue kv : kvs) {
+        int sid = Math.toIntExact(reg.unpack(kv.getKey()).getLong(0));
+        ids.add(sid);
+      }
+      java.util.List<java.util.concurrent.CompletableFuture<byte[]>> metas = new java.util.ArrayList<>();
+      for (int sid : ids)
+        metas.add(db.readAsync(tr -> tr.get(indexDirs.segmentKeys(sid).metaKey())));
+      return java.util.concurrent.CompletableFuture.allOf(
+              metas.toArray(java.util.concurrent.CompletableFuture[]::new))
+          .thenApply(v -> {
+            java.util.List<int[]> sealed = new java.util.ArrayList<>(); // [segId, count]
+            for (int i = 0; i < ids.size(); i++) {
+              byte[] b = metas.get(i).join();
+              if (b == null) continue;
+              try {
+                var sm = io.github.panghy.vectorsearch.proto.SegmentMeta.parseFrom(b);
+                if (sm.getState() == io.github.panghy.vectorsearch.proto.SegmentMeta.State.SEALED) {
+                  sealed.add(new int[] {ids.get(i), sm.getCount()});
+                }
+              } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                throw new RuntimeException(e);
+              }
+            }
+            sealed.sort(java.util.Comparator.comparingInt(a -> a[1]));
+            int budget = (int) Math.max(1, Math.round(0.8 * maxSize));
+            int sum = 0;
+            java.util.List<Integer> pick = new java.util.ArrayList<>();
+            // Ensure anchor is present (if sealed)
+            for (int[] pair : sealed)
+              if (pair[0] == anchorSegId) {
+                pick.add(anchorSegId);
+                sum += pair[1];
+                break;
+              }
+            for (int[] pair : sealed) {
+              if (pick.contains(pair[0])) continue;
+              if (pick.size() >= 4) break;
+              pick.add(pair[0]);
+              sum += pair[1];
+              if (sum >= budget) break;
+            }
+            if (pick.size() <= 1) return java.util.List.of();
+            return pick;
+          });
+    });
   }
 }

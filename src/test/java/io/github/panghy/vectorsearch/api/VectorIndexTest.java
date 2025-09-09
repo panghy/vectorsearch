@@ -175,6 +175,7 @@ class VectorIndexTest {
         .graphDegree(2)
         .maxSegmentSize(10)
         .localWorkerThreads(0)
+        .autoFindCompactionCandidates(false)
         .vacuumMinDeletedRatio(0.0)
         .vacuumCooldown(Duration.ofHours(1))
         .build();

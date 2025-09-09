@@ -6,6 +6,7 @@ import com.apple.foundationdb.Database;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories.IndexDirectories;
+import io.github.panghy.vectorsearch.fdb.FdbVectorIndex;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import java.util.concurrent.CompletableFuture;
 
@@ -51,6 +52,54 @@ public final class MaintenanceWorker {
             work = svc.vacuumSegment(v.getSegId(), v.getMinDeletedRatio());
           } else if (t.hasCompact()) {
             work = svc.compactSegments(t.getCompact().getSegIdsList());
+          } else if (t.hasFindCandidates()) {
+            // Heuristic: pick sealed small segments until we approximately fill one target
+            int anchor = t.getFindCandidates().getAnchorSegId();
+            work = svc.findCompactionCandidates(anchor).thenCompose(cands -> {
+              if (cands.size() <= 1) return completedFuture(null);
+              // Atomically mark candidates as COMPACTING to avoid overlaps
+              return db.runAsync(tr -> {
+                    for (int sid : cands) {
+                      byte[] mk =
+                          indexDirs.segmentKeys(sid).metaKey();
+                      byte[] mb = tr.get(mk).join();
+                      if (mb == null) return completedFuture(false);
+                      try {
+                        var sm = io.github.panghy.vectorsearch.proto.SegmentMeta.parseFrom(mb);
+                        if (sm.getState()
+                            != io.github.panghy.vectorsearch.proto.SegmentMeta.State
+                                .SEALED) {
+                          return completedFuture(false);
+                        }
+                      } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                        throw new RuntimeException(e);
+                      }
+                    }
+                    for (int sid : cands) {
+                      byte[] mk =
+                          indexDirs.segmentKeys(sid).metaKey();
+                      try {
+                        var sm = io.github.panghy.vectorsearch.proto.SegmentMeta.parseFrom(
+                            tr.get(mk).join());
+                        var updated = sm.toBuilder()
+                            .setState(
+                                io.github.panghy.vectorsearch.proto.SegmentMeta.State
+                                    .COMPACTING)
+                            .build();
+                        tr.set(mk, updated.toByteArray());
+                      } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                        throw new RuntimeException(e);
+                      }
+                    }
+                    return completedFuture(true);
+                  })
+                  .thenCompose(marked -> marked
+                      ? FdbVectorIndex.createOrOpen(config)
+                          .thenCompose(ix -> ((FdbVectorIndex) ix)
+                              .requestCompaction(cands)
+                              .whenComplete((vv, ex) -> ix.close()))
+                      : completedFuture(null));
+            });
           } else {
             work = completedFuture(null);
           }
