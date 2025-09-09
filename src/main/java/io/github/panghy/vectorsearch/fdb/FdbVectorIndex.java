@@ -7,6 +7,7 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.KeyValue;
 import com.apple.foundationdb.Range;
+import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.subspace.Subspace;
 import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -158,10 +159,20 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   }
 
   @Override
+  public CompletableFuture<int[]> add(Transaction tx, float[] embedding, byte[] payload) {
+    return store.add(tx, embedding, payload);
+  }
+
+  @Override
   public CompletableFuture<Void> delete(int segId, int vecId) {
     // Marks the record deleted and, if the per-segment deleted ratio is high enough,
     // enqueues a maintenance vacuum task to reclaim storage for that segment.
     return store.delete(segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(Set.of(segId)));
+  }
+
+  @Override
+  public CompletableFuture<Void> delete(Transaction tx, int segId, int vecId) {
+    return store.delete(tx, segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(tx, Set.of(segId)));
   }
 
   @Override
@@ -173,8 +184,20 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   }
 
   @Override
+  public CompletableFuture<Void> deleteAll(Transaction tx, int[][] ids) {
+    Set<Integer> segs = new HashSet<>();
+    if (ids != null) for (int[] id : ids) if (id != null && id.length > 0) segs.add(id[0]);
+    return store.deleteBatch(tx, ids).thenCompose(v -> scheduleVacuumIfNeeded(tx, segs));
+  }
+
+  @Override
   public CompletableFuture<List<int[]>> addAll(float[][] embeddings, byte[][] payloads) {
     return store.addBatch(embeddings, payloads);
+  }
+
+  @Override
+  public CompletableFuture<List<int[]>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads) {
+    return store.addBatch(tx, embeddings, payloads);
   }
 
   @Override
@@ -358,6 +381,47 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
               throw new RuntimeException(e);
             }
           })));
+    }
+    return allOf(fs.toArray(CompletableFuture[]::new)).thenApply(x -> null);
+  }
+
+  private CompletableFuture<Void> scheduleVacuumIfNeeded(Transaction tx, Set<Integer> segIds) {
+    if (maintenanceQueue == null || segIds == null || segIds.isEmpty()) return completedFuture(null);
+    double thr = config.getVacuumMinDeletedRatio();
+    List<CompletableFuture<Void>> fs = new ArrayList<>();
+    for (int segId : segIds) {
+      fs.add(tx.get(indexDirs.segmentKeys(segId).metaKey()).thenCompose(bytes -> {
+        if (bytes == null) return completedFuture(null);
+        try {
+          SegmentMeta sm = SegmentMeta.parseFrom(bytes);
+          long live = sm.getCount();
+          long del = sm.getDeletedCount();
+          double ratio = (live + del) == 0 ? 0.0 : ((double) del) / ((double) (live + del));
+          if (ratio < thr) {
+            if (vacSkipped != null) vacSkipped.add(1);
+            return completedFuture(null);
+          }
+          long cdMs = Math.max(0, config.getVacuumCooldown().toMillis());
+          if (cdMs > 0 && sm.getLastVacuumAtMs() > 0) {
+            long now = config.getInstantSource().instant().toEpochMilli();
+            if (now - sm.getLastVacuumAtMs() < cdMs) {
+              if (vacSkipped != null) vacSkipped.add(1);
+              return completedFuture(null);
+            }
+          }
+          MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
+              .setSegId(segId)
+              .setMinDeletedRatio(thr)
+              .build();
+          MaintenanceTask mt =
+              MaintenanceTask.newBuilder().setVacuum(v).build();
+          String key = "vacuum-if-needed:" + segId;
+          if (vacScheduled != null) vacScheduled.add(1);
+          return maintenanceQueue.enqueueIfNotExists(tx, key, mt).thenApply(x -> null);
+        } catch (InvalidProtocolBufferException e) {
+          throw new RuntimeException(e);
+        }
+      }));
     }
     return allOf(fs.toArray(CompletableFuture[]::new)).thenApply(x -> null);
   }

@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch.api;
 
+import com.apple.foundationdb.Transaction;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.fdb.FdbVectorIndex;
 import java.util.List;
@@ -66,6 +67,17 @@ public interface VectorIndex extends AutoCloseable {
   CompletableFuture<int[]> add(float[] embedding, byte[] payload);
 
   /**
+   * Inserts one vector using the provided FoundationDB {@link Transaction}.
+   *
+   * <p>Nuance: this overload attempts to perform the entire write in the caller-supplied transaction
+   * without internal chunking. If the write set would exceed FoundationDB limits (≈10MB or 5s),
+   * the caller is expected to control batch sizes or split work across transactions. If rotation is
+   * necessary, the implementation performs the ACTIVE→PENDING transition and opens the next ACTIVE
+   * within the same transaction before continuing writes.
+   */
+  CompletableFuture<int[]> add(Transaction tx, float[] embedding, byte[] payload);
+
+  /**
    * Inserts many vectors efficiently.
    *
    * <p>Semantics and guarantees:
@@ -76,6 +88,16 @@ public interface VectorIndex extends AutoCloseable {
    * </ul>
    */
   CompletableFuture<List<int[]>> addAll(float[][] embeddings, byte[][] payloads);
+
+  /**
+   * Inserts many vectors using a single caller-managed FDB {@link Transaction}.
+   *
+   * <p>Unlike the default overload which may span multiple transactions to respect size/time
+   * limits, this method writes all vectors in the provided transaction and may rotate segments
+   * (mark PENDING and open next ACTIVE) inline as capacity is reached. Callers should dial back the
+   * batch size to remain within FDB limits.
+   */
+  CompletableFuture<List<int[]>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads);
 
   /**
    * kNN query with default traversal parameters.
@@ -113,12 +135,27 @@ public interface VectorIndex extends AutoCloseable {
   CompletableFuture<Void> delete(int segId, int vecId);
 
   /**
+   * Marks one vector deleted within the provided caller-managed {@link Transaction}.
+   *
+   * <p>Behavior matches {@link #delete(int, int)} but performs all reads/writes in the supplied
+   * transaction (no internal chunking). Threshold-aware maintenance enqueue (vacuum) will also use
+   * the same transaction if configured.
+   */
+  CompletableFuture<Void> delete(Transaction tx, int segId, int vecId);
+
+  /**
    * Batch delete convenience for many {@code [segmentId, vectorId]} pairs.
    *
    * <p>Enqueues at most one vacuum task per affected segment when the deleted ratio threshold is
    * satisfied, observing cooldown semantics.
    */
   CompletableFuture<Void> deleteAll(int[][] ids);
+
+  /**
+   * Batch delete using a single caller-managed {@link Transaction}. See {@link #delete(Transaction,
+   * int, int)} for details and caveats.
+   */
+  CompletableFuture<Void> deleteAll(Transaction tx, int[][] ids);
 
   /**
    * Waits until background indexing is drained.
