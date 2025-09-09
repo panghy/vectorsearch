@@ -58,6 +58,9 @@ public final class FdbVectorStore {
    *
    * @return future with the opened {@link FdbDirectories.IndexDirectories}
    */
+  /**
+   * @return the index directories helper for this store (already opened)
+   */
   public CompletableFuture<FdbDirectories.IndexDirectories> openIndexDirs() {
     return completedFuture(indexDirs);
   }
@@ -68,6 +71,12 @@ public final class FdbVectorStore {
    * against the provided {@link VectorIndexConfig} and throws on mismatches.
    *
    * @return future that completes when the index is ready
+   */
+  /**
+   * Creates directories and initializes index metadata and the first ACTIVE segment if missing.
+   * Validates persisted {@link IndexMeta} matches {@link VectorIndexConfig} on reopen.
+   *
+   * @return future that completes when the index is ready for use
    */
   public CompletableFuture<Void> createOrOpenIndex() {
     Database db = config.getDatabase();
@@ -161,6 +170,9 @@ public final class FdbVectorStore {
   /**
    * Returns the current ACTIVE segment id.
    */
+  /**
+   * @return future with the current ACTIVE segment id
+   */
   public CompletableFuture<Integer> getCurrentSegment() {
     Database db = config.getDatabase();
     return db.readAsync(tr -> tr.get(indexDirs.currentSegmentKey())
@@ -177,11 +189,26 @@ public final class FdbVectorStore {
    * @param payload   optional payload bytes
    * @return future with [segmentId, vectorId]
    */
+  /**
+   * Inserts one vector using the store's multi-transaction batching path.
+   *
+   * @param embedding vector values (length must equal configured dimension)
+   * @param payload   optional payload bytes (nullable)
+   * @return future with {@code [segId, vecId]}
+   */
   public CompletableFuture<int[]> add(float[] embedding, byte[] payload) {
     return addBatch(new float[][] {embedding}, new byte[][] {payload}).thenApply(ids -> ids.get(0));
   }
 
   /** Single-transaction variant: writes a single vector in the provided transaction. */
+  /**
+   * Inserts one vector inside a caller-supplied transaction.
+   *
+   * @param tr        FDB transaction
+   * @param embedding vector values (length must equal configured dimension)
+   * @param payload   optional payload bytes (nullable)
+   * @return future with {@code [segId, vecId]}
+   */
   public CompletableFuture<int[]> add(Transaction tr, float[] embedding, byte[] payload) {
     return addBatch(tr, new float[][] {embedding}, new byte[][] {payload}).thenApply(ids -> ids.get(0));
   }
@@ -197,6 +224,15 @@ public final class FdbVectorStore {
    * @param embeddings vectors to add (each of length = dimension)
    * @param payloads   optional payload bytes per vector (may be null or shorter than embeddings)
    * @return future with assigned ids per vector in the same order [segId, vecId]
+   */
+  /**
+   * Inserts many vectors with internal batching and rotation across multiple transactions.
+   * Missing payload entries (when {@code payloads == null} or shorter than embeddings) are treated
+   * as {@code null} payloads; extra payload entries are ignored.
+   *
+   * @param embeddings vectors to insert
+   * @param payloads   optional per-vector payloads
+   * @return future with assigned ids per vector in the same order
    */
   public CompletableFuture<List<int[]>> addBatch(float[][] embeddings, byte[][] payloads) {
     Database db = config.getDatabase();
@@ -320,6 +356,15 @@ public final class FdbVectorStore {
    * the same transaction as capacity is reached. No internal chunking by approximate size/time is
    * performed; callers are responsible for staying within FDB limits.
    */
+  /**
+   * Inserts many vectors inside a single caller-supplied transaction. Rotates within the same
+   * transaction as capacity is reached.
+   *
+   * @param tr         FDB transaction
+   * @param embeddings vectors to insert
+   * @param payloads   optional per-vector payloads (may be {@code null} or shorter than embeddings)
+   * @return future with assigned ids per vector in the same order
+   */
   public CompletableFuture<List<int[]>> addBatch(Transaction tr, float[][] embeddings, byte[][] payloads) {
     List<int[]> assigned = new ArrayList<>(embeddings.length);
     byte[] curSegK = indexDirs.currentSegmentKey();
@@ -399,17 +444,38 @@ public final class FdbVectorStore {
   /**
    * Marks a single vector as deleted and updates segment counters.
    */
+  /**
+   * Marks a single vector deleted and updates segment counters.
+   *
+   * @param segId segment id
+   * @param vecId vector id within the segment
+   * @return future that completes when persisted
+   */
   public CompletableFuture<Void> delete(int segId, int vecId) {
     return deleteBatch(new int[][] {{segId, vecId}});
   }
 
   /** Single-transaction variant. */
+  /**
+   * Single-transaction delete.
+   *
+   * @param tr    FDB transaction
+   * @param segId segment id
+   * @param vecId vector id within the segment
+   * @return future that completes when persisted
+   */
   public CompletableFuture<Void> delete(Transaction tr, int segId, int vecId) {
     return deleteBatch(tr, new int[][] {{segId, vecId}});
   }
 
   /**
    * Batch delete: each element is [segId, vecId].
+   */
+  /**
+   * Batch delete across one or more transactions; groups by segment for efficiency.
+   *
+   * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
+   * @return future that completes when all mutations are persisted
    */
   public CompletableFuture<Void> deleteBatch(int[][] ids) {
     if (ids == null || ids.length == 0) return completedFuture(null);
@@ -468,6 +534,13 @@ public final class FdbVectorStore {
   }
 
   /** Batch delete in a single caller-supplied transaction. */
+  /**
+   * Batch delete inside a single caller-supplied transaction.
+   *
+   * @param tr  FDB transaction
+   * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
+   * @return future that completes when persisted
+   */
   public CompletableFuture<Void> deleteBatch(Transaction tr, int[][] ids) {
     if (ids == null || ids.length == 0) return completedFuture(null);
     // Group by segment to update SegmentMeta efficiently
