@@ -47,6 +47,13 @@ public interface VectorIndex extends AutoCloseable {
    *
    * <p>Call {@link #close()} to stop any auto-started workers and release resources.
    */
+  /**
+   * Opens an existing index or creates a new one using the provided configuration.
+   *
+   * @param config index configuration and resources (FDB {@code Database}, root directory,
+   *               dimension, metric, PQ/graph parameters, etc.)
+   * @return a future that resolves to a ready {@link VectorIndex}
+   */
   static CompletableFuture<VectorIndex> createOrOpen(VectorIndexConfig config) {
     return FdbVectorIndex.createOrOpen(config).thenApply(ix -> (VectorIndex) ix);
   }
@@ -64,6 +71,15 @@ public interface VectorIndex extends AutoCloseable {
    *   <li>{@code payload} is optional and stored verbatim with the vector.</li>
    * </ul>
    */
+  /**
+   * Inserts a single vector into the current ACTIVE segment.
+   *
+   * @param embedding vector values; length must equal {@link VectorIndexConfig#getDimension()}.
+   *                  Implementations may throw {@link IllegalArgumentException} if the length
+   *                  does not match.
+   * @param payload   optional payload bytes to store verbatim with the vector; may be {@code null}.
+   * @return a future with the assigned identifier {@code [segmentId, vectorId]}.
+   */
   CompletableFuture<int[]> add(float[] embedding, byte[] payload);
 
   /**
@@ -74,6 +90,21 @@ public interface VectorIndex extends AutoCloseable {
    * the caller is expected to control batch sizes or split work across transactions. If rotation is
    * necessary, the implementation performs the ACTIVE→PENDING transition and opens the next ACTIVE
    * within the same transaction before continuing writes.
+   */
+  /**
+   * Inserts one vector using a caller-supplied FoundationDB {@link Transaction}.
+   *
+   * <p>Single-transaction nuance: this overload attempts the entire write in {@code tx}
+   * without internal chunking. If the write set would exceed FDB limits (~10MB of mutations or
+   * ~5 seconds), callers must dial back batch sizes or split the work themselves.</p>
+   *
+   * <p>If rotation is needed, the ACTIVE→PENDING transition and creation of the next ACTIVE are
+   * performed inside {@code tx} before continuing writes.</p>
+   *
+   * @param tx        existing FDB transaction to use
+   * @param embedding vector values; length must equal {@link VectorIndexConfig#getDimension()}.
+   * @param payload   optional payload bytes, may be {@code null}
+   * @return a future with the assigned identifier {@code [segmentId, vectorId]}.
    */
   CompletableFuture<int[]> add(Transaction tx, float[] embedding, byte[] payload);
 
@@ -87,6 +118,20 @@ public interface VectorIndex extends AutoCloseable {
    *   <li>Enqueues exactly one build task for each segment that transitions ACTIVE→PENDING.</li>
    * </ul>
    */
+  /**
+   * Inserts multiple vectors efficiently across one or more transactions.
+   *
+   * <p>Behavior when {@code payloads} length differs from {@code embeddings.length}:</p>
+   * <ul>
+   *   <li>If {@code payloads == null} or {@code payloads.length < embeddings.length}, missing
+   *       entries are treated as {@code null} payloads.</li>
+   *   <li>If {@code payloads.length > embeddings.length}, extra payloads are ignored.</li>
+   * </ul>
+   *
+   * @param embeddings array of vectors; each vector's length must equal the configured dimension
+   * @param payloads   optional per-vector payloads; may be {@code null} or shorter than embeddings
+   * @return a future with assigned IDs per vector (same order as input)
+   */
   CompletableFuture<List<int[]>> addAll(float[][] embeddings, byte[][] payloads);
 
   /**
@@ -96,6 +141,20 @@ public interface VectorIndex extends AutoCloseable {
    * limits, this method writes all vectors in the provided transaction and may rotate segments
    * (mark PENDING and open next ACTIVE) inline as capacity is reached. Callers should dial back the
    * batch size to remain within FDB limits.
+   */
+  /**
+   * Inserts multiple vectors using a single caller-managed {@link Transaction}.
+   *
+   * <p>Unlike {@link #addAll(float[][], byte[][])} which may span multiple transactions to respect
+   * size/time heuristics, this method performs all mutations inside {@code tx}. If the write set is
+   * too large, callers should reduce batch sizes accordingly.</p>
+   *
+   * <p>Rotation (ACTIVE→PENDING and opening next ACTIVE) occurs inside {@code tx} as needed.</p>
+   *
+   * @param tx         existing FDB transaction to use
+   * @param embeddings vectors to insert; each vector length must equal the configured dimension
+   * @param payloads   optional per-vector payloads (see {@link #addAll(float[][], byte[][])} rules)
+   * @return a future with assigned IDs per vector (same order as input)
    */
   CompletableFuture<List<int[]>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads);
 
@@ -132,6 +191,13 @@ public interface VectorIndex extends AutoCloseable {
    * {@link VectorIndexConfig#getVacuumCooldown()}). Vacuum physically removes vector, PQ code, and
    * adjacency entries and decrements {@code deleted_count}.</p>
    */
+  /**
+   * Marks one vector as deleted (tombstone) and updates per-segment counters.
+   *
+   * @param segId segment identifier
+   * @param vecId vector identifier within the segment
+   * @return a future that completes when the mutation is persisted
+   */
   CompletableFuture<Void> delete(int segId, int vecId);
 
   /**
@@ -141,6 +207,14 @@ public interface VectorIndex extends AutoCloseable {
    * transaction (no internal chunking). Threshold-aware maintenance enqueue (vacuum) will also use
    * the same transaction if configured.
    */
+  /**
+   * Single-transaction delete using a caller-provided {@link Transaction}.
+   *
+   * @param tx    existing FDB transaction to use
+   * @param segId segment identifier
+   * @param vecId vector identifier within the segment
+   * @return a future that completes when the mutation is persisted
+   */
   CompletableFuture<Void> delete(Transaction tx, int segId, int vecId);
 
   /**
@@ -149,11 +223,24 @@ public interface VectorIndex extends AutoCloseable {
    * <p>Enqueues at most one vacuum task per affected segment when the deleted ratio threshold is
    * satisfied, observing cooldown semantics.
    */
+  /**
+   * Batch delete convenience for many {@code [segmentId, vectorId]} pairs.
+   *
+   * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
+   * @return a future that completes when all mutations are persisted
+   */
   CompletableFuture<Void> deleteAll(int[][] ids);
 
   /**
    * Batch delete using a single caller-managed {@link Transaction}. See {@link #delete(Transaction,
    * int, int)} for details and caveats.
+   */
+  /**
+   * Batch delete within a single caller-provided {@link Transaction}.
+   *
+   * @param tx  existing FDB transaction to use
+   * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
+   * @return a future that completes when mutations are persisted
    */
   CompletableFuture<Void> deleteAll(Transaction tx, int[][] ids);
 
@@ -165,12 +252,26 @@ public interface VectorIndex extends AutoCloseable {
    * are false. This method is intended for tests and maintenance flows; production queries should
    * not rely on it.</p>
    */
+  /**
+   * Waits until the build queue is empty (no visible or claimed tasks remain).
+   *
+   * <p>Intended primarily for tests and maintenance flows; production traffic should not block on
+   * index background work.</p>
+   *
+   * @return a future that completes when the build queue drains
+   */
   CompletableFuture<Void> awaitIndexingComplete();
 
   /** Approximate number of decoded PQ codebooks currently resident in cache. */
+  /**
+   * @return approximate number of decoded PQ codebooks resident in the cache
+   */
   long getCodebookCacheSize();
 
   /** Approximate number of adjacency lists currently resident in cache. */
+  /**
+   * @return approximate number of adjacency lists resident in the cache
+   */
   long getAdjacencyCacheSize();
 
   /**
