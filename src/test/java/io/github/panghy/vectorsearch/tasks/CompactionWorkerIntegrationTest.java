@@ -43,7 +43,7 @@ public class CompactionWorkerIntegrationTest {
         .pqM(2)
         .pqK(8)
         .graphDegree(4)
-        .maxSegmentSize(2)
+        .maxSegmentSize(1)
         .estimatedWorkerCount(1)
         .defaultTtl(Duration.ofSeconds(30))
         .build();
@@ -64,17 +64,21 @@ public class CompactionWorkerIntegrationTest {
 
   @Test
   public void schedules_and_runs_compaction_task() throws Exception {
-    // Force at least two segments
-    index.add(new float[] {1, 2, 3, 4}, null).get(5, TimeUnit.SECONDS);
-    index.add(new float[] {5, 6, 7, 8}, null).get(5, TimeUnit.SECONDS);
-    index.add(new float[] {9, 0, 1, 2}, null).get(5, TimeUnit.SECONDS); // rotates to seg 1
+    // Force two PENDING segments then seal them
+    index.add(new float[] {1, 2, 3, 4}, null).get(5, TimeUnit.SECONDS); // seg 0, vec 0 -> now PENDING after next
+    index.add(new float[] {5, 6, 7, 8}, null).get(5, TimeUnit.SECONDS); // seg 1, vec 0 -> now PENDING after next
+    index.add(new float[] {9, 0, 1, 2}, null).get(5, TimeUnit.SECONDS); // seg 2 active
+    var dirsSeal = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+    var sealCfg = VectorIndexConfig.builder(db, root)
+        .dimension(4)
+        .pqM(2)
+        .pqK(8)
+        .graphDegree(4)
+        .build();
+    new SegmentBuildService(sealCfg, dirsSeal).build(0).get(5, TimeUnit.SECONDS);
+    new SegmentBuildService(sealCfg, dirsSeal).build(1).get(5, TimeUnit.SECONDS);
 
-    // Enqueue a compaction request for segIds [0,1]
-    ((io.github.panghy.vectorsearch.fdb.FdbVectorIndex) index)
-        .requestCompaction(List.of(0, 1))
-        .get(5, TimeUnit.SECONDS);
-
-    // Build maintenance queue + worker and process once
+    // Build maintenance queue + worker and process: find-candidates then compact
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     var maintDir = dirs.tasksDir().createOrOpen(db, List.of("maint")).get(5, TimeUnit.SECONDS);
     var tqc = TaskQueueConfig.builder(
@@ -85,13 +89,30 @@ public class CompactionWorkerIntegrationTest {
         .estimatedWorkerCount(1)
         .defaultTtl(Duration.ofSeconds(30))
         .defaultThrottle(Duration.ofMillis(50))
-        .taskNameExtractor(mt ->
-            mt.hasVacuum() ? ("vacuum-segment:" + mt.getVacuum().getSegId()) : "compact")
+        .taskNameExtractor(mt -> mt.hasVacuum()
+            ? ("vacuum-segment:" + mt.getVacuum().getSegId())
+            : (mt.hasCompact() ? "compact" : "find-candidates"))
         .build();
     var mq = TaskQueues.createTaskQueue(tqc).get(5, TimeUnit.SECONDS);
     MaintenanceWorker worker = new MaintenanceWorker(
         VectorIndexConfig.builder(db, root).dimension(4).build(), dirs, mq);
-    boolean processed = worker.runOnce().get(5, TimeUnit.SECONDS);
-    assertThat(processed).isTrue();
+    // First run: probably no task yet; manually queue find-candidates for anchor 0
+    mq.enqueue(
+            "find-candidates:0",
+            io.github.panghy.vectorsearch.proto.MaintenanceTask.newBuilder()
+                .setFindCandidates(
+                    io.github.panghy.vectorsearch.proto.MaintenanceTask.FindCompactionCandidates
+                        .newBuilder()
+                        .setAnchorSegId(0)
+                        .build())
+                .build())
+        .get(5, TimeUnit.SECONDS);
+    boolean processed1 = worker.runOnce().get(5, TimeUnit.SECONDS);
+    assertThat(processed1).isTrue();
+    boolean processed2 = worker.runOnce().get(5, TimeUnit.SECONDS);
+    assertThat(processed2).isTrue();
+
+    // Skeleton only: we verified both tasks processed; detailed registry assertions are left to
+    // a fuller compaction implementation.
   }
 }
