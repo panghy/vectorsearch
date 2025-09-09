@@ -419,23 +419,10 @@ public final class FdbVectorStore {
         // Continue writing remaining into same segment
         return addAllInTxn(tr, segId, startIdx + toWrite, embeddings, payloads, outIds);
       }
-      // Rotate within same transaction
-      SegmentMeta pending = sm.toBuilder()
-          .setState(SegmentMeta.State.PENDING)
-          .setCount(Math.max(sm.getCount(), count + toWrite))
-          .build();
-      tr.set(sk.metaKey(), pending.toByteArray());
+      // Rotate within same transaction (reuse helper)
       int nextSeg = segId + 1;
-      tr.set(indexDirs.currentSegmentKey(), encodeInt(nextSeg));
-      tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
-      SegmentMeta nextMeta = SegmentMeta.newBuilder()
-          .setSegmentId(nextSeg)
-          .setState(SegmentMeta.State.ACTIVE)
-          .setCount(0)
-          .setCreatedAtMs(Instant.now().toEpochMilli())
-          .build();
-      tr.set(indexDirs.segmentKeys(nextSeg).metaKey(), nextMeta.toByteArray());
-      tr.set(indexDirs.segmentsIndexKey(nextSeg), new byte[0]);
+      rotateToNextActive(
+          tr, sk, indexDirs.currentSegmentKey(), sm, segId, Math.max(sm.getCount(), count + toWrite));
       return enqueueBuildTask(tr, segId)
           .thenCompose($ -> addAllInTxn(tr, nextSeg, startIdx + toWrite, embeddings, payloads, outIds));
     });
