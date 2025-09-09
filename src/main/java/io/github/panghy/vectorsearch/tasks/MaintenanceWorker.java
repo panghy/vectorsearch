@@ -53,7 +53,8 @@ public final class MaintenanceWorker {
           } else if (t.hasCompact()) {
             work = svc.compactSegments(t.getCompact().getSegIdsList());
           } else if (t.hasFindCandidates()) {
-            // Heuristic: pick sealed small segments until we approximately fill one target
+            // Heuristic handled by MaintenanceService.findCompactionCandidates(anchor):
+            // pick sealed small segments until we approximately fill one target
             int anchor = t.getFindCandidates().getAnchorSegId();
             work = svc.findCompactionCandidates(anchor).thenCompose(cands -> {
               if (cands.size() <= 1) return completedFuture(null);

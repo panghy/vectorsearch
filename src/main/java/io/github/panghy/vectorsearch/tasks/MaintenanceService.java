@@ -9,6 +9,9 @@ import com.apple.foundationdb.Range;
 import com.apple.foundationdb.subspace.Subspace;
 import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.github.panghy.taskqueue.TaskQueue;
+import io.github.panghy.taskqueue.TaskQueueConfig;
+import io.github.panghy.taskqueue.TaskQueues;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
@@ -41,6 +44,7 @@ public final class MaintenanceService {
 
   private final VectorIndexConfig config;
   private final FdbDirectories.IndexDirectories indexDirs;
+  private CompletableFuture<TaskQueue<String, MaintenanceTask>> maintQueue;
 
   public MaintenanceService(VectorIndexConfig cfg, FdbDirectories.IndexDirectories dirs) {
     this.config = requireNonNull(cfg, "config");
@@ -148,20 +152,14 @@ public final class MaintenanceService {
       Database db, FdbDirectories.SegmentKeys sk, SegmentMeta sm, int removed) {
     long now = config.getInstantSource().instant().toEpochMilli();
     int maxSize = config.getMaxSegmentSize();
-    return db.runAsync(tr -> tr.get(sk.metaKey()).thenApply(curBytes -> {
-          SegmentMeta base;
-          try {
-            base = curBytes == null ? sm : SegmentMeta.parseFrom(curBytes);
-          } catch (InvalidProtocolBufferException e) {
-            throw new RuntimeException(e);
-          }
-          SegmentMeta updated = base.toBuilder()
-              .setDeletedCount(Math.max(0, base.getDeletedCount() - Math.max(0, removed)))
+    return db.runAsync(tr -> {
+          SegmentMeta updated = sm.toBuilder()
+              .setDeletedCount(Math.max(0, sm.getDeletedCount() - Math.max(0, removed)))
               .setLastVacuumAtMs(now)
               .build();
           tr.set(sk.metaKey(), updated.toByteArray());
-          return updated;
-        }))
+          return completedFuture(updated);
+        })
         .thenCompose(updated -> {
           // If segment is small (<50% of max), enqueue a FindCompactionCandidates task.
           if (config.isAutoFindCompactionCandidates() && updated.getCount() < (maxSize / 2)) {
@@ -173,30 +171,35 @@ public final class MaintenanceService {
                 .setFindCandidates(fcc)
                 .build();
             String key = "find-candidates:" + updated.getSegmentId();
-            return db.runAsync(tr -> io.github.panghy.taskqueue.TaskQueues.createTaskQueue(
-                        io.github.panghy.taskqueue.TaskQueueConfig.builder(
-                                db,
-                                indexDirs
-                                    .tasksDir()
-                                    .createOrOpen(db, java.util.List.of("maint"))
-                                    .join(),
-                                new ProtoSerializers.StringSerializer(),
-                                new ProtoSerializers.MaintenanceTaskSerializer())
-                            .estimatedWorkerCount(config.getEstimatedWorkerCount())
-                            .defaultTtl(config.getDefaultTtl())
-                            .defaultThrottle(config.getDefaultThrottle())
-                            .taskNameExtractor(t -> t.hasVacuum()
-                                ? ("vacuum-segment:"
-                                    + t.getVacuum()
-                                        .getSegId())
-                                : (t.hasCompact() ? "compact" : "find-candidates"))
-                            .build())
-                    .join()
-                    .enqueueIfNotExists(tr, key, mt))
+            return getOrCreateMaintQueue(db)
+                .thenCompose(q -> db.runAsync(tr -> q.enqueueIfNotExists(tr, key, mt)))
                 .thenApply(x -> null);
           }
           return completedFuture(null);
         });
+  }
+
+  private CompletableFuture<TaskQueue<String, MaintenanceTask>> getOrCreateMaintQueue(Database db) {
+    if (maintQueue != null) return maintQueue;
+    maintQueue = indexDirs
+        .tasksDir()
+        .createOrOpen(db, java.util.List.of("maint"))
+        .thenCompose(maintDir -> {
+          TaskQueueConfig<String, MaintenanceTask> tqc = TaskQueueConfig.builder(
+                  db,
+                  maintDir,
+                  new ProtoSerializers.StringSerializer(),
+                  new ProtoSerializers.MaintenanceTaskSerializer())
+              .estimatedWorkerCount(config.getEstimatedWorkerCount())
+              .defaultTtl(config.getDefaultTtl())
+              .defaultThrottle(config.getDefaultThrottle())
+              .taskNameExtractor(t -> t.hasVacuum()
+                  ? ("vacuum-segment:" + t.getVacuum().getSegId())
+                  : (t.hasCompact() ? "compact" : "find-candidates"))
+              .build();
+          return TaskQueues.createTaskQueue(tqc);
+        });
+    return maintQueue;
   }
 
   /**
