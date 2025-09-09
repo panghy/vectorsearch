@@ -377,60 +377,66 @@ public final class FdbVectorStore {
   private CompletableFuture<Void> addAllInTxn(
       Transaction tr, int segId, int startIdx, float[][] embeddings, byte[][] payloads, List<int[]> outIds) {
     if (startIdx >= embeddings.length) return completedFuture(null);
-    FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segId);
-    return tr.get(sk.metaKey()).thenCompose(metaBytes -> {
-      SegmentMeta sm;
-      try {
-        sm = SegmentMeta.parseFrom(metaBytes);
-      } catch (InvalidProtocolBufferException e) {
-        throw new RuntimeException(e);
-      }
-      if (sm.getState() != SegmentMeta.State.ACTIVE) {
-        throw new IllegalStateException("Current segment not ACTIVE: " + sm.getState());
-      }
-      int max = config.getMaxSegmentSize();
-      int count = sm.getCount();
-      int remaining = embeddings.length - startIdx;
-      int capacity = Math.max(0, max - count);
-      int toWrite = Math.min(capacity, remaining);
-      // Write up to capacity
-      for (int i = 0; i < toWrite; i++) {
-        int vecId = count + i;
-        int idx = startIdx + i;
-        float[] e = embeddings[idx];
-        byte[] p = (payloads != null && idx < payloads.length) ? payloads[idx] : null;
-        VectorRecord rec = VectorRecord.newBuilder()
-            .setSegId(segId)
-            .setVecId(vecId)
-            .setEmbedding(ByteString.copyFrom(FloatPacker.floatsToBytes(e)))
-            .setDeleted(false)
-            .setPayload(p == null ? ByteString.EMPTY : ByteString.copyFrom(p))
-            .build();
-        tr.set(sk.vectorKey(vecId), rec.toByteArray());
-        outIds.add(new int[] {segId, vecId});
-      }
-      SegmentMeta updated = sm.toBuilder().setCount(count + toWrite).build();
-      tr.set(sk.metaKey(), updated.toByteArray());
-      boolean willRotate = updated.getCount() >= max;
-      if (!willRotate && (startIdx + toWrite) >= embeddings.length) {
-        return completedFuture(null);
-      }
-      if (!willRotate) {
-        // Continue writing remaining into same segment
-        return addAllInTxn(tr, segId, startIdx + toWrite, embeddings, payloads, outIds);
-      }
-      // Rotate within same transaction (reuse helper)
-      int nextSeg = segId + 1;
-      rotateToNextActive(
-          tr, sk, indexDirs.currentSegmentKey(), sm, segId, Math.max(sm.getCount(), count + toWrite));
-      return enqueueBuildTask(tr, segId)
-          .thenCompose($ -> addAllInTxn(tr, nextSeg, startIdx + toWrite, embeddings, payloads, outIds));
-    });
+    final byte[] curSegK = indexDirs.currentSegmentKey();
+    final AtomicInteger curSeg = new AtomicInteger(segId);
+    final AtomicInteger idx = new AtomicInteger(startIdx);
+
+    return whileTrue(() -> {
+          if (idx.get() >= embeddings.length) return completedFuture(false);
+          int seg = curSeg.get();
+          FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(seg);
+          return tr.get(sk.metaKey()).thenCompose(metaBytes -> {
+            SegmentMeta sm;
+            try {
+              sm = SegmentMeta.parseFrom(metaBytes);
+            } catch (InvalidProtocolBufferException e) {
+              throw new RuntimeException(e);
+            }
+            if (sm.getState() != SegmentMeta.State.ACTIVE) {
+              throw new IllegalStateException("Current segment not ACTIVE: " + sm.getState());
+            }
+            int max = config.getMaxSegmentSize();
+            int count = sm.getCount();
+            int remaining = embeddings.length - idx.get();
+            int capacity = Math.max(0, max - count);
+            if (capacity <= 0 && remaining > 0) {
+              int prev = seg;
+              rotateToNextActive(tr, sk, curSegK, sm, seg, count);
+              curSeg.set(prev + 1);
+              return enqueueBuildTask(tr, prev).thenApply($ -> true);
+            }
+            int toWrite = Math.min(capacity, remaining);
+            for (int i = 0; i < toWrite; i++) {
+              int vecId = count + i;
+              int j = idx.get() + i;
+              float[] e = embeddings[j];
+              byte[] p = (payloads != null && j < payloads.length) ? payloads[j] : null;
+              VectorRecord rec = VectorRecord.newBuilder()
+                  .setSegId(seg)
+                  .setVecId(vecId)
+                  .setEmbedding(ByteString.copyFrom(FloatPacker.floatsToBytes(e)))
+                  .setDeleted(false)
+                  .setPayload(p == null ? ByteString.EMPTY : ByteString.copyFrom(p))
+                  .build();
+              tr.set(sk.vectorKey(vecId), rec.toByteArray());
+              outIds.add(new int[] {seg, vecId});
+            }
+            int newCount = count + toWrite;
+            tr.set(
+                sk.metaKey(),
+                sm.toBuilder().setCount(newCount).build().toByteArray());
+            idx.addAndGet(toWrite);
+            if (newCount < max) {
+              return completedFuture(idx.get() < embeddings.length);
+            }
+            rotateToNextActive(tr, sk, curSegK, sm, seg, Math.max(sm.getCount(), newCount));
+            curSeg.set(seg + 1);
+            return enqueueBuildTask(tr, seg).thenApply($ -> true);
+          });
+        })
+        .thenApply(v -> null);
   }
 
-  /**
-   * Marks a single vector as deleted and updates segment counters.
-   */
   /**
    * Marks a single vector deleted and updates segment counters.
    *
@@ -442,7 +448,6 @@ public final class FdbVectorStore {
     return deleteBatch(new int[][] {{segId, vecId}});
   }
 
-  /** Single-transaction variant. */
   /**
    * Single-transaction delete.
    *
@@ -455,9 +460,6 @@ public final class FdbVectorStore {
     return deleteBatch(tr, new int[][] {{segId, vecId}});
   }
 
-  /**
-   * Batch delete: each element is [segId, vecId].
-   */
   /**
    * Batch delete across one or more transactions; groups by segment for efficiency.
    *
