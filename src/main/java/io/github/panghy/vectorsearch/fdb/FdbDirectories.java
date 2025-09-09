@@ -2,15 +2,17 @@ package io.github.panghy.vectorsearch.fdb;
 
 import com.apple.foundationdb.TransactionContext;
 import com.apple.foundationdb.directory.DirectorySubspace;
-import com.apple.foundationdb.subspace.Subspace;
 import com.apple.foundationdb.tuple.Tuple;
-import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
  * Helpers to create/open the directory structure for an index using DirectoryLayer.
  *
- * <p>All operations are non-blocking and return fully opened {@link DirectorySubspace} instances.</p>
+ * <p>This refactor moves away from ad-hoc tuple packing for segment-relative keys and instead
+ * relies on DirectoryLayer subspaces created via {@code createOrOpen}. This makes segment prefixes
+ * stable, short, and movable while keeping single-key values (like {@code meta}) under the index
+ * root.</p>
  */
 public final class FdbDirectories {
 
@@ -20,82 +22,98 @@ public final class FdbDirectories {
    * Group of subspaces for an index root and its shared containers.
    */
   public record IndexDirectories(
-      DirectorySubspace indexDir, DirectorySubspace segmentsDir, DirectorySubspace tasksDir) {
-    /**
-     * Key for index-level metadata.
-     */
+      DirectorySubspace indexDir,
+      DirectorySubspace segmentsDir,
+      DirectorySubspace tasksDir,
+      DirectorySubspace segmentsIndexDir) {
+
+    /** Key for index-level metadata (single value). */
     public byte[] metaKey() {
       return indexDir.pack(Tuple.from(FdbPathUtil.META));
     }
 
-    /**
-     * Key for the current ACTIVE segment pointer.
-     */
+    /** Key for the current ACTIVE segment pointer (single value). */
     public byte[] currentSegmentKey() {
       return indexDir.pack(Tuple.from(FdbPathUtil.CURRENT_SEGMENT));
     }
 
-    /** Key for the maximum known segment id (monotonic). */
+    /** Key for the maximum known segment id (single value, monotonic). */
     public byte[] maxSegmentKey() {
       return indexDir.pack(Tuple.from(FdbPathUtil.MAX_SEGMENT));
     }
 
-    /**
-     * Creates a segment key helper for the given zero-padded segment id.
-     */
-    public SegmentKeys segmentKeys(int segId) {
-      return new SegmentKeys(segmentsDir, segId);
-    }
-
-    /** Registry key to mark a segment as existent. */
+    /** Registry key to mark a segment as existent (under segmentsIndexDir). */
     public byte[] segmentsIndexKey(int segId) {
-      return indexDir.pack(Tuple.from(FdbPathUtil.SEGMENTS_INDEX, segId));
+      return segmentsIndexDir.pack(Tuple.from(segId));
     }
 
     /** Subspace for the segments index prefix. */
-    public Subspace segmentsIndexSubspace() {
-      return new Subspace(indexDir.pack(Tuple.from(FdbPathUtil.SEGMENTS_INDEX)));
+    public DirectorySubspace segmentsIndexSubspace() {
+      return segmentsIndexDir;
+    }
+
+    /**
+     * Opens (or creates) the directory structure for a specific segment and returns key helpers.
+     */
+    public CompletableFuture<SegmentKeys> segmentKeys(TransactionContext ctx, int segId) {
+      String seg = Integer.toString(segId);
+      CompletableFuture<DirectorySubspace> segDirF = segmentsDir.createOrOpen(ctx, List.of(seg));
+      CompletableFuture<DirectorySubspace> vectorsF =
+          segmentsDir.createOrOpen(ctx, List.of(seg, FdbPathUtil.VECTORS));
+      CompletableFuture<DirectorySubspace> pqF = segmentsDir.createOrOpen(ctx, List.of(seg, FdbPathUtil.PQ));
+      CompletableFuture<DirectorySubspace> pqCodesF =
+          segmentsDir.createOrOpen(ctx, List.of(seg, FdbPathUtil.PQ, FdbPathUtil.CODES));
+      CompletableFuture<DirectorySubspace> graphF =
+          segmentsDir.createOrOpen(ctx, List.of(seg, FdbPathUtil.GRAPH));
+      return CompletableFuture.allOf(segDirF, vectorsF, pqF, pqCodesF, graphF)
+          .thenApply(v -> new SegmentKeys(
+              segId, segDirF.join(), vectorsF.join(), pqF.join(), pqCodesF.join(), graphF.join()));
     }
   }
 
   /**
-   * Lightweight key helper for a segment using the segments container and a segment id string.
-   * Avoids DirectoryLayer calls and packs keys using the container subspace.
+   * Key helper backed by DirectoryLayer subspaces for a specific segment.
    */
-  public record SegmentKeys(DirectorySubspace segmentsDir, int segId) {
+  public record SegmentKeys(
+      int segId,
+      DirectorySubspace segmentDir,
+      DirectorySubspace vectorsDir,
+      DirectorySubspace pqDir,
+      DirectorySubspace pqCodesDir,
+      DirectorySubspace graphDir) {
 
     public byte[] metaKey() {
-      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.META));
+      return segmentDir.pack(Tuple.from(FdbPathUtil.META));
     }
 
     public byte[] vectorKey(int vecId) {
-      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.VECTORS, vecId));
+      return vectorsDir.pack(Tuple.from(vecId));
     }
 
     public byte[] pqCodebookKey() {
-      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.PQ, FdbPathUtil.CODEBOOK));
+      return pqDir.pack(Tuple.from(FdbPathUtil.CODEBOOK));
     }
 
     public byte[] pqCodeKey(int vecId) {
-      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.PQ, FdbPathUtil.CODES, vecId));
+      return pqCodesDir.pack(Tuple.from(vecId));
     }
 
     public byte[] graphKey(int vecId) {
-      return segmentsDir.pack(Tuple.from(segId, FdbPathUtil.GRAPH, vecId));
+      return graphDir.pack(Tuple.from(vecId));
     }
   }
 
   /**
-   * Opens/creates the child directories under a provided index root.
+   * Opens/creates child directories (segments/, tasks/, segmentsIndex/) under the provided index
+   * root directory.
    */
   public static CompletableFuture<IndexDirectories> openIndex(DirectorySubspace indexDir, TransactionContext ctx) {
-    CompletableFuture<DirectorySubspace> segmentsDirF =
-        indexDir.createOrOpen(ctx, Collections.singletonList(FdbPathUtil.SEGMENTS));
-    CompletableFuture<DirectorySubspace> tasksDirF =
-        indexDir.createOrOpen(ctx, Collections.singletonList(FdbPathUtil.TASKS));
-    return CompletableFuture.allOf(segmentsDirF, tasksDirF)
-        .thenApply(v -> new IndexDirectories(indexDir, segmentsDirF.join(), tasksDirF.join()));
+    CompletableFuture<DirectorySubspace> segmentsDirF = indexDir.createOrOpen(ctx, List.of(FdbPathUtil.SEGMENTS));
+    CompletableFuture<DirectorySubspace> tasksDirF = indexDir.createOrOpen(ctx, List.of(FdbPathUtil.TASKS));
+    CompletableFuture<DirectorySubspace> segmentsIndexF =
+        indexDir.createOrOpen(ctx, List.of(FdbPathUtil.SEGMENTS_INDEX));
+    return CompletableFuture.allOf(segmentsDirF, tasksDirF, segmentsIndexF)
+        .thenApply(v ->
+            new IndexDirectories(indexDir, segmentsDirF.join(), tasksDirF.join(), segmentsIndexF.join()));
   }
-
-  // Deprecated static helpers retained above were removed to reduce error-prone usage.
 }
