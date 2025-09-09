@@ -315,11 +315,6 @@ public final class FdbVectorStore {
   }
 
   /**
-   * Single-transaction variant: writes all vectors in the provided transaction, rotating within
-   * the same transaction as capacity is reached. No internal chunking by approximate size/time is
-   * performed; callers are responsible for staying within FDB limits.
-   */
-  /**
    * Inserts many vectors inside a single caller-supplied transaction. Rotates within the same
    * transaction as capacity is reached.
    *
@@ -636,9 +631,9 @@ public final class FdbVectorStore {
   }
 
   /**
-   * Reads {@link SegmentMeta} for a given segment id.
+   * Reads {@link SegmentMeta} for a given segment id. Visible for testing.
    */
-  public CompletableFuture<SegmentMeta> getSegmentMeta(int segId) {
+  CompletableFuture<SegmentMeta> getSegmentMeta(int segId) {
     Database db = config.getDatabase();
     return db.readAsync(tr -> tr.get(indexDirs.segmentKeys(segId).metaKey()).thenApply(bytes -> {
       try {
@@ -648,6 +643,4 @@ public final class FdbVectorStore {
       }
     }));
   }
-
-  // segId is encoded directly in tuple keys; no zero-padding.
 }
