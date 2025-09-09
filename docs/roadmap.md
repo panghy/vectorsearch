@@ -6,7 +6,7 @@ This roadmap restates the implementation plan to explicitly use FoundationDB’s
 
 - Goals:
   - Directory‑backed layout for all data (no ad‑hoc tuple roots). Per‑segment data is keyed under a single `segmentsDir` using integer `segId` as the first tuple field.
-  - Segment lifecycle: ACTIVE → PENDING → SEALED with background build of graph + PQ.
+  - Segment lifecycle: ACTIVE → PENDING → SEALED with background build of graph + PQ. Compaction uses COMPACTING (sources) and a WRITING destination that remains hidden from queries until sealed.
   - Strict-cap rotation: when an ACTIVE segment reaches maxSegmentSize, the NEXT insert rotates
     immediately (before writing) so the new vector becomes vecId=0 in the new ACTIVE segment.
   - Async, non‑blocking storage APIs (`CompletableFuture`), respecting FDB 5s and 10MB limits.
@@ -61,7 +61,7 @@ Notes:
   - M2 ACTIVE CRUD and rotation (FdbVectorStore + tests) honoring strict-cap rotation semantics.
   - M3 Segment lifecycle with TaskQueue under `tasks/` (enqueue on rotate; worker processes one build at a time).
   - M4 Background builders writing PQ codebook/codes and L2-based adjacency; segment sealing.
-  - M5 Search: Graph-guided traversal for SEALED segments seeded by PQ with exact re‑rank; BEAM and BEST_FIRST modes implemented; default is BEST_FIRST. Adjacency I/O batched; explored caps and early‑exit honored.
+  - M5 Search: Graph-guided traversal for SEALED segments seeded by PQ with exact re‑rank; BEAM and BEST_FIRST modes implemented; default is BEST_FIRST. Adjacency I/O batched; explored caps and early‑exit honored. WRITING segments are ignored by search; COMPACTING sources are treated as sealed.
   - M6 Caching: Async Caffeine caches for PQ codebooks and adjacency with asyncLoadAll; code paths use `getAll` for batch warms; optional query-time codebook prefetch for SEALED segments.
   - M8 Observability: OpenTelemetry gauges registered for cache size and stats; configurable metric attributes; tests use InMemoryMetricReader.
   - M9 Hardening: consolidated tests, added edge-case coverage; JaCoCo gates (≥90% lines / ≥75% branches) passing.

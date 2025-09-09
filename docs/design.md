@@ -7,7 +7,8 @@ This document describes a Java-based vector indexing system that integrates Disk
 Implementation snapshot (2025-09-07)
 
 - Rotation semantics are strict-cap: when an ACTIVE segment reaches `maxSegmentSize`, the next insert rotates and is assigned `vecId=0` in the new ACTIVE segment within the same transaction. We also advance a `maxSegmentKey` sentinel to ensure queries discover all segments.
-- Search defaults use BEST_FIRST traversal with elevated `ef` and a conservative `maxExplore`. BEAM traversal is supported but deprecated; using it emits a one-time WARN.
+- Compaction lifecycle: source segments are marked COMPACTING; a destination segment is created in WRITING state (hidden from queries) and populated, then sealed to SEALED before a registry swap.
+- Search defaults use BEST_FIRST traversal with elevated `ef` and a conservative `maxExplore`. BEAM traversal is supported but deprecated; using it emits a one-time WARN. Query semantics by state: SEALED and COMPACTING are searched via PQ/graph; ACTIVE and PENDING use brute-force; WRITING is not searched.
 - Query prefetch (optional) fires an async warmup for PQ codebooks across SEALED segments to reduce cold-start latency.
 - SegmentCaches use Caffeine AsyncLoadingCache for both PQ codebooks and adjacency, with `asyncLoadAll` and internal chunking to bound transaction size; query paths call `getAll` to leverage bulk loads.
 - Observability exposes OpenTelemetry gauges for cache sizes and stats; metric attributes can be added via configuration.

@@ -211,34 +211,109 @@ public final class MaintenanceService {
   public CompletableFuture<Void> compactSegments(List<Integer> segIds) {
     LOG.info("Compaction invoked for segIds={}", segIds);
     Database db = config.getDatabase();
-    return db.runAsync(tr -> {
-      for (int sid : segIds) {
-        // Only operate on COMPACTING or SEALED segments
-        byte[] metaK = indexDirs.segmentKeys(sid).metaKey();
-        byte[] metaB = tr.get(metaK).join();
-        if (metaB == null) continue;
-        try {
-          var sm = SegmentMeta.parseFrom(metaB);
-          if (sm.getState() != SegmentMeta.State.COMPACTING && sm.getState() != SegmentMeta.State.SEALED) {
-            continue;
-          }
-        } catch (InvalidProtocolBufferException e) {
-          throw new RuntimeException(e);
-        }
-        // Clear segment data ranges
-        Subspace vprefix = new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "vectors")));
-        tr.clear(vprefix.range().begin, vprefix.range().end);
-        Subspace cprefix = new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "pq", "codes")));
-        tr.clear(cprefix.range().begin, cprefix.range().end);
-        Subspace gprefix = new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "graph")));
-        tr.clear(gprefix.range().begin, gprefix.range().end);
-        // Clear singleton keys
-        tr.clear(indexDirs.segmentKeys(sid).pqCodebookKey());
-        tr.clear(metaK);
-        // Remove from registry
-        tr.clear(indexDirs.segmentsIndexKey(sid));
-      }
-      return completedFuture(null);
+    // No-op if index not initialized
+    return db.readAsync(tr -> tr.get(indexDirs.maxSegmentKey())).thenCompose(maxB -> {
+      if (maxB == null) return completedFuture(null);
+      // 1) Reserve a new segment id and initialize meta as WRITING (invisible to queries)
+      CompletableFuture<Integer> reserve = db.runAsync(tr -> {
+        int nextSeg = Math.toIntExact(com.apple.foundationdb.tuple.ByteArrayUtil.decodeInt(
+                tr.get(indexDirs.maxSegmentKey()).join()))
+            + 1;
+        tr.set(indexDirs.maxSegmentKey(), com.apple.foundationdb.tuple.ByteArrayUtil.encodeInt(nextSeg));
+        SegmentMeta meta = SegmentMeta.newBuilder()
+            .setSegmentId(nextSeg)
+            .setState(SegmentMeta.State.WRITING)
+            .setCount(0)
+            .setCreatedAtMs(config.getInstantSource().instant().toEpochMilli())
+            .build();
+        tr.set(indexDirs.segmentKeys(nextSeg).metaKey(), meta.toByteArray());
+        return completedFuture(nextSeg);
+      });
+
+      return reserve.thenCompose(newSegId -> {
+        // 2) Read all vectors from source segments
+        return db.readAsync(tr -> {
+              java.util.List<KeyValue> all = new java.util.ArrayList<>();
+              for (int sid : segIds) {
+                Subspace vprefix =
+                    new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "vectors")));
+                all.addAll(tr.getRange(vprefix.range()).asList().join());
+              }
+              return completedFuture(all);
+            })
+            .thenCompose(kvs -> {
+              // 3) Write combined vectors into new segment in batches
+              final int batchSize = 1000;
+              java.util.List<float[]> vectors = new java.util.ArrayList<>(kvs.size());
+              java.util.List<byte[]> payloads = new java.util.ArrayList<>(kvs.size());
+              for (KeyValue kv : kvs) {
+                try {
+                  VectorRecord rec = VectorRecord.parseFrom(kv.getValue());
+                  if (rec.getDeleted()) continue;
+                  vectors.add(io.github.panghy.vectorsearch.util.FloatPacker.bytesToFloats(
+                      rec.getEmbedding().toByteArray()));
+                  payloads.add(rec.getPayload().toByteArray());
+                } catch (InvalidProtocolBufferException e) {
+                  throw new RuntimeException(e);
+                }
+              }
+              java.util.concurrent.CompletableFuture<Void> w = completedFuture(null);
+              for (int i = 0; i < vectors.size(); i += batchSize) {
+                final int start = i;
+                final int end = Math.min(vectors.size(), i + batchSize);
+                w = w.thenCompose(vv -> db.runAsync(tr -> {
+                  for (int j = start; j < end; j++) {
+                    int vecId = j;
+                    VectorRecord rec = VectorRecord.newBuilder()
+                        .setSegId(newSegId)
+                        .setVecId(vecId)
+                        .setEmbedding(com.google.protobuf.ByteString.copyFrom(
+                            io.github.panghy.vectorsearch.util.FloatPacker.floatsToBytes(
+                                vectors.get(j))))
+                        .setDeleted(false)
+                        .setPayload(com.google.protobuf.ByteString.copyFrom(payloads.get(j)))
+                        .build();
+                    tr.set(indexDirs.segmentKeys(newSegId).vectorKey(vecId), rec.toByteArray());
+                  }
+                  // Update meta with running count while WRITING; remains invisible to queries
+                  SegmentMeta meta = SegmentMeta.newBuilder()
+                      .setSegmentId(newSegId)
+                      .setState(SegmentMeta.State.WRITING)
+                      .setCount(end)
+                      .setCreatedAtMs(config.getInstantSource()
+                          .instant()
+                          .toEpochMilli())
+                      .build();
+                  tr.set(indexDirs.segmentKeys(newSegId).metaKey(), meta.toByteArray());
+                  return completedFuture(null);
+                }));
+              }
+              return w.thenApply(vv -> newSegId);
+            })
+            .thenCompose(segId -> new SegmentBuildService(config, indexDirs)
+                .build(segId)
+                .thenApply(v -> segId))
+            .thenCompose(segId -> db.runAsync(tr -> {
+              // 4) Registry swap and old segments cleanup atomically
+              tr.set(indexDirs.segmentsIndexKey(segId), new byte[0]);
+              for (int sid : segIds) {
+                // Clear ranges and keys
+                Subspace vprefix =
+                    new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "vectors")));
+                tr.clear(vprefix.range().begin, vprefix.range().end);
+                Subspace cprefix =
+                    new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "pq", "codes")));
+                tr.clear(cprefix.range().begin, cprefix.range().end);
+                Subspace gprefix =
+                    new Subspace(indexDirs.segmentsDir().pack(Tuple.from(sid, "graph")));
+                tr.clear(gprefix.range().begin, gprefix.range().end);
+                tr.clear(indexDirs.segmentKeys(sid).pqCodebookKey());
+                tr.clear(indexDirs.segmentKeys(sid).metaKey());
+                tr.clear(indexDirs.segmentsIndexKey(sid));
+              }
+              return completedFuture(null);
+            }));
+      });
     });
   }
 
