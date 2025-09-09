@@ -31,21 +31,7 @@ import java.util.concurrent.CompletableFuture;
  */
 public interface VectorIndex extends AutoCloseable {
   /**
-   * Creates or opens an index under the provided DirectoryLayer root.
-   *
-   * <p>Behavior and invariants:
-   * <ul>
-   *   <li>Creates index metadata and the initial ACTIVE segment if missing; otherwise validates the
-   *       existing metadata matches the provided {@link VectorIndexConfig} (dimension, metric,
-   *       PQ/graph parameters, oversample, maxSegmentSize).</li>
-   *   <li>Initializes internal queues and a compact segment registry (segmentsIndex) used for
-   *       scalable listing; no legacy per-meta scan is used.</li>
-   *   <li>May auto-start local workers based on config:
-   *       {@code localWorkerThreads} for segment build, and
-   *       {@code localMaintenanceWorkerThreads} for maintenance.</li>
-   * </ul>
-   *
-   * <p>Call {@link #close()} to stop any auto-started workers and release resources.
+   * Call {@link #close()} to stop any auto-started workers and release resources.
    */
   /**
    * Opens an existing index or creates a new one using the provided configuration.
@@ -59,19 +45,6 @@ public interface VectorIndex extends AutoCloseable {
   }
 
   /**
-   * Inserts one vector into the current ACTIVE segment.
-   *
-   * <p>Semantics:
-   * <ul>
-   *   <li>Returns the assigned {@code [segmentId, vectorId]}.</li>
-   *   <li>If the ACTIVE segment reaches capacity, the implementation atomically rotates:
-   *       current → PENDING (sealed later by a builder) and opens the next ACTIVE; a build task is
-   *       enqueued for the PENDING segment.</li>
-   *   <li>{@code embedding.length} must equal {@link VectorIndexConfig#getDimension()}.</li>
-   *   <li>{@code payload} is optional and stored verbatim with the vector.</li>
-   * </ul>
-   */
-  /**
    * Inserts a single vector into the current ACTIVE segment.
    *
    * @param embedding vector values; length must equal {@link VectorIndexConfig#getDimension()}.
@@ -82,15 +55,6 @@ public interface VectorIndex extends AutoCloseable {
    */
   CompletableFuture<int[]> add(float[] embedding, byte[] payload);
 
-  /**
-   * Inserts one vector using the provided FoundationDB {@link Transaction}.
-   *
-   * <p>Nuance: this overload attempts to perform the entire write in the caller-supplied transaction
-   * without internal chunking. If the write set would exceed FoundationDB limits (≈10MB or 5s),
-   * the caller is expected to control batch sizes or split work across transactions. If rotation is
-   * necessary, the implementation performs the ACTIVE→PENDING transition and opens the next ACTIVE
-   * within the same transaction before continuing writes.
-   */
   /**
    * Inserts one vector using a caller-supplied FoundationDB {@link Transaction}.
    *
@@ -135,14 +99,6 @@ public interface VectorIndex extends AutoCloseable {
   CompletableFuture<List<int[]>> addAll(float[][] embeddings, byte[][] payloads);
 
   /**
-   * Inserts many vectors using a single caller-managed FDB {@link Transaction}.
-   *
-   * <p>Unlike the default overload which may span multiple transactions to respect size/time
-   * limits, this method writes all vectors in the provided transaction and may rotate segments
-   * (mark PENDING and open next ACTIVE) inline as capacity is reached. Callers should dial back the
-   * batch size to remain within FDB limits.
-   */
-  /**
    * Inserts multiple vectors using a single caller-managed {@link Transaction}.
    *
    * <p>Unlike {@link #addAll(float[][], byte[][])} which may span multiple transactions to respect
@@ -184,14 +140,6 @@ public interface VectorIndex extends AutoCloseable {
   CompletableFuture<List<SearchResult>> query(float[] q, int k, SearchParams params);
 
   /**
-   * Marks a single vector as deleted (tombstone) and updates per-segment counters.
-   *
-   * <p>If the segment's deleted ratio meets {@link VectorIndexConfig#getVacuumMinDeletedRatio()}, a
-   * threshold-aware maintenance task may be enqueued (subject to
-   * {@link VectorIndexConfig#getVacuumCooldown()}). Vacuum physically removes vector, PQ code, and
-   * adjacency entries and decrements {@code deleted_count}.</p>
-   */
-  /**
    * Marks one vector as deleted (tombstone) and updates per-segment counters.
    *
    * @param segId segment identifier
@@ -200,13 +148,6 @@ public interface VectorIndex extends AutoCloseable {
    */
   CompletableFuture<Void> delete(int segId, int vecId);
 
-  /**
-   * Marks one vector deleted within the provided caller-managed {@link Transaction}.
-   *
-   * <p>Behavior matches {@link #delete(int, int)} but performs all reads/writes in the supplied
-   * transaction (no internal chunking). Threshold-aware maintenance enqueue (vacuum) will also use
-   * the same transaction if configured.
-   */
   /**
    * Single-transaction delete using a caller-provided {@link Transaction}.
    *
@@ -220,21 +161,11 @@ public interface VectorIndex extends AutoCloseable {
   /**
    * Batch delete convenience for many {@code [segmentId, vectorId]} pairs.
    *
-   * <p>Enqueues at most one vacuum task per affected segment when the deleted ratio threshold is
-   * satisfied, observing cooldown semantics.
-   */
-  /**
-   * Batch delete convenience for many {@code [segmentId, vectorId]} pairs.
-   *
    * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
    * @return a future that completes when all mutations are persisted
    */
   CompletableFuture<Void> deleteAll(int[][] ids);
 
-  /**
-   * Batch delete using a single caller-managed {@link Transaction}. See {@link #delete(Transaction,
-   * int, int)} for details and caveats.
-   */
   /**
    * Batch delete within a single caller-provided {@link Transaction}.
    *
@@ -245,14 +176,6 @@ public interface VectorIndex extends AutoCloseable {
   CompletableFuture<Void> deleteAll(Transaction tx, int[][] ids);
 
   /**
-   * Waits until background indexing is drained.
-   *
-   * <p>Implementation typically polls the build queue using
-   * {@code hasVisibleUnclaimedTasks OR hasClaimedTasks} with a short delay and completes when both
-   * are false. This method is intended for tests and maintenance flows; production queries should
-   * not rely on it.</p>
-   */
-  /**
    * Waits until the build queue is empty (no visible or claimed tasks remain).
    *
    * <p>Intended primarily for tests and maintenance flows; production traffic should not block on
@@ -262,13 +185,11 @@ public interface VectorIndex extends AutoCloseable {
    */
   CompletableFuture<Void> awaitIndexingComplete();
 
-  /** Approximate number of decoded PQ codebooks currently resident in cache. */
   /**
    * @return approximate number of decoded PQ codebooks resident in the cache
    */
   long getCodebookCacheSize();
 
-  /** Approximate number of adjacency lists currently resident in cache. */
   /**
    * @return approximate number of adjacency lists resident in the cache
    */
