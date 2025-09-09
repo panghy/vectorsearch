@@ -290,6 +290,46 @@ class VectorIndexTest {
   }
 
   @Test
+  void deleteAll_single_transaction_enqueues_vacuum() throws Exception {
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
+        .dimension(4)
+        .pqM(2)
+        .pqK(2)
+        .graphDegree(2)
+        .maxSegmentSize(10)
+        .localWorkerThreads(0)
+        .vacuumMinDeletedRatio(0.0)
+        .build();
+    VectorIndex index = VectorIndex.createOrOpen(cfg).get(5, TimeUnit.SECONDS);
+    try {
+      // Insert some then seal seg0
+      for (int i = 0; i < 3; i++)
+        index.add(new float[] {i, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
+      var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+      new SegmentBuildService(cfg, dirs).build(0).get(5, TimeUnit.SECONDS);
+      int[][] ids = new int[][] {{0, 0}, {0, 1}};
+      // Single-transaction deleteAll
+      db.runAsync(tr -> index.deleteAll(tr, ids)).get(5, TimeUnit.SECONDS);
+
+      // Maintenance queue should have a vacuum task for seg 0
+      var maintDir = dirs.tasksDir().createOrOpen(db, List.of("maint")).get(5, TimeUnit.SECONDS);
+      var tqc = TaskQueueConfig.builder(
+              db,
+              maintDir,
+              new ProtoSerializers.StringSerializer(),
+              new ProtoSerializers.MaintenanceTaskSerializer())
+          .build();
+      var mq = TaskQueues.createTaskQueue(tqc).get(5, TimeUnit.SECONDS);
+      var claim = mq.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+      assertThat(claim).isNotNull();
+      assertThat(claim.task().hasVacuum()).isTrue();
+      assertThat(claim.task().getVacuum().getSegId()).isEqualTo(0);
+    } finally {
+      index.close();
+    }
+  }
+
+  @Test
   void deterministic_pivot_seeding_and_auto_tune() throws Exception {
     VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
         .dimension(4)

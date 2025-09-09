@@ -130,6 +130,44 @@ class FdbVectorStoreIntegrationTest {
   }
 
   @Test
+  void single_transaction_addAll_rotates_and_enqueues_build_tasks() throws Exception {
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, appRoot)
+        .dimension(4)
+        .maxSegmentSize(2)
+        .build();
+    var dirs = FdbDirectories.openIndex(appRoot, db).get(5, TimeUnit.SECONDS);
+    var tqc = TaskQueueConfig.builder(
+            db,
+            dirs.tasksDir(),
+            new ProtoSerializers.StringSerializer(),
+            new ProtoSerializers.BuildTaskSerializer())
+        .build();
+    var queue = TaskQueues.createTaskQueue(tqc).get(5, TimeUnit.SECONDS);
+    FdbVectorStore store = new FdbVectorStore(cfg, dirs, queue);
+    store.createOrOpenIndex().get(5, TimeUnit.SECONDS);
+
+    float[][] data = new float[5][4];
+    for (int i = 0; i < 5; i++) data[i] = new float[] {i, 0, 0, 0};
+    db.runAsync(tr -> store.addBatch(tr, data, null).thenApply(ids -> null)).get(5, TimeUnit.SECONDS);
+
+    SegmentMeta s0 = store.getSegmentMeta(0).get(5, TimeUnit.SECONDS);
+    SegmentMeta s1 = store.getSegmentMeta(1).get(5, TimeUnit.SECONDS);
+    SegmentMeta s2 = store.getSegmentMeta(2).get(5, TimeUnit.SECONDS);
+    assertThat(s0.getState()).isEqualTo(SegmentMeta.State.PENDING);
+    assertThat(s0.getCount()).isEqualTo(2);
+    assertThat(s1.getState()).isEqualTo(SegmentMeta.State.PENDING);
+    assertThat(s1.getCount()).isEqualTo(2);
+    assertThat(s2.getState()).isEqualTo(SegmentMeta.State.ACTIVE);
+    assertThat(s2.getCount()).isEqualTo(1);
+
+    // Two build tasks should be present (seg 0 and 1)
+    var c1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(c1).isNotNull();
+    var c2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(c2).isNotNull();
+  }
+
+  @Test
   void rotation_enqueues_build_task() throws Exception {
     VectorIndexConfig cfg = VectorIndexConfig.builder(db, appRoot)
         .dimension(4)

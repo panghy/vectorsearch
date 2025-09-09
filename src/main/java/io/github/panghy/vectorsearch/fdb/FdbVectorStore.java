@@ -181,6 +181,11 @@ public final class FdbVectorStore {
     return addBatch(new float[][] {embedding}, new byte[][] {payload}).thenApply(ids -> ids.get(0));
   }
 
+  /** Single-transaction variant: writes a single vector in the provided transaction. */
+  public CompletableFuture<int[]> add(Transaction tr, float[] embedding, byte[] payload) {
+    return addBatch(tr, new float[][] {embedding}, new byte[][] {payload}).thenApply(ids -> ids.get(0));
+  }
+
   /**
    * Adds many vectors efficiently by batching writes per transaction and reducing contention
    * on the current segment pointer and segment meta keys.
@@ -196,144 +201,199 @@ public final class FdbVectorStore {
   public CompletableFuture<List<int[]>> addBatch(float[][] embeddings, byte[][] payloads) {
     Database db = config.getDatabase();
     List<int[]> assigned = new ArrayList<>(embeddings.length);
-    List<int[]> batch = new ArrayList<>();
     AtomicInteger pos = new AtomicInteger(0);
 
     return tag(
         whileTrue(() -> {
           if (pos.get() >= embeddings.length) return completedFuture(false);
-          return db.runAsync(tr -> {
-                batch.clear();
-                byte[] curSegK = indexDirs.currentSegmentKey();
-                return tr.get(curSegK).thenCompose(curSegV -> {
-                  int segId = Math.toIntExact(decodeInt(curSegV));
-                  FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segId);
-                  return tr.get(sk.metaKey()).thenCompose(segMetaBytes -> {
-                    SegmentMeta sm;
-                    try {
-                      sm = SegmentMeta.parseFrom(segMetaBytes);
-                    } catch (InvalidProtocolBufferException e) {
-                      throw new RuntimeException(e);
-                    }
-                    if (sm.getState() != SegmentMeta.State.ACTIVE) {
-                      throw new IllegalStateException(
-                          "Current segment not ACTIVE: " + sm.getState());
-                    }
-
-                    int remaining = embeddings.length - pos.get();
-                    int count = sm.getCount();
-                    int capacity = config.getMaxSegmentSize() - count;
-
-                    if (capacity <= 0 && remaining > 0) {
-                      // capacity exhausted; rotate below after writing zero in this txn
-                      // by returning immediately with rotate path
-                      SegmentMeta pending = sm.toBuilder()
-                          .setState(SegmentMeta.State.PENDING)
-                          .setCount(sm.getCount())
-                          .build();
-                      tr.set(sk.metaKey(), pending.toByteArray());
-                      int nextSeg = segId + 1;
-                      tr.set(curSegK, encodeInt(nextSeg));
-                      tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
-                      SegmentMeta nextMeta = SegmentMeta.newBuilder()
-                          .setSegmentId(nextSeg)
-                          .setState(SegmentMeta.State.ACTIVE)
-                          .setCount(0)
-                          .setCreatedAtMs(
-                              Instant.now().toEpochMilli())
-                          .build();
-                      tr.set(
-                          indexDirs
-                              .segmentKeys(nextSeg)
-                              .metaKey(),
-                          nextMeta.toByteArray());
-                      tr.set(indexDirs.segmentsIndexKey(nextSeg), new byte[0]);
-                      LOGGER.debug(
-                          "Rotated segment: {} -> {} (sealed PENDING seg {}), enqueuing"
-                              + " build task",
-                          segId,
-                          nextSeg,
-                          segId);
-                      return enqueueBuildTask(tr, segId).thenApply($ -> true);
-                    } else {
-                      int toWrite = Math.min(remaining, Math.max(capacity, 0));
-                      // Use approximate transaction size to limit writes in this txn.
-                      long softLimit = (long) (config.getBuildTxnLimitBytes()
-                          * config.getBuildTxnSoftLimitRatio());
-                      int checkEvery = config.getBuildSizeCheckEvery();
-                      List<int[]> local = new ArrayList<>();
-                      return writeSomeVectors(
-                              tr,
-                              sk,
-                              segId,
-                              count,
-                              pos.get(),
-                              toWrite,
-                              embeddings,
-                              payloads,
-                              checkEvery,
-                              softLimit,
-                              local)
-                          .thenCompose(wroteN -> {
-                            // Update meta with actual written count.
-                            SegmentMeta updated = sm.toBuilder()
-                                .setCount(count + wroteN)
-                                .build();
-                            tr.set(sk.metaKey(), updated.toByteArray());
-                            boolean willRotate =
-                                updated.getCount() >= config.getMaxSegmentSize();
-                            LOGGER.debug(
-                                "Writing {} vectors to segment {} (rotate: {})",
-                                wroteN,
-                                segId,
-                                willRotate);
-                            batch.addAll(local);
-                            if (willRotate) {
-                              // Seal current and open next
-                              SegmentMeta pending = sm.toBuilder()
-                                  .setState(SegmentMeta.State.PENDING)
-                                  .setCount(Math.max(sm.getCount(), count + wroteN))
-                                  .build();
-                              tr.set(sk.metaKey(), pending.toByteArray());
-                              int nextSeg = segId + 1;
-                              tr.set(curSegK, encodeInt(nextSeg));
-                              tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
-                              SegmentMeta nextMeta = SegmentMeta.newBuilder()
-                                  .setSegmentId(nextSeg)
-                                  .setState(SegmentMeta.State.ACTIVE)
-                                  .setCount(0)
-                                  .setCreatedAtMs(Instant.now()
-                                      .toEpochMilli())
-                                  .build();
-                              tr.set(
-                                  indexDirs
-                                      .segmentKeys(nextSeg)
-                                      .metaKey(),
-                                  nextMeta.toByteArray());
-                              tr.set(indexDirs.segmentsIndexKey(nextSeg), new byte[0]);
-                              LOGGER.debug(
-                                  "Rotated segment: {} -> {} (sealed PENDING seg"
-                                      + " {}), enqueuing build task",
-                                  segId,
-                                  nextSeg,
-                                  segId);
-                              return enqueueBuildTask(tr, segId)
-                                  .thenApply($ -> true);
-                            }
-                            return completedFuture(true);
-                          });
-                    }
-                  });
-                });
-              })
-              .whenComplete((v, ex) -> {
-                if (ex == null) {
-                  assigned.addAll(batch);
-                  pos.addAndGet(batch.size());
-                }
-              });
+          return writeOnce(db, embeddings, payloads, pos).thenApply(batch -> {
+            assigned.addAll(batch);
+            pos.addAndGet(batch.size());
+            return true;
+          });
         }),
         assigned);
+  }
+
+  private CompletableFuture<List<int[]>> writeOnce(
+      Database db, float[][] embeddings, byte[][] payloads, AtomicInteger pos) {
+    return db.runAsync(tr -> {
+      List<int[]> batch = new ArrayList<>();
+      byte[] curSegK = indexDirs.currentSegmentKey();
+      return tr.get(curSegK).thenCompose(curSegV -> {
+        int segId = Math.toIntExact(decodeInt(curSegV));
+        FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segId);
+        return tr.get(sk.metaKey()).thenCompose(segMetaBytes -> {
+          SegmentMeta sm;
+          try {
+            sm = SegmentMeta.parseFrom(segMetaBytes);
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+          if (sm.getState() != SegmentMeta.State.ACTIVE) {
+            throw new IllegalStateException("Current segment not ACTIVE: " + sm.getState());
+          }
+
+          int remaining = embeddings.length - pos.get();
+          int count = sm.getCount();
+          int capacity = config.getMaxSegmentSize() - count;
+
+          if (capacity <= 0 && remaining > 0) {
+            // Rotate without writing in this txn
+            rotateToNextActive(tr, sk, curSegK, sm, segId, count);
+            LOGGER.debug(
+                "Rotated segment: {} -> {} (sealed PENDING seg {}), enqueuing build task",
+                segId,
+                segId + 1,
+                segId);
+            return enqueueBuildTask(tr, segId).thenApply($ -> batch);
+          }
+
+          int toWrite = Math.min(remaining, Math.max(0, capacity));
+          long softLimit = (long) (config.getBuildTxnLimitBytes() * config.getBuildTxnSoftLimitRatio());
+          int checkEvery = config.getBuildSizeCheckEvery();
+          return writeSomeVectors(
+                  tr,
+                  sk,
+                  segId,
+                  count,
+                  pos.get(),
+                  toWrite,
+                  embeddings,
+                  payloads,
+                  checkEvery,
+                  softLimit,
+                  batch)
+              .thenCompose(
+                  wroteN -> updateAfterWriteAndMaybeRotate(tr, sk, curSegK, sm, segId, count, wroteN)
+                      .thenApply($ -> batch));
+        });
+      });
+    });
+  }
+
+  private CompletableFuture<Void> updateAfterWriteAndMaybeRotate(
+      Transaction tr,
+      FdbDirectories.SegmentKeys sk,
+      byte[] curSegK,
+      SegmentMeta sm,
+      int segId,
+      int startCount,
+      int wroteN) {
+    // Update meta with actual written count.
+    SegmentMeta updated = sm.toBuilder().setCount(startCount + wroteN).build();
+    tr.set(sk.metaKey(), updated.toByteArray());
+    boolean willRotate = updated.getCount() >= config.getMaxSegmentSize();
+    LOGGER.debug("Writing {} vectors to segment {} (rotate: {})", wroteN, segId, willRotate);
+    if (!willRotate) return completedFuture(null);
+    rotateToNextActive(tr, sk, curSegK, sm, segId, Math.max(sm.getCount(), startCount + wroteN));
+    return enqueueBuildTask(tr, segId).thenApply($ -> null);
+  }
+
+  private void rotateToNextActive(
+      Transaction tr,
+      FdbDirectories.SegmentKeys sk,
+      byte[] curSegK,
+      SegmentMeta sm,
+      int segId,
+      int pendingCount) {
+    SegmentMeta pending = sm.toBuilder()
+        .setState(SegmentMeta.State.PENDING)
+        .setCount(pendingCount)
+        .build();
+    tr.set(sk.metaKey(), pending.toByteArray());
+    int nextSeg = segId + 1;
+    tr.set(curSegK, encodeInt(nextSeg));
+    tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
+    SegmentMeta nextMeta = SegmentMeta.newBuilder()
+        .setSegmentId(nextSeg)
+        .setState(SegmentMeta.State.ACTIVE)
+        .setCount(0)
+        .setCreatedAtMs(Instant.now().toEpochMilli())
+        .build();
+    tr.set(indexDirs.segmentKeys(nextSeg).metaKey(), nextMeta.toByteArray());
+    tr.set(indexDirs.segmentsIndexKey(nextSeg), new byte[0]);
+  }
+
+  /**
+   * Single-transaction variant: writes all vectors in the provided transaction, rotating within
+   * the same transaction as capacity is reached. No internal chunking by approximate size/time is
+   * performed; callers are responsible for staying within FDB limits.
+   */
+  public CompletableFuture<List<int[]>> addBatch(Transaction tr, float[][] embeddings, byte[][] payloads) {
+    List<int[]> assigned = new ArrayList<>(embeddings.length);
+    byte[] curSegK = indexDirs.currentSegmentKey();
+    return tr.get(curSegK).thenCompose(curSegV -> {
+      int segId = Math.toIntExact(decodeInt(curSegV));
+      return addAllInTxn(tr, segId, 0, embeddings, payloads, assigned).thenApply(v -> assigned);
+    });
+  }
+
+  private CompletableFuture<Void> addAllInTxn(
+      Transaction tr, int segId, int startIdx, float[][] embeddings, byte[][] payloads, List<int[]> outIds) {
+    if (startIdx >= embeddings.length) return completedFuture(null);
+    FdbDirectories.SegmentKeys sk = indexDirs.segmentKeys(segId);
+    return tr.get(sk.metaKey()).thenCompose(metaBytes -> {
+      SegmentMeta sm;
+      try {
+        sm = SegmentMeta.parseFrom(metaBytes);
+      } catch (InvalidProtocolBufferException e) {
+        throw new RuntimeException(e);
+      }
+      if (sm.getState() != SegmentMeta.State.ACTIVE) {
+        throw new IllegalStateException("Current segment not ACTIVE: " + sm.getState());
+      }
+      int max = config.getMaxSegmentSize();
+      int count = sm.getCount();
+      int remaining = embeddings.length - startIdx;
+      int capacity = Math.max(0, max - count);
+      int toWrite = Math.min(capacity, remaining);
+      // Write up to capacity
+      for (int i = 0; i < toWrite; i++) {
+        int vecId = count + i;
+        int idx = startIdx + i;
+        float[] e = embeddings[idx];
+        byte[] p = (payloads != null && idx < payloads.length) ? payloads[idx] : null;
+        VectorRecord rec = VectorRecord.newBuilder()
+            .setSegId(segId)
+            .setVecId(vecId)
+            .setEmbedding(ByteString.copyFrom(FloatPacker.floatsToBytes(e)))
+            .setDeleted(false)
+            .setPayload(p == null ? ByteString.EMPTY : ByteString.copyFrom(p))
+            .build();
+        tr.set(sk.vectorKey(vecId), rec.toByteArray());
+        outIds.add(new int[] {segId, vecId});
+      }
+      SegmentMeta updated = sm.toBuilder().setCount(count + toWrite).build();
+      tr.set(sk.metaKey(), updated.toByteArray());
+      boolean willRotate = updated.getCount() >= max;
+      if (!willRotate && (startIdx + toWrite) >= embeddings.length) {
+        return completedFuture(null);
+      }
+      if (!willRotate) {
+        // Continue writing remaining into same segment
+        return addAllInTxn(tr, segId, startIdx + toWrite, embeddings, payloads, outIds);
+      }
+      // Rotate within same transaction
+      SegmentMeta pending = sm.toBuilder()
+          .setState(SegmentMeta.State.PENDING)
+          .setCount(Math.max(sm.getCount(), count + toWrite))
+          .build();
+      tr.set(sk.metaKey(), pending.toByteArray());
+      int nextSeg = segId + 1;
+      tr.set(indexDirs.currentSegmentKey(), encodeInt(nextSeg));
+      tr.set(indexDirs.maxSegmentKey(), encodeInt(nextSeg));
+      SegmentMeta nextMeta = SegmentMeta.newBuilder()
+          .setSegmentId(nextSeg)
+          .setState(SegmentMeta.State.ACTIVE)
+          .setCount(0)
+          .setCreatedAtMs(Instant.now().toEpochMilli())
+          .build();
+      tr.set(indexDirs.segmentKeys(nextSeg).metaKey(), nextMeta.toByteArray());
+      tr.set(indexDirs.segmentsIndexKey(nextSeg), new byte[0]);
+      return enqueueBuildTask(tr, segId)
+          .thenCompose($ -> addAllInTxn(tr, nextSeg, startIdx + toWrite, embeddings, payloads, outIds));
+    });
   }
 
   /**
@@ -341,6 +401,11 @@ public final class FdbVectorStore {
    */
   public CompletableFuture<Void> delete(int segId, int vecId) {
     return deleteBatch(new int[][] {{segId, vecId}});
+  }
+
+  /** Single-transaction variant. */
+  public CompletableFuture<Void> delete(Transaction tr, int segId, int vecId) {
+    return deleteBatch(tr, new int[][] {{segId, vecId}});
   }
 
   /**
@@ -400,6 +465,64 @@ public final class FdbVectorStore {
       }));
     }
     return allOf(writes.toArray(CompletableFuture[]::new));
+  }
+
+  /** Batch delete in a single caller-supplied transaction. */
+  public CompletableFuture<Void> deleteBatch(Transaction tr, int[][] ids) {
+    if (ids == null || ids.length == 0) return completedFuture(null);
+    // Group by segment to update SegmentMeta efficiently
+    Map<Integer, List<Integer>> bySeg = new HashMap<>();
+    for (int[] id : ids)
+      bySeg.computeIfAbsent(id[0], k -> new ArrayList<>()).add(id[1]);
+    CompletableFuture<Void> chain = completedFuture(null);
+    for (var e : bySeg.entrySet()) {
+      int segId = e.getKey();
+      List<Integer> vecIds = e.getValue();
+      chain = chain.thenCompose(
+          v -> tr.get(indexDirs.segmentKeys(segId).metaKey()).thenCompose(metaBytes -> {
+            try {
+              SegmentMeta sm = SegmentMeta.parseFrom(metaBytes);
+              List<CompletableFuture<byte[]>> reads = new ArrayList<>();
+              for (int vId : vecIds)
+                reads.add(tr.get(indexDirs.segmentKeys(segId).vectorKey(vId)));
+              return allOf(reads.toArray(CompletableFuture[]::new))
+                  .thenApply($ -> {
+                    int dec = 0;
+                    int incDel = 0;
+                    for (int i = 0; i < vecIds.size(); i++) {
+                      byte[] bytes = reads.get(i).join();
+                      if (bytes == null) continue;
+                      try {
+                        VectorRecord rec = VectorRecord.parseFrom(bytes);
+                        if (!rec.getDeleted()) {
+                          VectorRecord updated = rec.toBuilder()
+                              .setDeleted(true)
+                              .build();
+                          tr.set(
+                              indexDirs
+                                  .segmentKeys(segId)
+                                  .vectorKey(vecIds.get(i)),
+                              updated.toByteArray());
+                          dec++;
+                          incDel++;
+                        }
+                      } catch (InvalidProtocolBufferException ex) {
+                        throw new RuntimeException(ex);
+                      }
+                    }
+                    SegmentMeta updated = sm.toBuilder()
+                        .setCount(Math.max(0, sm.getCount() - dec))
+                        .setDeletedCount(Math.max(0, sm.getDeletedCount() + incDel))
+                        .build();
+                    tr.set(indexDirs.segmentKeys(segId).metaKey(), updated.toByteArray());
+                    return null;
+                  });
+            } catch (InvalidProtocolBufferException ex) {
+              throw new RuntimeException(ex);
+            }
+          }));
+    }
+    return chain;
   }
 
   private CompletableFuture<Integer> writeSomeVectors(
