@@ -54,24 +54,12 @@ public final class FdbVectorStore {
   }
 
   /**
-   * Opens or creates the index directories under the configured app root.
-   *
-   * @return future with the opened {@link FdbDirectories.IndexDirectories}
-   */
-  /**
    * @return the index directories helper for this store (already opened)
    */
   public CompletableFuture<FdbDirectories.IndexDirectories> openIndexDirs() {
     return completedFuture(indexDirs);
   }
 
-  /**
-   * Creates directories and initializes index meta and the first ACTIVE segment if missing.
-   * If the index exists, validates persisted {@link IndexMeta}
-   * against the provided {@link VectorIndexConfig} and throws on mismatches.
-   *
-   * @return future that completes when the index is ready
-   */
   /**
    * Creates directories and initializes index metadata and the first ACTIVE segment if missing.
    * Validates persisted {@link IndexMeta} matches {@link VectorIndexConfig} on reopen.
@@ -168,9 +156,6 @@ public final class FdbVectorStore {
   }
 
   /**
-   * Returns the current ACTIVE segment id.
-   */
-  /**
    * @return future with the current ACTIVE segment id
    */
   public CompletableFuture<Integer> getCurrentSegment() {
@@ -180,15 +165,6 @@ public final class FdbVectorStore {
         .thenApply(Math::toIntExact));
   }
 
-  /**
-   * Adds one vector to the ACTIVE segment.
-   * Rotates to a new ACTIVE segment (marking the current as PENDING) when the threshold is exceeded,
-   * and enqueues a background BuildTask for the sealed segment.
-   *
-   * @param embedding vector values (length must equal configured dimension)
-   * @param payload   optional payload bytes
-   * @return future with [segmentId, vectorId]
-   */
   /**
    * Inserts one vector using the store's multi-transaction batching path.
    *
@@ -212,18 +188,6 @@ public final class FdbVectorStore {
     return addBatch(tr, new float[][] {embedding}, new byte[][] {payload}).thenApply(ids -> ids.get(0));
   }
 
-  /**
-   * Adds many vectors efficiently by batching writes per transaction and reducing contention
-   * on the current segment pointer and segment meta keys.
-   *
-   * <p>Writes up to the remaining capacity of the ACTIVE segment in one transaction, rotates if
-   * needed, enqueues a build task for the sealed segment, and continues until all vectors are
-   * written. Respects FoundationDB limits by implicitly chunking work across transactions.</p>
-   *
-   * @param embeddings vectors to add (each of length = dimension)
-   * @param payloads   optional payload bytes per vector (may be null or shorter than embeddings)
-   * @return future with assigned ids per vector in the same order [segId, vecId]
-   */
   /**
    * Inserts many vectors with internal batching and rotation across multiple transactions.
    * Missing payload entries (when {@code payloads == null} or shorter than embeddings) are treated
