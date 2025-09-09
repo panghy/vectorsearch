@@ -200,7 +200,6 @@ public final class FdbVectorStore {
     return addBatch(new float[][] {embedding}, new byte[][] {payload}).thenApply(ids -> ids.get(0));
   }
 
-  /** Single-transaction variant: writes a single vector in the provided transaction. */
   /**
    * Inserts one vector inside a caller-supplied transaction.
    *
@@ -522,7 +521,6 @@ public final class FdbVectorStore {
     return allOf(writes.toArray(CompletableFuture[]::new));
   }
 
-  /** Batch delete in a single caller-supplied transaction. */
   /**
    * Batch delete inside a single caller-supplied transaction.
    *
