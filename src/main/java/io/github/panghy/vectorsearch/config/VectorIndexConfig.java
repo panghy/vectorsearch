@@ -49,6 +49,7 @@ public final class VectorIndexConfig {
   private final Map<String, String> metricAttributes;
   private final boolean prefetchCodebooksEnabled;
   private final boolean prefetchCodebooksSync;
+  private final boolean autoFindCompactionCandidates;
 
   // Build batching/size control
   private final long buildTxnLimitBytes;
@@ -102,6 +103,7 @@ public final class VectorIndexConfig {
     this.metricAttributes = Map.copyOf(b.metricAttributes);
     this.prefetchCodebooksEnabled = b.prefetchCodebooksEnabled;
     this.prefetchCodebooksSync = b.prefetchCodebooksSync;
+    this.autoFindCompactionCandidates = b.autoFindCompactionCandidates;
 
     if (b.buildTxnLimitBytes <= 0) throw new IllegalArgumentException("buildTxnLimitBytes must be positive");
     if (!(b.buildTxnSoftLimitRatio > 0.0 && b.buildTxnSoftLimitRatio < 1.0))
@@ -273,6 +275,14 @@ public final class VectorIndexConfig {
   }
 
   /**
+   * When true, a vacuum that leaves a segment below 50% capacity will enqueue a
+   * FindCompactionCandidates task to explore merging small sealed segments.
+   */
+  public boolean isAutoFindCompactionCandidates() {
+    return autoFindCompactionCandidates;
+  }
+
+  /**
    * Upper bound for FDB transaction size (bytes) used by segment build batching.
    */
   public long getBuildTxnLimitBytes() {
@@ -327,6 +337,7 @@ public final class VectorIndexConfig {
     private final Map<String, String> metricAttributes = new HashMap<>();
     private boolean prefetchCodebooksEnabled = true;
     private boolean prefetchCodebooksSync = false;
+    private boolean autoFindCompactionCandidates = true;
     private long buildTxnLimitBytes = 10L * 1024 * 1024; // 10 MB
     private double buildTxnSoftLimitRatio = 0.9; // leave 10% headroom
     private int buildSizeCheckEvery = 32;
@@ -501,6 +512,12 @@ public final class VectorIndexConfig {
      */
     public Builder prefetchCodebooksSync(boolean sync) {
       this.prefetchCodebooksSync = sync;
+      return this;
+    }
+
+    /** Enables/disables auto-enqueue of find-compaction-candidates after vacuum. */
+    public Builder autoFindCompactionCandidates(boolean enabled) {
+      this.autoFindCompactionCandidates = enabled;
       return this;
     }
 
