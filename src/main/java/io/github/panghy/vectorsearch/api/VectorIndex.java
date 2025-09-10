@@ -53,7 +53,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param payload   optional payload bytes to store verbatim with the vector; may be {@code null}.
    * @return a future with the assigned identifier {@code [segmentId, vectorId]}.
    */
-  CompletableFuture<int[]> add(float[] embedding, byte[] payload);
+  CompletableFuture<SegmentVectorId> add(float[] embedding, byte[] payload);
 
   /**
    * Inserts one vector using a caller-supplied FoundationDB {@link Transaction}.
@@ -70,18 +70,8 @@ public interface VectorIndex extends AutoCloseable {
    * @param payload   optional payload bytes, may be {@code null}
    * @return a future with the assigned identifier {@code [segmentId, vectorId]}.
    */
-  CompletableFuture<int[]> add(Transaction tx, float[] embedding, byte[] payload);
+  CompletableFuture<SegmentVectorId> add(Transaction tx, float[] embedding, byte[] payload);
 
-  /**
-   * Inserts many vectors efficiently.
-   *
-   * <p>Semantics and guarantees:
-   * <ul>
-   *   <li>Preserves input order in the returned IDs list.</li>
-   *   <li>Batches writes per transaction and across rotations to minimize contention.</li>
-   *   <li>Enqueues exactly one build task for each segment that transitions ACTIVE→PENDING.</li>
-   * </ul>
-   */
   /**
    * Inserts multiple vectors efficiently across one or more transactions.
    *
@@ -96,7 +86,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param payloads   optional per-vector payloads; may be {@code null} or shorter than embeddings
    * @return a future with assigned IDs per vector (same order as input)
    */
-  CompletableFuture<List<int[]>> addAll(float[][] embeddings, byte[][] payloads);
+  CompletableFuture<List<SegmentVectorId>> addAll(float[][] embeddings, byte[][] payloads);
 
   /**
    * Inserts multiple vectors using a single caller-managed {@link Transaction}.
@@ -112,7 +102,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param payloads   optional per-vector payloads (see {@link #addAll(float[][], byte[][])} rules)
    * @return a future with assigned IDs per vector (same order as input)
    */
-  CompletableFuture<List<int[]>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads);
+  CompletableFuture<List<SegmentVectorId>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads);
 
   /**
    * kNN query with default traversal parameters.
