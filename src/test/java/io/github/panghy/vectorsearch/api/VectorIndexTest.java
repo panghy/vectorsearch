@@ -101,11 +101,11 @@ class VectorIndexTest {
     try {
       float[][] data = new float[n][dim];
       for (int i = 0; i < n; i++) for (int d = 0; d < dim; d++) data[i][d] = i * 0.001f + d;
-      List<SegmentVectorId> ids = index.addAll(data, null).get(30, TimeUnit.SECONDS);
+      List<Long> ids = index.addAll(data, null).get(30, TimeUnit.SECONDS);
       assertThat(ids).hasSize(n);
       for (int i = 0; i < n; i++) {
-        assertThat(ids.get(i).segmentId()).isEqualTo(i / maxSeg);
-        assertThat(ids.get(i).vectorId()).isEqualTo(i % maxSeg);
+        assertThat(SegmentVectorId.segmentId(ids.get(i))).isEqualTo(i / maxSeg);
+        assertThat(SegmentVectorId.vectorId(ids.get(i))).isEqualTo(i % maxSeg);
       }
     } finally {
       index.close();
@@ -131,21 +131,20 @@ class VectorIndexTest {
         .localWorkerThreads(1)
         .build();
     VectorIndex index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
-    SegmentVectorId[] ids = new SegmentVectorId[12];
+    long[] ids = new long[12];
     for (int i = 0; i < 12; i++) {
       float[] v = new float[8];
       for (int d = 0; d < 8; d++) v[d] = (float) Math.cos(0.01 * i + d);
       ids[i] = index.add(v, null).get(5, TimeUnit.SECONDS);
     }
-    int[][] toDel = new int[][] {
-      new int[] {ids[2].segmentId(), ids[2].vectorId()},
-      new int[] {ids[5].segmentId(), ids[5].vectorId()},
-      new int[] {ids[7].segmentId(), ids[7].vectorId()}
-    };
+    long[] toDel = new long[] {ids[2], ids[5], ids[7]};
     index.deleteAll(toDel).get(5, TimeUnit.SECONDS);
     var res = index.query(new float[] {1, 0, 0, 0, 0, 0, 0, 0}, 10).get(5, TimeUnit.SECONDS);
-    for (int[] id : toDel)
-      assertThat(res.stream().noneMatch(r -> r.segmentId() == id[0] && r.vectorId() == id[1]))
+    for (long id : toDel)
+      assertThat(res.stream()
+              .noneMatch(r -> SegmentVectorId.segmentId(r.segmentVectorId())
+                      == SegmentVectorId.segmentId(id)
+                  && SegmentVectorId.vectorId(r.segmentVectorId()) == SegmentVectorId.vectorId(id)))
           .isTrue();
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     var maintDir = dirs.tasksDir().createOrOpen(db, List.of("maint")).get(5, TimeUnit.SECONDS);
@@ -189,7 +188,7 @@ class VectorIndexTest {
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     new SegmentBuildService(cfg, dirs).build(0).get(5, TimeUnit.SECONDS);
     // First delete triggers vacuum; run it to stamp last_vacuum_at_ms
-    index.delete(0, 0).get(5, TimeUnit.SECONDS);
+    index.delete(SegmentVectorId.pack(0, 0)).get(5, TimeUnit.SECONDS);
     new io.github.panghy.vectorsearch.tasks.MaintenanceService(cfg, dirs)
         .vacuumSegment(0, 0.0)
         .get(5, TimeUnit.SECONDS);
@@ -204,7 +203,7 @@ class VectorIndexTest {
     var q = TaskQueues.createTaskQueue(tqc).get(5, TimeUnit.SECONDS);
     new MaintenanceWorker(cfg, dirs, q).runOnce().get(5, TimeUnit.SECONDS);
     // Second delete within cooldown should be skipped (no visible unclaimed tasks)
-    index.delete(0, 1).get(5, TimeUnit.SECONDS);
+    index.delete(SegmentVectorId.pack(0, 1)).get(5, TimeUnit.SECONDS);
     // Await empty queue; will hang and fail if a task was enqueued (no worker running here)
     q.awaitQueueEmpty(db).get(5, TimeUnit.SECONDS);
     index.close();
@@ -229,8 +228,7 @@ class VectorIndexTest {
       for (int d = 0; d < dim; d++) v[d] = (float) rnd.nextGaussian();
       data.add(v);
     }
-    List<SegmentVectorId> ids =
-        index.addAll(data.toArray(new float[0][]), null).get(30, TimeUnit.SECONDS);
+    List<Long> ids = index.addAll(data.toArray(new float[0][]), null).get(30, TimeUnit.SECONDS);
     // Seal all segments deterministically
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     var reg = dirs.segmentsIndexSubspace();
@@ -248,10 +246,11 @@ class VectorIndexTest {
     int hits = 0;
     for (int i = 0; i < picks.size(); i++) {
       int idx = picks.get(i);
-      SegmentVectorId gt = ids.get(idx);
+      long gt = ids.get(idx);
       List<SearchResult> res = futures.get(i).get(5, TimeUnit.SECONDS);
-      boolean found =
-          res.stream().anyMatch(r -> r.segmentId() == gt.segmentId() && r.vectorId() == gt.vectorId());
+      boolean found = res.stream()
+          .anyMatch(r -> SegmentVectorId.segmentId(r.segmentVectorId()) == SegmentVectorId.segmentId(gt)
+              && SegmentVectorId.vectorId(r.segmentVectorId()) == SegmentVectorId.vectorId(gt));
       if (found) hits++;
     }
     double recall = hits / (double) qCount;
@@ -311,7 +310,7 @@ class VectorIndexTest {
         index.add(new float[] {i, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
       var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
       new SegmentBuildService(cfg, dirs).build(0).get(5, TimeUnit.SECONDS);
-      int[][] ids = new int[][] {{0, 0}, {0, 1}};
+      long[] ids = new long[] {SegmentVectorId.pack(0, 0), SegmentVectorId.pack(0, 1)};
       // Single-transaction deleteAll
       db.runAsync(tr -> index.deleteAll(tr, ids)).get(5, TimeUnit.SECONDS);
 
@@ -349,20 +348,19 @@ class VectorIndexTest {
         new float[] {4f, 0f},
         new float[] {5f, 0f},
       };
-      List<SegmentVectorId> ids =
-          db.runAsync(tr -> index.addAll(tr, batch, null)).get(5, TimeUnit.SECONDS);
+      List<Long> ids = db.runAsync(tr -> index.addAll(tr, batch, null)).get(5, TimeUnit.SECONDS);
       assertThat(ids).hasSize(5);
       // Expect strict-cap mapping across rotations: [0,0],[0,1],[1,0],[1,1],[2,0]
-      assertThat(ids.get(0).segmentId()).isEqualTo(0);
-      assertThat(ids.get(0).vectorId()).isEqualTo(0);
-      assertThat(ids.get(1).segmentId()).isEqualTo(0);
-      assertThat(ids.get(1).vectorId()).isEqualTo(1);
-      assertThat(ids.get(2).segmentId()).isEqualTo(1);
-      assertThat(ids.get(2).vectorId()).isEqualTo(0);
-      assertThat(ids.get(3).segmentId()).isEqualTo(1);
-      assertThat(ids.get(3).vectorId()).isEqualTo(1);
-      assertThat(ids.get(4).segmentId()).isEqualTo(2);
-      assertThat(ids.get(4).vectorId()).isEqualTo(0);
+      assertThat(SegmentVectorId.segmentId(ids.get(0))).isEqualTo(0);
+      assertThat(SegmentVectorId.vectorId(ids.get(0))).isEqualTo(0);
+      assertThat(SegmentVectorId.segmentId(ids.get(1))).isEqualTo(0);
+      assertThat(SegmentVectorId.vectorId(ids.get(1))).isEqualTo(1);
+      assertThat(SegmentVectorId.segmentId(ids.get(2))).isEqualTo(1);
+      assertThat(SegmentVectorId.vectorId(ids.get(2))).isEqualTo(0);
+      assertThat(SegmentVectorId.segmentId(ids.get(3))).isEqualTo(1);
+      assertThat(SegmentVectorId.vectorId(ids.get(3))).isEqualTo(1);
+      assertThat(SegmentVectorId.segmentId(ids.get(4))).isEqualTo(2);
+      assertThat(SegmentVectorId.vectorId(ids.get(4))).isEqualTo(0);
     } finally {
       index.close();
     }
@@ -470,7 +468,7 @@ class VectorIndexTest {
         .build();
     VectorIndex index = VectorIndex.createOrOpen(cfg).get(5, TimeUnit.SECONDS);
     int n = 30;
-    SegmentVectorId[] ids = new SegmentVectorId[n];
+    long[] ids = new long[n];
     for (int i = 0; i < n; i++) {
       float[] v = new float[8];
       for (int d = 0; d < 8; d++) v[d] = (float) Math.sin(0.01 * i + d);
@@ -487,15 +485,20 @@ class VectorIndexTest {
                 .maxSegmentSize(20)
                 .build(),
             dirs)
-        .build(ids[0].segmentId())
+        .build(SegmentVectorId.segmentId(ids[0]))
         .get(5, TimeUnit.SECONDS);
-    index.delete(ids[0].segmentId(), ids[0].vectorId()).get(5, TimeUnit.SECONDS);
-    index.delete(ids[5].segmentId(), ids[5].vectorId()).get(5, TimeUnit.SECONDS);
+    index.delete(ids[0]).get(5, TimeUnit.SECONDS);
+    index.delete(ids[5]).get(5, TimeUnit.SECONDS);
     float[] q = new float[] {1f, 0.1f, -0.2f, 0.3f, 0.0f, 0.4f, -0.1f, 0.2f};
     var results = index.query(q, 10).get(5, TimeUnit.SECONDS);
     assertThat(results.stream()
-            .noneMatch(r -> (r.segmentId() == ids[0].segmentId() && r.vectorId() == ids[0].vectorId())
-                || (r.segmentId() == ids[5].segmentId() && r.vectorId() == ids[5].vectorId())))
+            .noneMatch(r -> (SegmentVectorId.segmentId(r.segmentVectorId())
+                        == SegmentVectorId.segmentId(ids[0])
+                    && SegmentVectorId.vectorId(r.segmentVectorId())
+                        == SegmentVectorId.vectorId(ids[0]))
+                || (SegmentVectorId.segmentId(r.segmentVectorId()) == SegmentVectorId.segmentId(ids[5])
+                    && SegmentVectorId.vectorId(r.segmentVectorId())
+                        == SegmentVectorId.vectorId(ids[5]))))
         .isTrue();
     new MaintenanceService(
             VectorIndexConfig.builder(db, root)
@@ -506,7 +509,7 @@ class VectorIndexTest {
                 .maxSegmentSize(20)
                 .build(),
             FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS))
-        .vacuumSegment(ids[0].segmentId(), 0.0)
+        .vacuumSegment(SegmentVectorId.segmentId(ids[0]), 0.0)
         .get(5, TimeUnit.SECONDS);
   }
 
@@ -528,7 +531,7 @@ class VectorIndexTest {
     VectorIndex index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
     Random rnd = new Random(1234);
     List<float[]> inserted = new ArrayList<>(vectorCount);
-    List<SegmentVectorId> ids = new ArrayList<>(vectorCount);
+    List<Long> ids = new ArrayList<>(vectorCount);
     int batchSize = Integer.getInteger("VS_HEAVY_BATCH", 200);
     for (int start = 0; start < vectorCount; start += batchSize) {
       int end = Math.min(vectorCount, start + batchSize);
@@ -559,10 +562,11 @@ class VectorIndexTest {
     int hits = 0;
     for (int qi = 0; qi < picks.size(); qi++) {
       int idx = picks.get(qi);
-      SegmentVectorId gt = ids.get(idx);
+      long gt = ids.get(idx);
       List<SearchResult> res = futures.get(qi).get(5, TimeUnit.SECONDS);
-      boolean found =
-          res.stream().anyMatch(r -> r.segmentId() == gt.segmentId() && r.vectorId() == gt.vectorId());
+      boolean found = res.stream()
+          .anyMatch(r -> SegmentVectorId.segmentId(r.segmentVectorId()) == SegmentVectorId.segmentId(gt)
+              && SegmentVectorId.vectorId(r.segmentVectorId()) == SegmentVectorId.vectorId(gt));
       if (found) hits++;
     }
     double recall = hits / (double) queryCount;
@@ -614,7 +618,7 @@ class VectorIndexTest {
     index.add(new float[] {1f, 1f, 0f}, null).get(5, TimeUnit.SECONDS);
     List<SearchResult> res = index.query(new float[] {1f, 0f, 0f}, 2).get(5, TimeUnit.SECONDS);
     assertThat(res).hasSize(2);
-    assertThat(res.get(0).vectorId()).isEqualTo(0);
+    assertThat(SegmentVectorId.vectorId(res.get(0).segmentVectorId())).isEqualTo(0);
   }
 
   @Test

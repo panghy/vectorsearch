@@ -53,7 +53,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param payload   optional payload bytes to store verbatim with the vector; may be {@code null}.
    * @return a future with the assigned identifier {@code [segmentId, vectorId]}.
    */
-  CompletableFuture<SegmentVectorId> add(float[] embedding, byte[] payload);
+  CompletableFuture<Long> add(float[] embedding, byte[] payload);
 
   /**
    * Inserts one vector using a caller-supplied FoundationDB {@link Transaction}.
@@ -70,7 +70,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param payload   optional payload bytes, may be {@code null}
    * @return a future with the assigned identifier {@code [segmentId, vectorId]}.
    */
-  CompletableFuture<SegmentVectorId> add(Transaction tx, float[] embedding, byte[] payload);
+  CompletableFuture<Long> add(Transaction tx, float[] embedding, byte[] payload);
 
   /**
    * Inserts multiple vectors efficiently across one or more transactions.
@@ -86,7 +86,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param payloads   optional per-vector payloads; may be {@code null} or shorter than embeddings
    * @return a future with assigned IDs per vector (same order as input)
    */
-  CompletableFuture<List<SegmentVectorId>> addAll(float[][] embeddings, byte[][] payloads);
+  CompletableFuture<List<Long>> addAll(float[][] embeddings, byte[][] payloads);
 
   /**
    * Inserts multiple vectors using a single caller-managed {@link Transaction}.
@@ -102,7 +102,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param payloads   optional per-vector payloads (see {@link #addAll(float[][], byte[][])} rules)
    * @return a future with assigned IDs per vector (same order as input)
    */
-  CompletableFuture<List<SegmentVectorId>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads);
+  CompletableFuture<List<Long>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads);
 
   /**
    * kNN query with default traversal parameters.
@@ -136,7 +136,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param vecId vector identifier within the segment
    * @return a future that completes when the mutation is persisted
    */
-  CompletableFuture<Void> delete(int segId, int vecId);
+  CompletableFuture<Void> delete(long segmentVectorId);
 
   /**
    * Single-transaction delete using a caller-provided {@link Transaction}.
@@ -146,7 +146,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param vecId vector identifier within the segment
    * @return a future that completes when the mutation is persisted
    */
-  CompletableFuture<Void> delete(Transaction tx, int segId, int vecId);
+  CompletableFuture<Void> delete(Transaction tx, long segmentVectorId);
 
   /**
    * Batch delete convenience for many {@code [segmentId, vectorId]} pairs.
@@ -154,7 +154,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
    * @return a future that completes when all mutations are persisted
    */
-  CompletableFuture<Void> deleteAll(int[][] ids);
+  CompletableFuture<Void> deleteAll(long[] segmentVectorIds);
 
   /**
    * Batch delete within a single caller-provided {@link Transaction}.
@@ -163,7 +163,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
    * @return a future that completes when mutations are persisted
    */
-  CompletableFuture<Void> deleteAll(Transaction tx, int[][] ids);
+  CompletableFuture<Void> deleteAll(Transaction tx, long[] segmentVectorIds);
 
   /**
    * Waits until the build queue is empty (no visible or claimed tasks remain).

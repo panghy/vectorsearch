@@ -167,61 +167,79 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   }
 
   @Override
-  public CompletableFuture<io.github.panghy.vectorsearch.api.SegmentVectorId> add(float[] embedding, byte[] payload) {
+  public CompletableFuture<Long> add(float[] embedding, byte[] payload) {
     return store.add(embedding, payload)
-        .thenApply(a -> new io.github.panghy.vectorsearch.api.SegmentVectorId(a[0], a[1]));
+        .thenApply(a -> io.github.panghy.vectorsearch.api.SegmentVectorId.pack(a[0], a[1]));
   }
 
   @Override
-  public CompletableFuture<io.github.panghy.vectorsearch.api.SegmentVectorId> add(
-      Transaction tx, float[] embedding, byte[] payload) {
+  public CompletableFuture<Long> add(Transaction tx, float[] embedding, byte[] payload) {
     return store.add(tx, embedding, payload)
-        .thenApply(a -> new io.github.panghy.vectorsearch.api.SegmentVectorId(a[0], a[1]));
+        .thenApply(a -> io.github.panghy.vectorsearch.api.SegmentVectorId.pack(a[0], a[1]));
   }
 
   @Override
-  public CompletableFuture<Void> delete(int segId, int vecId) {
+  public CompletableFuture<Void> delete(long segmentVectorId) {
+    int segId = io.github.panghy.vectorsearch.api.SegmentVectorId.segmentId(segmentVectorId);
+    int vecId = io.github.panghy.vectorsearch.api.SegmentVectorId.vectorId(segmentVectorId);
     // Marks the record deleted and, if the per-segment deleted ratio is high enough,
     // enqueues a maintenance vacuum task to reclaim storage for that segment.
     return store.delete(segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(Set.of(segId)));
   }
 
   @Override
-  public CompletableFuture<Void> delete(Transaction tx, int segId, int vecId) {
+  public CompletableFuture<Void> delete(Transaction tx, long segmentVectorId) {
+    int segId = io.github.panghy.vectorsearch.api.SegmentVectorId.segmentId(segmentVectorId);
+    int vecId = io.github.panghy.vectorsearch.api.SegmentVectorId.vectorId(segmentVectorId);
     return store.delete(tx, segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(tx, Set.of(segId)));
   }
 
   @Override
-  public CompletableFuture<Void> deleteAll(int[][] ids) {
-    // Collect affected segments so we can evaluate and enqueue one vacuum task per segment.
+  public CompletableFuture<Void> deleteAll(long[] ids) {
     Set<Integer> segs = new HashSet<>();
-    if (ids != null) for (int[] id : ids) if (id != null && id.length > 0) segs.add(id[0]);
-    return store.deleteBatch(ids).thenCompose(v -> scheduleVacuumIfNeeded(segs));
+    int[][] pairs = new int[ids == null ? 0 : ids.length][2];
+    if (ids != null) {
+      for (int i = 0; i < ids.length; i++) {
+        int s = io.github.panghy.vectorsearch.api.SegmentVectorId.segmentId(ids[i]);
+        int v = io.github.panghy.vectorsearch.api.SegmentVectorId.vectorId(ids[i]);
+        pairs[i][0] = s;
+        pairs[i][1] = v;
+        segs.add(s);
+      }
+    }
+    return store.deleteBatch(pairs).thenCompose(v -> scheduleVacuumIfNeeded(segs));
   }
 
   @Override
-  public CompletableFuture<Void> deleteAll(Transaction tx, int[][] ids) {
+  public CompletableFuture<Void> deleteAll(Transaction tx, long[] ids) {
     Set<Integer> segs = new HashSet<>();
-    if (ids != null) for (int[] id : ids) if (id != null && id.length > 0) segs.add(id[0]);
-    return store.deleteBatch(tx, ids).thenCompose(v -> scheduleVacuumIfNeeded(tx, segs));
+    int[][] pairs = new int[ids == null ? 0 : ids.length][2];
+    if (ids != null) {
+      for (int i = 0; i < ids.length; i++) {
+        int s = io.github.panghy.vectorsearch.api.SegmentVectorId.segmentId(ids[i]);
+        int v = io.github.panghy.vectorsearch.api.SegmentVectorId.vectorId(ids[i]);
+        pairs[i][0] = s;
+        pairs[i][1] = v;
+        segs.add(s);
+      }
+    }
+    return store.deleteBatch(tx, pairs).thenCompose(v -> scheduleVacuumIfNeeded(tx, segs));
   }
 
   @Override
-  public CompletableFuture<List<io.github.panghy.vectorsearch.api.SegmentVectorId>> addAll(
-      float[][] embeddings, byte[][] payloads) {
+  public CompletableFuture<List<Long>> addAll(float[][] embeddings, byte[][] payloads) {
     return store.addBatch(embeddings, payloads).thenApply(list -> {
-      List<io.github.panghy.vectorsearch.api.SegmentVectorId> out = new ArrayList<>(list.size());
-      for (int[] a : list) out.add(new io.github.panghy.vectorsearch.api.SegmentVectorId(a[0], a[1]));
+      List<Long> out = new ArrayList<>(list.size());
+      for (int[] a : list) out.add(io.github.panghy.vectorsearch.api.SegmentVectorId.pack(a[0], a[1]));
       return out;
     });
   }
 
   @Override
-  public CompletableFuture<List<io.github.panghy.vectorsearch.api.SegmentVectorId>> addAll(
-      Transaction tx, float[][] embeddings, byte[][] payloads) {
+  public CompletableFuture<List<Long>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads) {
     return store.addBatch(tx, embeddings, payloads).thenApply(list -> {
-      List<io.github.panghy.vectorsearch.api.SegmentVectorId> out = new ArrayList<>(list.size());
-      for (int[] a : list) out.add(new io.github.panghy.vectorsearch.api.SegmentVectorId(a[0], a[1]));
+      List<Long> out = new ArrayList<>(list.size());
+      for (int[] a : list) out.add(io.github.panghy.vectorsearch.api.SegmentVectorId.pack(a[0], a[1]));
       return out;
     });
   }
@@ -305,9 +323,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         return allOf(perSeg.toArray(CompletableFuture[]::new)).thenApply(v -> {
           List<SearchResult> merged = new ArrayList<>();
           for (CompletableFuture<List<SearchResult>> f : perSeg) merged.addAll(f.getNow(List.of()));
-          merged.sort(Comparator.comparingDouble(SearchResult::score)
-              .reversed()
-              .thenComparingInt(SearchResult::vectorId));
+          merged.sort(Comparator.comparingDouble(SearchResult::score).reversed());
           if (merged.size() > k) merged = merged.subList(0, k);
           if (!merged.isEmpty()) {
             int limit = Math.min(5, merged.size());
@@ -316,7 +332,12 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                 limit,
                 merged.subList(0, limit).stream()
                     .map(r -> String.format(
-                        "(seg=%d,id=%d,score=%.4f)", r.segmentId(), r.vectorId(), r.score()))
+                        "(seg=%d,id=%d,score=%.4f)",
+                        io.github.panghy.vectorsearch.api.SegmentVectorId.segmentId(
+                            r.segmentVectorId()),
+                        io.github.panghy.vectorsearch.api.SegmentVectorId.vectorId(
+                            r.segmentVectorId()),
+                        r.score()))
                     .toList());
           }
           return merged;
@@ -538,8 +559,8 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                 distance = d;
               }
               results.add(SearchResult.builder()
-                  .segmentId(segId)
-                  .vectorId(rec.getVecId())
+                  .segmentVectorId(io.github.panghy.vectorsearch.api.SegmentVectorId.pack(
+                      segId, rec.getVecId()))
                   .score(score)
                   .distance(distance)
                   .payload(rec.getPayload().toByteArray())
@@ -556,7 +577,11 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                 segId,
                 limit,
                 results.subList(0, limit).stream()
-                    .map(r -> String.format("(id=%d,score=%.4f)", r.vectorId(), r.score()))
+                    .map(r -> String.format(
+                        "(id=%d,score=%.4f)",
+                        io.github.panghy.vectorsearch.api.SegmentVectorId.vectorId(
+                            r.segmentVectorId()),
+                        r.score()))
                     .toList());
           }
           if (results.size() > k) return results.subList(0, k);
@@ -853,8 +878,8 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
             distance = d;
           }
           out.add(SearchResult.builder()
-              .segmentId(segId)
-              .vectorId(rec.getVecId())
+              .segmentVectorId(
+                  io.github.panghy.vectorsearch.api.SegmentVectorId.pack(segId, rec.getVecId()))
               .score(score)
               .distance(distance)
               .payload(rec.getPayload().toByteArray())
@@ -868,7 +893,11 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
               segId,
               limit,
               out.subList(0, limit).stream()
-                  .map(r -> String.format("(id=%d,score=%.4f)", r.vectorId(), r.score()))
+                  .map(r -> String.format(
+                      "(id=%d,score=%.4f)",
+                      io.github.panghy.vectorsearch.api.SegmentVectorId.vectorId(
+                          r.segmentVectorId()),
+                      r.score()))
                   .toList());
         }
         if (out.size() > k) return out.subList(0, k);
