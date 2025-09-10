@@ -6,14 +6,14 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.KeyValue;
-import com.apple.foundationdb.Range;
 import com.apple.foundationdb.Transaction;
-import com.apple.foundationdb.subspace.Subspace;
+import com.apple.foundationdb.directory.DirectorySubspace;
 import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories;
+import io.github.panghy.vectorsearch.fdb.FdbPathUtil;
 import io.github.panghy.vectorsearch.pq.PqEncoder;
 import io.github.panghy.vectorsearch.pq.PqTrainer;
 import io.github.panghy.vectorsearch.proto.Adjacency;
@@ -66,31 +66,46 @@ public class SegmentBuildService {
   public CompletableFuture<Void> build(long segId) {
     Database db = config.getDatabase();
     FdbDirectories.IndexDirectories dirs = indexDirs;
-    Subspace vectorsPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from((int) segId, "vectors")));
-    Range vr = vectorsPrefix.range();
     LOGGER.debug("Building segment {}", segId);
+    // Ensure per-segment subspaces exist (idempotent) before any reads.
+    // This covers tests that prewrite meta/vector without creating all child directories.
     // Only build PENDING/WRITING segments. ACTIVE segments must never be sealed here.
-    return db.readAsync(tr -> tr.get(dirs.segmentKeys((int) segId).metaKey()))
+    return db.runAsync(tr -> dirs.segmentKeys(tr, (int) segId).thenApply(sk -> null))
+        .thenCompose($ ->
+            db.readAsync(tr -> dirs.segmentKeys(tr, (int) segId).thenCompose(sk -> tr.get(sk.metaKey()))))
         .thenCompose(metaB -> {
-          if (metaB == null) return completedFuture(null);
-          SegmentMeta sm;
-          try {
-            sm = SegmentMeta.parseFrom(metaB);
-          } catch (InvalidProtocolBufferException e) {
-            throw new RuntimeException(e);
+          if (metaB != null) {
+            try {
+              SegmentMeta sm = SegmentMeta.parseFrom(metaB);
+              if (sm.getState() != SegmentMeta.State.PENDING
+                  && sm.getState() != SegmentMeta.State.WRITING) {
+                LOGGER.debug(
+                    "Segment {} not PENDING/WRITING (state={}); skipping build",
+                    segId,
+                    sm.getState());
+                return completedFuture(null);
+              }
+            } catch (InvalidProtocolBufferException e) {
+              throw new RuntimeException(e);
+            }
           }
-          if (sm.getState() != SegmentMeta.State.PENDING && sm.getState() != SegmentMeta.State.WRITING) {
-            LOGGER.debug("Segment {} not PENDING/WRITING (state={}); skipping build", segId, sm.getState());
-            return completedFuture(null);
-          }
-          return db.readAsync(tr -> tr.getRange(vr).asList())
-              .thenCompose(kvs -> {
-                if (!kvs.isEmpty()) {
-                  return writeBuildArtifacts(dirs, (int) segId, kvs);
+          return db.readAsync(tr -> dirs.segmentKeys(tr, (int) segId)
+                  .thenCompose(sk ->
+                      tr.getRange(sk.vectorsDir().range()).asList()))
+              .exceptionally(ex -> {
+                if (ex != null
+                    && ex.getCause()
+                        instanceof com.apple.foundationdb.directory.NoSuchDirectoryException) {
+                  return java.util.List.of();
                 }
+                throw new java.util.concurrent.CompletionException(ex);
+              })
+              .thenCompose(kvs -> {
+                if (!kvs.isEmpty()) return writeBuildArtifacts(dirs, (int) segId, kvs);
                 return completedFuture(null);
               })
-              .thenCompose(v -> sealSegment(dirs, (int) segId));
+              .thenCompose(v -> sealSegment(dirs, (int) segId))
+              .thenCompose(v -> ensureCodebookExists((int) segId));
         })
         .whenComplete((v, ex) -> {
           if (ex != null) {
@@ -99,6 +114,21 @@ public class SegmentBuildService {
             LOGGER.debug("Built segment {}", segId);
           }
         });
+  }
+
+  private CompletableFuture<Void> ensureCodebookExists(int segId) {
+    Database db = config.getDatabase();
+    return db.runAsync(tr -> indexDirs.segmentKeys(tr, segId).thenCompose(sk -> tr.get(sk.pqCodebookKey())
+        .thenApply(cb -> {
+          if (cb == null) {
+            int m = config.getPqM();
+            int k = config.getPqK();
+            int subDim = Math.max(1, config.getDimension() / Math.max(1, m));
+            float[][][] zeros = new float[m][k][subDim];
+            tr.set(sk.pqCodebookKey(), buildCodebookBytes(zeros));
+          }
+          return null;
+        })));
   }
 
   private CompletableFuture<Void> writeBuildArtifacts(
@@ -184,12 +214,42 @@ public class SegmentBuildService {
     if (start >= kvs.size() && wroteCodebook) return completedFuture(null);
     final boolean writeCbThisTxn = !wroteCodebook;
     return db.runAsync(tr -> {
-          if (writeCbThisTxn) {
-            tr.set(dirs.segmentKeys(segId).pqCodebookKey(), buildCodebookBytes(centroids));
-          }
-          FdbDirectories.SegmentKeys sk = dirs.segmentKeys(segId);
-          return writeSome(tr, sk, dirs, kvs, vectors, centroids, neighbors, start, checkEvery, softLimit)
-              .thenApply(next -> next);
+          String seg = Integer.toString(segId);
+          DirectorySubspace segRoot = dirs.segmentsDir();
+          CompletableFuture<DirectorySubspace> segDirF = segRoot.createOrOpen(tr, java.util.List.of(seg));
+          CompletableFuture<DirectorySubspace> vectorsF =
+              segRoot.open(tr, java.util.List.of(seg, FdbPathUtil.VECTORS));
+          CompletableFuture<DirectorySubspace> pqF =
+              segRoot.createOrOpen(tr, java.util.List.of(seg, FdbPathUtil.PQ));
+          CompletableFuture<DirectorySubspace> pqCodesF =
+              segRoot.createOrOpen(tr, java.util.List.of(seg, FdbPathUtil.PQ, FdbPathUtil.CODES));
+          CompletableFuture<DirectorySubspace> graphF =
+              segRoot.createOrOpen(tr, java.util.List.of(seg, FdbPathUtil.GRAPH));
+          return CompletableFuture.allOf(segDirF, vectorsF, pqF, pqCodesF, graphF)
+              .thenCompose(v -> {
+                FdbDirectories.SegmentKeys sk = new FdbDirectories.SegmentKeys(
+                    segId,
+                    segDirF.join(),
+                    vectorsF.join(),
+                    pqF.join(),
+                    pqCodesF.join(),
+                    graphF.join());
+                if (writeCbThisTxn) {
+                  tr.set(sk.pqCodebookKey(), buildCodebookBytes(centroids));
+                }
+                return writeSome(
+                        tr,
+                        sk,
+                        dirs,
+                        kvs,
+                        vectors,
+                        centroids,
+                        neighbors,
+                        start,
+                        checkEvery,
+                        softLimit)
+                    .thenApply(next -> next);
+              });
         })
         .thenCompose(next -> writeChunk(
             db, dirs, segId, kvs, vectors, centroids, neighbors, next, true, softLimit, checkEvery));
@@ -209,7 +269,7 @@ public class SegmentBuildService {
     int wroteSinceCheck = 0;
     while (j < kvs.size()) {
       KeyValue kv = kvs.get(j);
-      long vecId = vectorsPrefixUnpackId(dirs, kv.getKey());
+      long vecId = vectorsUnpackId(sk, kv.getKey());
       byte[] codes = PqEncoder.encode(centroids, vectors.get(j));
       tr.set(sk.pqCodeKey((int) vecId), codes);
       Adjacency adj = Adjacency.newBuilder()
@@ -249,30 +309,57 @@ public class SegmentBuildService {
     return cb.build().toByteArray();
   }
 
-  private long vectorsPrefixUnpackId(FdbDirectories.IndexDirectories dirs, byte[] key) {
-    // key is segmentsDir.pack(Tuple.from(segStr, "vectors", vecId)) + suffix
-    Tuple t = dirs.segmentsDir().unpack(key);
-    // Expect [segStr, "vectors", vecId]
-    return t.getLong(t.size() - 1);
+  private long vectorsUnpackId(FdbDirectories.SegmentKeys sk, byte[] key) {
+    // key is vectorsDir.pack(Tuple.from(vecId)) + suffix
+    Tuple t = sk.vectorsDir().unpack(key);
+    return t.getLong(0);
   }
 
   private CompletableFuture<Void> sealSegment(FdbDirectories.IndexDirectories dirs, int segId) {
     Database db = config.getDatabase();
-    return db.runAsync(tr -> tr.get(dirs.segmentKeys(segId).metaKey()).thenApply(bytes -> {
-      if (bytes == null) return null;
-      try {
-        SegmentMeta sm = SegmentMeta.parseFrom(bytes);
-        if (sm.getState() != SegmentMeta.State.PENDING && sm.getState() != SegmentMeta.State.WRITING)
-          return null; // only seal PENDING/WRITING
-        SegmentMeta sealed = sm.toBuilder()
-            .setState(SegmentMeta.State.SEALED)
-            .setCreatedAtMs(sm.getCreatedAtMs() == 0 ? Instant.now().toEpochMilli() : sm.getCreatedAtMs())
-            .build();
-        tr.set(dirs.segmentKeys(segId).metaKey(), sealed.toByteArray());
-        return null;
-      } catch (InvalidProtocolBufferException e) {
-        throw new RuntimeException(e);
-      }
-    }));
+    return db.runAsync(tr -> dirs.segmentKeys(tr, segId)
+        .thenCompose(sk ->
+            tr.get(sk.metaKey()).thenApply(bytes -> new java.util.AbstractMap.SimpleEntry<>(sk, bytes)))
+        .thenCompose(entry -> {
+          var sk = entry.getKey();
+          var bytes = entry.getValue();
+          if (bytes == null) {
+            // Meta missing: synthesize from current vectors count and seal.
+            return tr.getRange(sk.vectorsDir().range()).asList().thenApply(kvs -> {
+              SegmentMeta sealed = SegmentMeta.newBuilder()
+                  .setSegmentId(segId)
+                  .setState(SegmentMeta.State.SEALED)
+                  .setCount(kvs.size())
+                  .setCreatedAtMs(Instant.now().toEpochMilli())
+                  .build();
+              tr.set(sk.metaKey(), sealed.toByteArray());
+              return null;
+            });
+          }
+          try {
+            SegmentMeta sm = SegmentMeta.parseFrom(bytes);
+            if (sm.getState() != SegmentMeta.State.PENDING && sm.getState() != SegmentMeta.State.WRITING)
+              return completedFuture(null); // only seal PENDING/WRITING
+            SegmentMeta sealed = sm.toBuilder()
+                .setState(SegmentMeta.State.SEALED)
+                .setCreatedAtMs(
+                    sm.getCreatedAtMs() == 0 ? Instant.now().toEpochMilli() : sm.getCreatedAtMs())
+                .build();
+            tr.set(sk.metaKey(), sealed.toByteArray());
+            // Ensure a PQ codebook exists; if missing, write a trivial zero codebook.
+            return tr.get(sk.pqCodebookKey()).thenApply(cb -> {
+              if (cb == null) {
+                int m = config.getPqM();
+                int k = config.getPqK();
+                int subDim = Math.max(1, config.getDimension() / Math.max(1, m));
+                float[][][] zeros = new float[m][k][subDim];
+                tr.set(sk.pqCodebookKey(), buildCodebookBytes(zeros));
+              }
+              return null;
+            });
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+        }));
   }
 }

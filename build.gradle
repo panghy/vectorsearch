@@ -158,7 +158,7 @@ integrationTest {
 }
 
 jacocoTestReport {
-  dependsOn test, integrationTest
+  dependsOn test, integrationTest, generateProto, compileJava, processResources
   
   // Combine execution data from both test and integrationTest
   executionData fileTree(layout.buildDirectory).include("jacoco/*.exec")

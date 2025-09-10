@@ -67,15 +67,20 @@ public class SearchIgnoresWritingSegmentTest {
           .setState(SegmentMeta.State.WRITING)
           .setCount(1)
           .build();
-      tr.set(dirs.segmentKeys(segId).metaKey(), sm.toByteArray());
-      VectorRecord rec = VectorRecord.newBuilder()
-          .setSegId(segId)
-          .setVecId(0)
-          .setEmbedding(ByteString.copyFrom(
-              io.github.panghy.vectorsearch.util.FloatPacker.floatsToBytes(new float[] {1f, 0f, 0f})))
-          .setDeleted(false)
-          .build();
-      tr.set(dirs.segmentKeys(segId).vectorKey(0), rec.toByteArray());
+      try {
+        var sk = dirs.segmentKeys(tr, segId).get();
+        tr.set(sk.metaKey(), sm.toByteArray());
+        VectorRecord rec = VectorRecord.newBuilder()
+            .setSegId(segId)
+            .setVecId(0)
+            .setEmbedding(ByteString.copyFrom(
+                io.github.panghy.vectorsearch.util.FloatPacker.floatsToBytes(new float[] {1f, 0f, 0f})))
+            .setDeleted(false)
+            .build();
+        tr.set(sk.vectorKey(0), rec.toByteArray());
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
       tr.set(dirs.segmentsIndexKey(segId), new byte[0]);
       return null;
     });

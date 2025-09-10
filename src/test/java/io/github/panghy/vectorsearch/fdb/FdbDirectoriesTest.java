@@ -36,7 +36,7 @@ class FdbDirectoriesTest {
       assertThat(tMax.getString(0)).isEqualTo(FdbPathUtil.MAX_SEGMENT);
 
       // Segment-level helpers
-      var sk = dirs.segmentKeys(123);
+      var sk = db.runAsync(tr -> dirs.segmentKeys(tr, 123)).get(5, java.util.concurrent.TimeUnit.SECONDS);
       assertThat(sk.metaKey()).isNotNull();
       assertThat(sk.vectorKey(1)).isNotNull();
       assertThat(sk.pqCodebookKey()).isNotNull();
@@ -62,23 +62,17 @@ class FdbDirectoriesTest {
         .get(5, TimeUnit.SECONDS);
     try {
       var dirs = FdbDirectories.openIndex(root, db).get(5, java.util.concurrent.TimeUnit.SECONDS);
-      var sk = dirs.segmentKeys(123);
+      var sk = db.runAsync(tr -> dirs.segmentKeys(tr, 123)).get(5, java.util.concurrent.TimeUnit.SECONDS);
       byte[] cbook = sk.pqCodebookKey();
       byte[] code5 = sk.pqCodeKey(5);
       byte[] g7 = sk.graphKey(7);
-      Tuple t1 = dirs.segmentsDir().unpack(cbook);
-      Tuple t2 = dirs.segmentsDir().unpack(code5);
-      Tuple t3 = dirs.segmentsDir().unpack(g7);
-      assertThat(t1.getLong(0)).isEqualTo(123);
-      assertThat(t1.getString(1)).isEqualTo("pq");
-      assertThat(t1.getString(2)).isEqualTo("codebook");
-      assertThat(t2.getLong(0)).isEqualTo(123);
-      assertThat(t2.getString(1)).isEqualTo("pq");
-      assertThat(t2.getString(2)).isEqualTo("codes");
-      assertThat(t2.getLong(3)).isEqualTo(5);
-      assertThat(t3.getLong(0)).isEqualTo(123);
-      assertThat(t3.getString(1)).isEqualTo("graph");
-      assertThat(t3.getLong(2)).isEqualTo(7);
+      // Unpack relative to correct subspaces
+      Tuple t1 = sk.pqDir().unpack(cbook);
+      Tuple t2 = sk.pqCodesDir().unpack(code5);
+      Tuple t3 = sk.graphDir().unpack(g7);
+      assertThat(t1.getString(0)).isEqualTo("codebook");
+      assertThat(t2.getLong(0)).isEqualTo(5);
+      assertThat(t3.getLong(0)).isEqualTo(7);
     } finally {
       db.run(tr -> {
         root.remove(tr);

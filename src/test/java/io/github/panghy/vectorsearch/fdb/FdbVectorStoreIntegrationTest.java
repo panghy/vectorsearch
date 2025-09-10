@@ -80,8 +80,8 @@ class FdbVectorStoreIntegrationTest {
     assertThat(indexMeta).isNotNull();
     assertThat(curSeg).isNotNull();
     // Sanity: segment 0 meta exists (flattened key)
-    byte[] seg0Meta =
-        db.readAsync(tr -> tr.get(dirs.segmentKeys(0).metaKey())).get(5, TimeUnit.SECONDS);
+    byte[] seg0Meta = db.readAsync(tr -> dirs.segmentKeys(tr, 0).thenCompose(sk -> tr.get(sk.metaKey())))
+        .get(5, TimeUnit.SECONDS);
     if (seg0Meta == null) {
       int segKv = db.readAsync(
               tr -> tr.getRange(dirs.segmentsDir().range(), 100).asList())
@@ -253,15 +253,15 @@ class FdbVectorStoreIntegrationTest {
     // Verify PQ codebook and codes exist; with strict-cap rotation and maxSegmentSize=1
     // segment 0 has one vector (id 0) and segment 1 has one vector (id 0).
     var dirs = store.openIndexDirs().get(5, TimeUnit.SECONDS);
-    byte[] codebook =
-        db.readAsync(tr -> tr.get(dirs.segmentKeys(0).pqCodebookKey())).get(5, TimeUnit.SECONDS);
+    byte[] codebook = db.readAsync(tr -> dirs.segmentKeys(tr, 0).thenCompose(sk -> tr.get(sk.pqCodebookKey())))
+        .get(5, TimeUnit.SECONDS);
     assertThat(codebook).isNotNull();
-    byte[] code0 =
-        db.readAsync(tr -> tr.get(dirs.segmentKeys(0).pqCodeKey(0))).get(5, TimeUnit.SECONDS);
+    byte[] code0 = db.readAsync(tr -> dirs.segmentKeys(tr, 0).thenCompose(sk -> tr.get(sk.pqCodeKey(0))))
+        .get(5, TimeUnit.SECONDS);
     assertThat(code0).isNotNull();
     assertThat(code0.length).isEqualTo(2); // m bytes
-    byte[] adj0 =
-        db.readAsync(tr -> tr.get(dirs.segmentKeys(0).graphKey(0))).get(5, TimeUnit.SECONDS);
+    byte[] adj0 = db.readAsync(tr -> dirs.segmentKeys(tr, 0).thenCompose(sk -> tr.get(sk.graphKey(0))))
+        .get(5, TimeUnit.SECONDS);
     assertThat(adj0).isNotNull();
     var adjProto0 = Adjacency.parseFrom(adj0);
     assertThat(adjProto0.getNeighborIdsCount()).isEqualTo(0);

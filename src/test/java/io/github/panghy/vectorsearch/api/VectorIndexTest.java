@@ -7,8 +7,6 @@ import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.Range;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
-import com.apple.foundationdb.subspace.Subspace;
-import com.apple.foundationdb.tuple.Tuple;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.TaskQueues;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
@@ -405,11 +403,15 @@ class VectorIndexTest {
     index.add(new float[] {0f, 1f, 0f, 0f}, null).get(5, TimeUnit.SECONDS);
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     new SegmentBuildService(cfg, dirs).build(0).get(5, TimeUnit.SECONDS);
-    Subspace codes = new Subspace(dirs.segmentsDir().pack(Tuple.from(0, "pq", "codes")));
-    Range cr = codes.range();
     db.run(tr -> {
-      tr.clear(cr.begin, cr.end);
-      return null;
+      try {
+        var sk = dirs.segmentKeys(tr, 0).get();
+        Range cr = sk.pqCodesDir().range();
+        tr.clear(cr.begin, cr.end);
+        return null;
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
     });
     List<SearchResult> res = index.query(new float[] {1f, 0f, 0f, 0f}, 1).get(5, TimeUnit.SECONDS);
     assertThat(res).isEmpty();
