@@ -334,6 +334,41 @@ class VectorIndexTest {
   }
 
   @Test
+  void transaction_addAll_rotates_and_returns_typed_ids() throws Exception {
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
+        .dimension(2)
+        .maxSegmentSize(2) // force rotation within the same transaction
+        .localWorkerThreads(0)
+        .build();
+    VectorIndex index = VectorIndex.createOrOpen(cfg).get(5, TimeUnit.SECONDS);
+    try {
+      float[][] batch = new float[][] {
+        new float[] {1f, 0f},
+        new float[] {2f, 0f},
+        new float[] {3f, 0f},
+        new float[] {4f, 0f},
+        new float[] {5f, 0f},
+      };
+      List<SegmentVectorId> ids =
+          db.runAsync(tr -> index.addAll(tr, batch, null)).get(5, TimeUnit.SECONDS);
+      assertThat(ids).hasSize(5);
+      // Expect strict-cap mapping across rotations: [0,0],[0,1],[1,0],[1,1],[2,0]
+      assertThat(ids.get(0).segmentId()).isEqualTo(0);
+      assertThat(ids.get(0).vectorId()).isEqualTo(0);
+      assertThat(ids.get(1).segmentId()).isEqualTo(0);
+      assertThat(ids.get(1).vectorId()).isEqualTo(1);
+      assertThat(ids.get(2).segmentId()).isEqualTo(1);
+      assertThat(ids.get(2).vectorId()).isEqualTo(0);
+      assertThat(ids.get(3).segmentId()).isEqualTo(1);
+      assertThat(ids.get(3).vectorId()).isEqualTo(1);
+      assertThat(ids.get(4).segmentId()).isEqualTo(2);
+      assertThat(ids.get(4).vectorId()).isEqualTo(0);
+    } finally {
+      index.close();
+    }
+  }
+
+  @Test
   void deterministic_pivot_seeding_and_auto_tune() throws Exception {
     VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
         .dimension(4)
