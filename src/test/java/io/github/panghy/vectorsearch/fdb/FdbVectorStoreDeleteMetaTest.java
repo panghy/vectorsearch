@@ -62,12 +62,12 @@ public class FdbVectorStoreDeleteMetaTest {
 
   @Test
   public void deleteUpdatesMetaAndVacuumDecrementsDeleted() throws Exception {
-    SegmentVectorId[] ids = new SegmentVectorId[3];
+    long[] ids = new long[3];
     for (int i = 0; i < 3; i++) {
       float[] v = new float[] {i, i + 1, i + 2, i + 3};
       ids[i] = index.add(v, null).get(5, TimeUnit.SECONDS);
     }
-    int seg = ids[0].segmentId();
+    int seg = SegmentVectorId.segmentId(ids[0]);
     // Before delete
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     SegmentMeta before = db.readAsync(tr -> dirs.segmentKeys(tr, seg)
@@ -84,8 +84,8 @@ public class FdbVectorStoreDeleteMetaTest {
     assertThat(before.getDeletedCount()).isEqualTo(0);
 
     // Delete two
-    index.delete(ids[0].segmentId(), ids[0].vectorId()).get(5, TimeUnit.SECONDS);
-    index.delete(ids[1].segmentId(), ids[1].vectorId()).get(5, TimeUnit.SECONDS);
+    index.delete(ids[0]).get(5, TimeUnit.SECONDS);
+    index.delete(ids[1]).get(5, TimeUnit.SECONDS);
 
     SegmentMeta after = db.readAsync(tr -> dirs.segmentKeys(tr, seg)
             .thenCompose(sk -> tr.get(sk.metaKey()))
