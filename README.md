@@ -100,15 +100,22 @@ See `src/main/java/.../VectorIndexConfig.java` for the full builder.
 
 ## Maintenance
 
+- Deletes: `index.delete(...)` marks tombstones and updates counters. If the deleted ratio exceeds the configured threshold and cooldown allows, a vacuum task is enqueued automatically.
 - Programmatic vacuum:
-  - `index.vacuumSegment(segId)` to force a vacuum.
-  - `index.vacuumIfNeeded(segId, minDeletedRatio)` to enqueue a threshold-aware task.
+  - Use `MaintenanceService.vacuumSegment(segId, minDeletedRatio)` to run a targeted vacuum now.
+  - Or enqueue and process via the maintenance queue using `MaintenanceWorker`.
+  - Example:
+    ```java
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+    var svc = new MaintenanceService(cfg, dirs);
+    svc.vacuumSegment(0 /* segId */, 0.0 /* minDeletedRatio */).get(10, TimeUnit.SECONDS);
+    ```
 - Background processing:
-  - Set `localMaintenanceWorkerThreads > 0` to auto‑start a maintenance worker pool, or run `MaintenanceWorker.runOnce()` against the `tasks/maint` queue.
+  - Set `localMaintenanceWorkerThreads > 0` to auto‑start a maintenance worker pool, or use `new MaintenanceWorker(cfg, dirs, queue).runOnce()` against the `tasks/maint` queue.
 
 ## Design Highlights
 
- - DirectoryLayer layout per index: `meta`, `currentSegment`, `segmentsIndex/<segId>`, `segments/<segId>/{meta,vectors,pq,graph}`, `tasks/`
+ - DirectoryLayer layout per index: `meta`, `currentSegment`, `segmentsIndex/<segId>`, `segments/<segId>/{meta,vectors/,pq/{codebook,codes/},graph/}`, `tasks/`
 - Async batched I/O with transaction size guards (FDB 10MB/5s)
 - Caffeine AsyncLoadingCache with bulk loaders, optional prefetch for codebooks
 - Deterministic seeding and auto‑tuning for BEST_FIRST traversal
