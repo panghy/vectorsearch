@@ -167,13 +167,16 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   }
 
   @Override
-  public CompletableFuture<int[]> add(float[] embedding, byte[] payload) {
-    return store.add(embedding, payload);
+  public CompletableFuture<io.github.panghy.vectorsearch.api.SegmentVectorId> add(float[] embedding, byte[] payload) {
+    return store.add(embedding, payload)
+        .thenApply(a -> new io.github.panghy.vectorsearch.api.SegmentVectorId(a[0], a[1]));
   }
 
   @Override
-  public CompletableFuture<int[]> add(Transaction tx, float[] embedding, byte[] payload) {
-    return store.add(tx, embedding, payload);
+  public CompletableFuture<io.github.panghy.vectorsearch.api.SegmentVectorId> add(
+      Transaction tx, float[] embedding, byte[] payload) {
+    return store.add(tx, embedding, payload)
+        .thenApply(a -> new io.github.panghy.vectorsearch.api.SegmentVectorId(a[0], a[1]));
   }
 
   @Override
@@ -204,13 +207,23 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   }
 
   @Override
-  public CompletableFuture<List<int[]>> addAll(float[][] embeddings, byte[][] payloads) {
-    return store.addBatch(embeddings, payloads);
+  public CompletableFuture<List<io.github.panghy.vectorsearch.api.SegmentVectorId>> addAll(
+      float[][] embeddings, byte[][] payloads) {
+    return store.addBatch(embeddings, payloads).thenApply(list -> {
+      List<io.github.panghy.vectorsearch.api.SegmentVectorId> out = new ArrayList<>(list.size());
+      for (int[] a : list) out.add(new io.github.panghy.vectorsearch.api.SegmentVectorId(a[0], a[1]));
+      return out;
+    });
   }
 
   @Override
-  public CompletableFuture<List<int[]>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads) {
-    return store.addBatch(tx, embeddings, payloads);
+  public CompletableFuture<List<io.github.panghy.vectorsearch.api.SegmentVectorId>> addAll(
+      Transaction tx, float[][] embeddings, byte[][] payloads) {
+    return store.addBatch(tx, embeddings, payloads).thenApply(list -> {
+      List<io.github.panghy.vectorsearch.api.SegmentVectorId> out = new ArrayList<>(list.size());
+      for (int[] a : list) out.add(new io.github.panghy.vectorsearch.api.SegmentVectorId(a[0], a[1]));
+      return out;
+    });
   }
 
   @Override

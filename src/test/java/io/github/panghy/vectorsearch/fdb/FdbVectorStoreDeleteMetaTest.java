@@ -6,6 +6,7 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
+import io.github.panghy.vectorsearch.api.SegmentVectorId;
 import io.github.panghy.vectorsearch.api.VectorIndex;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
@@ -61,12 +62,12 @@ public class FdbVectorStoreDeleteMetaTest {
 
   @Test
   public void deleteUpdatesMetaAndVacuumDecrementsDeleted() throws Exception {
-    int[][] ids = new int[3][2];
+    SegmentVectorId[] ids = new SegmentVectorId[3];
     for (int i = 0; i < 3; i++) {
       float[] v = new float[] {i, i + 1, i + 2, i + 3};
       ids[i] = index.add(v, null).get(5, TimeUnit.SECONDS);
     }
-    int seg = ids[0][0];
+    int seg = ids[0].segmentId();
     // Before delete
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     SegmentMeta before = db.readAsync(tr -> dirs.segmentKeys(tr, seg)
@@ -83,8 +84,8 @@ public class FdbVectorStoreDeleteMetaTest {
     assertThat(before.getDeletedCount()).isEqualTo(0);
 
     // Delete two
-    index.delete(ids[0][0], ids[0][1]).get(5, TimeUnit.SECONDS);
-    index.delete(ids[1][0], ids[1][1]).get(5, TimeUnit.SECONDS);
+    index.delete(ids[0].segmentId(), ids[0].vectorId()).get(5, TimeUnit.SECONDS);
+    index.delete(ids[1].segmentId(), ids[1].vectorId()).get(5, TimeUnit.SECONDS);
 
     SegmentMeta after = db.readAsync(tr -> dirs.segmentKeys(tr, seg)
             .thenCompose(sk -> tr.get(sk.metaKey()))

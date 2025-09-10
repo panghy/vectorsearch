@@ -8,6 +8,7 @@ import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.TaskQueues;
+import io.github.panghy.vectorsearch.api.SegmentVectorId;
 import io.github.panghy.vectorsearch.api.VectorIndex;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories;
@@ -70,13 +71,13 @@ public class MaintenanceWorkerIntegrationTest {
   @Test
   public void runsVacuumTask() throws Exception {
     // Insert few vectors then delete one
-    int[][] ids = new int[5][2];
+    SegmentVectorId[] ids = new SegmentVectorId[5];
     for (int i = 0; i < 5; i++) {
       float[] v = new float[8];
       for (int d = 0; d < 8; d++) v[d] = (float) Math.sin(0.02 * i + d);
       ids[i] = index.add(v, null).get(5, TimeUnit.SECONDS);
     }
-    index.delete(ids[0][0], ids[0][1]).get(5, TimeUnit.SECONDS);
+    index.delete(ids[0].segmentId(), ids[0].vectorId()).get(5, TimeUnit.SECONDS);
 
     // Auto-enqueue from delete should have happened (ratio ~0.2 >= 0.15)
 
