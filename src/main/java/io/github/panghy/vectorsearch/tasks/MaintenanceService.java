@@ -166,14 +166,20 @@ public final class MaintenanceService {
       Database db, FdbDirectories.SegmentKeys sk, SegmentMeta sm, int removed) {
     long now = config.getInstantSource().instant().toEpochMilli();
     int maxSize = config.getMaxSegmentSize();
-    return db.runAsync(tr -> {
-          SegmentMeta updated = sm.toBuilder()
-              .setDeletedCount(Math.max(0, sm.getDeletedCount() - Math.max(0, removed)))
+    return db.runAsync(tr -> tr.get(sk.metaKey()).thenApply(bytes -> {
+          SegmentMeta cur;
+          try {
+            cur = bytes == null ? sm : SegmentMeta.parseFrom(bytes);
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+          SegmentMeta updated = cur.toBuilder()
+              .setDeletedCount(Math.max(0, cur.getDeletedCount() - Math.max(0, removed)))
               .setLastVacuumAtMs(now)
               .build();
           tr.set(sk.metaKey(), updated.toByteArray());
-          return completedFuture(updated);
-        })
+          return updated;
+        }))
         .thenCompose(updated -> {
           // If segment is small (<50% of max), enqueue a FindCompactionCandidates task.
           if (config.isAutoFindCompactionCandidates() && updated.getCount() < (maxSize / 2)) {
