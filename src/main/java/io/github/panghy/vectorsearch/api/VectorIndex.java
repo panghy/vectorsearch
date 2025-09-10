@@ -186,6 +186,13 @@ public interface VectorIndex extends AutoCloseable {
   long getAdjacencyCacheSize();
 
   /**
+   * Resolves packed global ids to (segmentId, vectorId) pairs. Primarily for tests or
+   * administrative tooling; production code should generally avoid relying on physical
+   * locations because compaction can rewrite ids.
+   */
+  CompletableFuture<int[][]> resolveIds(long[] segmentVectorIds);
+
+  /**
    * Closes the index and stops any auto-started worker pools.
    *
    * <p>Does not drop data; it only releases resources tied to this instance.

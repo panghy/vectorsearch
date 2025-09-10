@@ -364,6 +364,34 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     return caches.getAdjacencyCache().estimatedSize();
   }
 
+  @Override
+  public CompletableFuture<int[][]> resolveIds(long[] segmentVectorIds) {
+    if (segmentVectorIds == null || segmentVectorIds.length == 0) return completedFuture(new int[0][0]);
+    Database db = config.getDatabase();
+    return db.readAsync(tr -> {
+      List<CompletableFuture<byte[]>> reads = new ArrayList<>(segmentVectorIds.length);
+      for (long gid : segmentVectorIds) {
+        byte[] k = indexDirs.gidMapDir().pack(Tuple.from(gid));
+        reads.add(tr.get(k));
+      }
+      return allOf(reads.toArray(CompletableFuture[]::new)).thenApply(v -> {
+        int[][] out = new int[segmentVectorIds.length][2];
+        for (int i = 0; i < segmentVectorIds.length; i++) {
+          byte[] b = reads.get(i).getNow(null);
+          if (b == null) {
+            out[i][0] = -1;
+            out[i][1] = -1;
+          } else {
+            Tuple t = Tuple.fromBytes(b);
+            out[i][0] = Math.toIntExact(t.getLong(0));
+            out[i][1] = Math.toIntExact(t.getLong(1));
+          }
+        }
+        return out;
+      });
+    });
+  }
+
   /**
    * Enqueues a compaction task for the given sealed segments. This is a skeleton operation for M7
    * that logs intent; future versions will merge segments and rewrite PQ/graph artifacts.

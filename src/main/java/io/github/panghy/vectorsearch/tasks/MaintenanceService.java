@@ -257,38 +257,59 @@ public final class MaintenanceService {
           }));
 
       return reserve.thenCompose(newSegId -> {
-        // 2) Read all vectors from source segments
+        // 2) Read all vectors from source segments and their global ids
         return db.readAsync(tr -> {
-              java.util.List<CompletableFuture<java.util.List<KeyValue>>> reads =
-                  new java.util.ArrayList<>();
+              java.util.List<float[]> vectors = new java.util.ArrayList<>();
+              java.util.List<byte[]> payloads = new java.util.ArrayList<>();
+              java.util.List<Long> gids = new java.util.ArrayList<>();
+              java.util.List<int[]> srcPairs = new java.util.ArrayList<>();
+              java.util.List<CompletableFuture<Void>> perSeg = new java.util.ArrayList<>();
               for (int sid : segIds) {
-                reads.add(indexDirs.segmentKeys(tr, sid).thenCompose(sk2 -> tr.getRange(
-                        sk2.vectorsDir().range())
-                    .asList()));
+                perSeg.add(indexDirs.segmentKeys(tr, sid).thenCompose(sk2 -> tr.getRange(sk2.vectorsDir().range()).asList())
+                    .thenCompose(kvs -> {
+                      java.util.List<CompletableFuture<Void>> inner = new java.util.ArrayList<>();
+                      for (KeyValue kv : kvs) {
+                        int vecId = (int) sk2.vectorsDir().unpack(kv.getKey()).getLong(0);
+                        inner.add(tr.get(kv.getKey()).thenCompose(vb -> tr.get(indexDirs.gidRevDir()
+                                .pack(com.apple.foundationdb.tuple.Tuple.from(sid, vecId)))
+                            .thenApply(gb -> new java.util.AbstractMap.SimpleEntry<>(vb, gb))
+                            .thenApply(entry -> {
+                              byte[] vbytes = entry.getKey();
+                              byte[] gbytes = entry.getValue();
+                              try {
+                                VectorRecord rec = VectorRecord.parseFrom(vbytes);
+                                if (rec.getDeleted()) return null;
+                                vectors.add(io.github.panghy.vectorsearch.util.FloatPacker
+                                    .bytesToFloats(rec.getEmbedding().toByteArray()));
+                                payloads.add(rec.getPayload().toByteArray());
+                                long gid = (gbytes == null)
+                                    ? -1L
+                                    : com.apple.foundationdb.tuple.Tuple.fromBytes(gbytes).getLong(0);
+                                gids.add(gid);
+                                srcPairs.add(new int[] {sid, vecId});
+                                return null;
+                              } catch (InvalidProtocolBufferException e) {
+                                throw new RuntimeException(e);
+                              }
+                            }));
+                      }
+                      return java.util.concurrent.CompletableFuture.allOf(inner.toArray(CompletableFuture[]::new))
+                          .thenApply(x -> null);
+                    }));
               }
-              return java.util.concurrent.CompletableFuture.allOf(reads.toArray(CompletableFuture[]::new))
-                  .thenApply(v -> {
-                    java.util.List<KeyValue> all = new java.util.ArrayList<>();
-                    for (var f : reads) all.addAll(f.getNow(java.util.List.of()));
-                    return all;
-                  });
+              return java.util.concurrent.CompletableFuture.allOf(perSeg.toArray(CompletableFuture[]::new))
+                  .thenApply(x -> new java.util.AbstractMap.SimpleEntry<>(
+                      vectors,
+                      new java.util.AbstractMap.SimpleEntry<>(
+                          payloads, new java.util.AbstractMap.SimpleEntry<>(gids, srcPairs))));
             })
-            .thenCompose(kvs -> {
+            .thenCompose(bundle -> {
+              var vectors = bundle.getKey();
+              var payloads = bundle.getValue().getKey();
+              var gids = bundle.getValue().getValue().getKey();
+              var srcPairs = bundle.getValue().getValue().getValue();
               // 3) Write combined vectors into new segment in batches
               final int batchSize = 1000;
-              java.util.List<float[]> vectors = new java.util.ArrayList<>(kvs.size());
-              java.util.List<byte[]> payloads = new java.util.ArrayList<>(kvs.size());
-              for (KeyValue kv : kvs) {
-                try {
-                  VectorRecord rec = VectorRecord.parseFrom(kv.getValue());
-                  if (rec.getDeleted()) continue;
-                  vectors.add(io.github.panghy.vectorsearch.util.FloatPacker.bytesToFloats(
-                      rec.getEmbedding().toByteArray()));
-                  payloads.add(rec.getPayload().toByteArray());
-                } catch (InvalidProtocolBufferException e) {
-                  throw new RuntimeException(e);
-                }
-              }
               java.util.concurrent.CompletableFuture<Void> w = completedFuture(null);
               for (int i = 0; i < vectors.size(); i += batchSize) {
                 final int start = i;
@@ -309,6 +330,20 @@ public final class MaintenanceService {
                                 payloads.get(j)))
                             .build();
                         tr.set(sk.vectorKey(vecId), rec.toByteArray());
+                        // Update gid mappings to keep global ids stable
+                        long gid = gids.get(j);
+                        if (gid >= 0) {
+                          byte[] mapK = indexDirs.gidMapDir().pack(
+                              com.apple.foundationdb.tuple.Tuple.from(gid));
+                          tr.set(mapK, com.apple.foundationdb.tuple.Tuple.from(newSegId, vecId).pack());
+                          int[] src = srcPairs.get(j);
+                          byte[] oldRev = indexDirs.gidRevDir().pack(
+                              com.apple.foundationdb.tuple.Tuple.from(src[0], src[1]));
+                          tr.clear(oldRev);
+                          byte[] newRev = indexDirs.gidRevDir().pack(
+                              com.apple.foundationdb.tuple.Tuple.from(newSegId, vecId));
+                          tr.set(newRev, com.apple.foundationdb.tuple.Tuple.from(gid).pack());
+                        }
                       }
                       // Update meta with running count while WRITING; remains invisible to
                       // queries

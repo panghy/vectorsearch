@@ -46,11 +46,15 @@ public final class FdbDirectories {
     private final DirectorySubspace segmentsDir;
     private final DirectorySubspace tasksDir;
     private final DirectorySubspace segmentsIndexDir;
+    private final DirectorySubspace gidDir;
+    private final DirectorySubspace gidMapDir;
+    private final DirectorySubspace gidRevDir;
 
     // Memoized single-value keys
     private final byte[] metaKeyMemo;
     private final byte[] currentSegKeyMemo;
     private final byte[] maxSegKeyMemo;
+    private final byte[] nextGidKeyMemo;
 
     // Per-segment async memoization
     private final Map<Integer, CompletableFuture<SegmentKeys>> segCache = new ConcurrentHashMap<>();
@@ -67,14 +71,21 @@ public final class FdbDirectories {
         DirectorySubspace indexDir,
         DirectorySubspace segmentsDir,
         DirectorySubspace tasksDir,
-        DirectorySubspace segmentsIndexDir) {
+        DirectorySubspace segmentsIndexDir,
+        DirectorySubspace gidDir,
+        DirectorySubspace gidMapDir,
+        DirectorySubspace gidRevDir) {
       this.indexDir = indexDir;
       this.segmentsDir = segmentsDir;
       this.tasksDir = tasksDir;
       this.segmentsIndexDir = segmentsIndexDir;
+      this.gidDir = gidDir;
+      this.gidMapDir = gidMapDir;
+      this.gidRevDir = gidRevDir;
       this.metaKeyMemo = indexDir.pack(Tuple.from(FdbPathUtil.META));
       this.currentSegKeyMemo = indexDir.pack(Tuple.from(FdbPathUtil.CURRENT_SEGMENT));
       this.maxSegKeyMemo = indexDir.pack(Tuple.from(FdbPathUtil.MAX_SEGMENT));
+      this.nextGidKeyMemo = indexDir.pack(Tuple.from("nextGid"));
     }
 
     // Accessors (mirroring the previous record API for minimal churn)
@@ -94,6 +105,18 @@ public final class FdbDirectories {
       return segmentsIndexDir;
     }
 
+    public DirectorySubspace gidDir() {
+      return gidDir;
+    }
+
+    public DirectorySubspace gidMapDir() {
+      return gidMapDir;
+    }
+
+    public DirectorySubspace gidRevDir() {
+      return gidRevDir;
+    }
+
     /** Key for index-level metadata (single value). */
     public byte[] metaKey() {
       return metaKeyMemo;
@@ -107,6 +130,10 @@ public final class FdbDirectories {
     /** Key for the maximum known segment id (single value, monotonic). */
     public byte[] maxSegmentKey() {
       return maxSegKeyMemo;
+    }
+    /** Key for the next global id counter (Tuple-packed long). */
+    public byte[] nextGidKey() {
+      return nextGidKeyMemo;
     }
 
     /** Registry key to mark a segment as existent (under segmentsIndexDir). */
@@ -266,8 +293,17 @@ public final class FdbDirectories {
     CompletableFuture<DirectorySubspace> tasksDirF = indexDir.createOrOpen(ctx, List.of(FdbPathUtil.TASKS));
     CompletableFuture<DirectorySubspace> segmentsIndexF =
         indexDir.createOrOpen(ctx, List.of(FdbPathUtil.SEGMENTS_INDEX));
-    return CompletableFuture.allOf(segmentsDirF, tasksDirF, segmentsIndexF)
-        .thenApply(v ->
-            new IndexDirectories(indexDir, segmentsDirF.join(), tasksDirF.join(), segmentsIndexF.join()));
+    CompletableFuture<DirectorySubspace> gidDirF = indexDir.createOrOpen(ctx, List.of("gid"));
+    CompletableFuture<DirectorySubspace> gidMapF = gidDirF.thenCompose(g -> g.createOrOpen(ctx, List.of("map")));
+    CompletableFuture<DirectorySubspace> gidRevF = gidDirF.thenCompose(g -> g.createOrOpen(ctx, List.of("rev")));
+    return CompletableFuture.allOf(segmentsDirF, tasksDirF, segmentsIndexF, gidDirF, gidMapF, gidRevF)
+        .thenApply(v -> new IndexDirectories(
+            indexDir,
+            segmentsDirF.join(),
+            tasksDirF.join(),
+            segmentsIndexF.join(),
+            gidDirF.join(),
+            gidMapF.join(),
+            gidRevF.join()));
   }
 }
