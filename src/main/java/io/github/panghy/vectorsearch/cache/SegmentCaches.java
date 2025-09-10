@@ -1,7 +1,5 @@
 package io.github.panghy.vectorsearch.cache;
 
-import static java.util.concurrent.CompletableFuture.completedFuture;
-
 import com.apple.foundationdb.Database;
 import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
@@ -43,8 +41,9 @@ public final class SegmentCaches {
         .buildAsync(new AsyncCacheLoader<>() {
           @Override
           public CompletableFuture<float[][][]> asyncLoad(Integer segId, Executor ex) {
-            return db.readAsync(tr -> tr.get(dirs.segmentKeys(segId).pqCodebookKey()))
-                .thenApply(bytes -> bytes == null ? null : decodeCodebook(bytes));
+            return db.readAsync(
+                    tr -> dirs.segmentKeys(tr, segId).thenCompose(sk -> tr.get(sk.pqCodebookKey())))
+                .thenApply((byte[] bytes) -> bytes == null ? null : decodeCodebook(bytes));
           }
 
           @Override
@@ -54,19 +53,27 @@ public final class SegmentCaches {
             List<CompletableFuture<Map<Integer, float[][][]>>> fs = new ArrayList<>();
             for (Set<? extends Integer> part : parts) {
               fs.add(db.readAsync(tr -> {
-                Map<Integer, float[][][]> out = new HashMap<>();
+                List<CompletableFuture<byte[]>> reads = new ArrayList<>(part.size());
+                List<Integer> ids = new ArrayList<>(part.size());
                 for (Integer sid : part) {
-                  byte[] b = tr.get(dirs.segmentKeys(sid).pqCodebookKey())
-                      .join();
-                  if (b != null) out.put(sid, decodeCodebook(b));
+                  reads.add(dirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.pqCodebookKey())));
+                  ids.add(sid);
                 }
-                return completedFuture(out);
+                return CompletableFuture.allOf(reads.toArray(CompletableFuture[]::new))
+                    .thenApply(v -> {
+                      Map<Integer, float[][][]> out = new HashMap<>(part.size());
+                      for (int i = 0; i < ids.size(); i++) {
+                        byte[] b = reads.get(i).getNow(null);
+                        if (b != null) out.put(ids.get(i), decodeCodebook(b));
+                      }
+                      return out;
+                    });
               }));
             }
             return CompletableFuture.allOf(fs.toArray(CompletableFuture[]::new))
                 .thenApply(v -> {
                   Map<Integer, float[][][]> merged = new HashMap<>(keys.size());
-                  for (var f : fs) merged.putAll(f.join());
+                  for (var f : fs) merged.putAll(f.getNow(Map.of()));
                   return merged;
                 });
           }
@@ -80,7 +87,8 @@ public final class SegmentCaches {
           public CompletableFuture<int[]> asyncLoad(Long key, Executor ex) {
             int segId = (int) (key >> 32);
             int vecId = (int) (key & 0xffffffffL);
-            return db.readAsync(tr -> tr.get(dirs.segmentKeys(segId).graphKey(vecId)))
+            return db.readAsync(
+                    tr -> dirs.segmentKeys(tr, segId).thenCompose(sk -> tr.get(sk.graphKey(vecId))))
                 .thenApply(SegmentCaches::toAdj);
           }
 
@@ -91,21 +99,29 @@ public final class SegmentCaches {
             List<CompletableFuture<Map<Long, int[]>>> fs = new ArrayList<>(parts.size());
             for (Set<? extends Long> part : parts) {
               fs.add(db.readAsync(tr -> {
-                Map<Long, int[]> out = new HashMap<>(part.size());
-                for (Long key : part) {
-                  int segId = (int) (key >> 32);
-                  int vecId = (int) (key & 0xffffffffL);
-                  byte[] b = tr.get(dirs.segmentKeys(segId).graphKey(vecId))
-                      .join();
-                  out.put(key, toAdj(b));
+                List<CompletableFuture<byte[]>> reads = new ArrayList<>(part.size());
+                List<Long> keysList = new ArrayList<>(part);
+                for (Long k : keysList) {
+                  int sid = (int) (k >> 32);
+                  int vid = (int) (k & 0xffffffffL);
+                  reads.add(dirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.graphKey(vid))));
                 }
-                return completedFuture(out);
+                return CompletableFuture.allOf(reads.toArray(CompletableFuture[]::new))
+                    .thenApply(v -> {
+                      Map<Long, int[]> out = new HashMap<>(part.size());
+                      for (int i = 0; i < keysList.size(); i++) {
+                        out.put(
+                            keysList.get(i),
+                            toAdj(reads.get(i).getNow(null)));
+                      }
+                      return out;
+                    });
               }));
             }
             return CompletableFuture.allOf(fs.toArray(CompletableFuture[]::new))
                 .thenApply(v -> {
                   Map<Long, int[]> merged = new HashMap<>(keys.size());
-                  for (var f : fs) merged.putAll(f.join());
+                  for (var f : fs) merged.putAll(f.getNow(Map.of()));
                   return merged;
                 });
           }
@@ -118,23 +134,9 @@ public final class SegmentCaches {
     this.adjacency = adjacency;
   }
 
-  public AsyncLoadingCache<Integer, float[][][]> getCodebookCacheAsync() {
-    return codebooks;
-  }
-
-  public AsyncLoadingCache<Long, int[]> getAdjacencyCacheAsync() {
-    return adjacency;
-  }
-
-  public Cache<Long, int[]> getAdjacencyCache() {
-    return adjacency.synchronous();
-  }
-
   public static long adjKey(int segId, int vecId) {
     return (((long) segId) << 32) | (vecId & 0xffffffffL);
   }
-
-  // segId stored directly in tuple keys
 
   private static float[][][] decodeCodebook(byte[] bytes) {
     try {
@@ -159,7 +161,52 @@ public final class SegmentCaches {
     }
   }
 
-  /** Registers OTel observable gauges for cache sizes and statistics. */
+  private static Attributes buildAttrs(VectorIndexConfig cfg) {
+    AttributesBuilder b = Attributes.builder();
+    for (var e : cfg.getMetricAttributes().entrySet()) b.put(e.getKey(), e.getValue());
+    return b.build();
+  }
+
+  private static int[] toAdj(byte[] bytes) {
+    if (bytes == null) return new int[0];
+    try {
+      Adjacency adj = Adjacency.parseFrom(bytes);
+      int[] arr = new int[adj.getNeighborIdsCount()];
+      for (int i = 0; i < arr.length; i++) arr[i] = adj.getNeighborIds(i);
+      return arr;
+    } catch (InvalidProtocolBufferException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  // segId stored directly in tuple keys
+
+  private static <T> List<Set<? extends T>> chunk(Set<? extends T> keys, int size) {
+    List<Set<? extends T>> out = new ArrayList<>();
+    Iterator<? extends T> it = keys.iterator();
+    while (it.hasNext()) {
+      Set<T> part = new HashSet<>();
+      for (int i = 0; i < size && it.hasNext(); i++) part.add((T) it.next());
+      out.add(part);
+    }
+    return out;
+  }
+
+  public AsyncLoadingCache<Integer, float[][][]> getCodebookCacheAsync() {
+    return codebooks;
+  }
+
+  public AsyncLoadingCache<Long, int[]> getAdjacencyCacheAsync() {
+    return adjacency;
+  }
+
+  public Cache<Long, int[]> getAdjacencyCache() {
+    return adjacency.synchronous();
+  }
+
+  /**
+   * Registers OTel observable gauges for cache sizes and statistics.
+   */
   public void registerMetrics(VectorIndexConfig cfg) {
     Meter meter = GlobalOpenTelemetry.getMeter("io.github.panghy.vectorsearch");
     Attributes base = buildAttrs(cfg);
@@ -220,34 +267,5 @@ public final class SegmentCaches {
         .buildWithCallback(obs -> obs.record(
             adjacency.synchronous().stats().loadFailureCount(),
             base.toBuilder().put("cache", "adjacency").build()));
-  }
-
-  private static Attributes buildAttrs(VectorIndexConfig cfg) {
-    AttributesBuilder b = Attributes.builder();
-    for (var e : cfg.getMetricAttributes().entrySet()) b.put(e.getKey(), e.getValue());
-    return b.build();
-  }
-
-  private static int[] toAdj(byte[] bytes) {
-    if (bytes == null) return new int[0];
-    try {
-      Adjacency adj = Adjacency.parseFrom(bytes);
-      int[] arr = new int[adj.getNeighborIdsCount()];
-      for (int i = 0; i < arr.length; i++) arr[i] = adj.getNeighborIds(i);
-      return arr;
-    } catch (InvalidProtocolBufferException e) {
-      throw new RuntimeException(e);
-    }
-  }
-
-  private static <T> List<Set<? extends T>> chunk(Set<? extends T> keys, int size) {
-    List<Set<? extends T>> out = new ArrayList<>();
-    Iterator<? extends T> it = keys.iterator();
-    while (it.hasNext()) {
-      Set<T> part = new HashSet<>();
-      for (int i = 0; i < size && it.hasNext(); i++) part.add((T) it.next());
-      out.add(part);
-    }
-    return out;
   }
 }

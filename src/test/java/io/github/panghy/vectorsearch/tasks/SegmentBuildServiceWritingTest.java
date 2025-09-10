@@ -65,16 +65,22 @@ public class SegmentBuildServiceWritingTest {
           .setState(SegmentMeta.State.WRITING)
           .setCount(2)
           .build();
-      tr.set(dirs.segmentKeys(segId).metaKey(), sm.toByteArray());
-      for (int i = 0; i < 2; i++) {
-        VectorRecord rec = VectorRecord.newBuilder()
-            .setSegId(segId)
-            .setVecId(i)
-            .setEmbedding(ByteString.copyFrom(
-                io.github.panghy.vectorsearch.util.FloatPacker.floatsToBytes(new float[] {i, 0, 0, 0})))
-            .setDeleted(false)
-            .build();
-        tr.set(dirs.segmentKeys(segId).vectorKey(i), rec.toByteArray());
+      try {
+        var sk = dirs.segmentKeys(tr, segId).get();
+        tr.set(sk.metaKey(), sm.toByteArray());
+        for (int i = 0; i < 2; i++) {
+          VectorRecord rec = VectorRecord.newBuilder()
+              .setSegId(segId)
+              .setVecId(i)
+              .setEmbedding(
+                  ByteString.copyFrom(io.github.panghy.vectorsearch.util.FloatPacker.floatsToBytes(
+                      new float[] {i, 0, 0, 0})))
+              .setDeleted(false)
+              .build();
+          tr.set(sk.vectorKey(i), rec.toByteArray());
+        }
+      } catch (Exception e) {
+        throw new RuntimeException(e);
       }
       // Ensure registry has the segment
       tr.set(dirs.segmentsIndexKey(segId), new byte[0]);
@@ -82,19 +88,25 @@ public class SegmentBuildServiceWritingTest {
     });
 
     new SegmentBuildService(cfg, dirs).build(segId).get(10, TimeUnit.SECONDS);
+    // Sanity: vectors subspace can be opened via DirectoryLayer
+    db.readAsync(tr -> dirs.segmentKeys(tr, segId)
+            .thenCompose(
+                sk2 -> tr.getRange(sk2.vectorsDir().range()).asList()))
+        .get(5, TimeUnit.SECONDS);
 
-    SegmentMeta after = db.readAsync(tr -> tr.get(dirs.segmentKeys(segId).metaKey()))
-        .thenApply(b -> {
-          try {
-            return SegmentMeta.parseFrom(b);
-          } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-            throw new RuntimeException(e);
-          }
-        })
+    SegmentMeta after = db.runAsync(tr -> dirs.segmentKeys(tr, segId)
+            .thenCompose(sk -> tr.get(sk.metaKey()))
+            .thenApply((byte[] b) -> {
+              try {
+                return SegmentMeta.parseFrom(b);
+              } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                throw new RuntimeException(e);
+              }
+            }))
         .get(5, TimeUnit.SECONDS);
     assertThat(after.getState()).isEqualTo(SegmentMeta.State.SEALED);
     // PQ codebook should exist
-    byte[] cb = db.readAsync(tr -> tr.get(dirs.segmentKeys(segId).pqCodebookKey()))
+    byte[] cb = db.readAsync(tr -> dirs.segmentKeys(tr, segId).thenCompose(sk -> tr.get(sk.pqCodebookKey())))
         .get(5, TimeUnit.SECONDS);
     assertThat(cb).isNotNull();
   }

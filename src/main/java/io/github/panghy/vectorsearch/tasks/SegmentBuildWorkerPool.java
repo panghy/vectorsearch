@@ -61,14 +61,11 @@ public final class SegmentBuildWorkerPool implements AutoCloseable {
     running.set(false);
     LOG.debug("SegmentBuildWorkerPool stopping; signaling {} sentinel(s)", threadCount);
     // Enqueue sentinel tasks to wake up blocked workers so they can exit.
-    try {
-      for (int i = 0; i < threadCount; i++) {
-        String key = "build-segment:-1:shutdown:" + i + ":" + System.nanoTime();
-        var task = BuildTask.newBuilder().setSegId(-1).build();
-        taskQueue.enqueueIfNotExists(key, task).join();
-      }
-    } catch (Throwable ignored) {
-      // best effort
+    // Best-effort async sentinel enqueue; no blocking join
+    for (int i = 0; i < threadCount; i++) {
+      String key = "build-segment:-1:shutdown:" + i + ":" + System.nanoTime();
+      var task = BuildTask.newBuilder().setSegId(-1).build();
+      taskQueue.enqueueIfNotExists(key, task).exceptionally(ex -> null);
     }
     // let whileTrue loops observe running=false and exit after sentinel wakes them
     loops.clear();

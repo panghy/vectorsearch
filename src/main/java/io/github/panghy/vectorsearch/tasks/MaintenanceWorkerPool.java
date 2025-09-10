@@ -59,16 +59,12 @@ public final class MaintenanceWorkerPool implements AutoCloseable {
     running.set(false);
     LOG.debug("MaintenanceWorkerPool stopping; signaling {} sentinel(s)", threadCount);
     // Enqueue a no-op task as sentinel (vacuum with seg_id < 0) to wake workers
-    try {
-      for (int i = 0; i < threadCount; i++) {
-        String key = "vacuum-segment:-1:shutdown:" + i + ":" + System.nanoTime();
-        MaintenanceTask mt = MaintenanceTask.newBuilder()
-            .setVacuum(
-                MaintenanceTask.Vacuum.newBuilder().setSegId(-1).build())
-            .build();
-        queue.enqueueIfNotExists(key, mt).join();
-      }
-    } catch (Throwable ignored) {
+    for (int i = 0; i < threadCount; i++) {
+      String key = "vacuum-segment:-1:shutdown:" + i + ":" + System.nanoTime();
+      MaintenanceTask mt = MaintenanceTask.newBuilder()
+          .setVacuum(MaintenanceTask.Vacuum.newBuilder().setSegId(-1).build())
+          .build();
+      queue.enqueueIfNotExists(key, mt).exceptionally(ex -> null);
     }
     loops.clear();
   }

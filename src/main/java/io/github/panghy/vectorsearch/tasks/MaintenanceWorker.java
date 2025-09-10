@@ -60,39 +60,69 @@ public final class MaintenanceWorker {
               if (cands.size() <= 1) return completedFuture(null);
               // Atomically mark candidates as COMPACTING to avoid overlaps
               return db.runAsync(tr -> {
+                    // First validate all candidates are SEALED
+                    java.util.List<java.util.concurrent.CompletableFuture<byte[]>> metas =
+                        new java.util.ArrayList<>();
                     for (int sid : cands) {
-                      byte[] mk =
-                          indexDirs.segmentKeys(sid).metaKey();
-                      byte[] mb = tr.get(mk).join();
-                      if (mb == null) return completedFuture(false);
-                      try {
-                        var sm = io.github.panghy.vectorsearch.proto.SegmentMeta.parseFrom(mb);
-                        if (sm.getState()
-                            != io.github.panghy.vectorsearch.proto.SegmentMeta.State
-                                .SEALED) {
-                          return completedFuture(false);
-                        }
-                      } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-                        throw new RuntimeException(e);
-                      }
+                      metas.add(indexDirs
+                          .segmentKeys(tr, sid)
+                          .thenCompose(sk -> tr.get(sk.metaKey())));
                     }
-                    for (int sid : cands) {
-                      byte[] mk =
-                          indexDirs.segmentKeys(sid).metaKey();
-                      try {
-                        var sm = io.github.panghy.vectorsearch.proto.SegmentMeta.parseFrom(
-                            tr.get(mk).join());
-                        var updated = sm.toBuilder()
-                            .setState(
-                                io.github.panghy.vectorsearch.proto.SegmentMeta.State
-                                    .COMPACTING)
-                            .build();
-                        tr.set(mk, updated.toByteArray());
-                      } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-                        throw new RuntimeException(e);
-                      }
-                    }
-                    return completedFuture(true);
+                    return java.util.concurrent.CompletableFuture.allOf(
+                            metas.toArray(java.util.concurrent.CompletableFuture[]::new))
+                        .thenCompose(v2 -> {
+                          for (var mbF : metas) {
+                            byte[] mb = mbF.getNow(null);
+                            if (mb == null) return completedFuture(false);
+                            try {
+                              var sm = io.github.panghy.vectorsearch.proto.SegmentMeta
+                                  .parseFrom(mb);
+                              if (sm.getState()
+                                  != io.github.panghy.vectorsearch.proto.SegmentMeta
+                                      .State.SEALED) {
+                                return completedFuture(false);
+                              }
+                            } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                              throw new RuntimeException(e);
+                            }
+                          }
+                          // Now mark all as COMPACTING
+                          java.util.List<java.util.concurrent.CompletableFuture<Void>> sets =
+                              new java.util.ArrayList<>();
+                          for (int sid : cands) {
+                            sets.add(indexDirs
+                                .segmentKeys(tr, sid)
+                                .thenCompose(sk -> tr.get(sk.metaKey())
+                                    .thenApply(bytes -> {
+                                      try {
+                                        var sm = io.github.panghy.vectorsearch
+                                            .proto.SegmentMeta.parseFrom(
+                                            bytes);
+                                        var updated = sm.toBuilder()
+                                            .setState(
+                                                io.github.panghy
+                                                    .vectorsearch
+                                                    .proto
+                                                    .SegmentMeta
+                                                    .State
+                                                    .COMPACTING)
+                                            .build();
+                                        tr.set(
+                                            sk.metaKey(),
+                                            updated.toByteArray());
+                                        return null;
+                                      } catch (
+                                          com.google.protobuf
+                                                  .InvalidProtocolBufferException
+                                              e) {
+                                        throw new RuntimeException(e);
+                                      }
+                                    })));
+                          }
+                          return java.util.concurrent.CompletableFuture.allOf(sets.toArray(
+                                  java.util.concurrent.CompletableFuture[]::new))
+                              .thenApply(x -> true);
+                        });
                   })
                   .thenCompose(marked -> marked
                       ? FdbVectorIndex.createOrOpen(config)
