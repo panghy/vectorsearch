@@ -226,27 +226,31 @@ Guidance for Implementation: Below we outline how some operations can be impleme
 
 void insertVector(float[] vector, Metadata meta) {
 db.run(tx -> {
-int segId = tx.get(indexName, "currentSegment").toInteger();
-SegmentMeta segMeta = tx.get(indexName, "segment", segId, "meta").deserialize();
-int newVecId = segMeta.count;
-// Prepare VectorRecord proto
-VectorRecord rec = new VectorRecord(vector, meta, deleted=false);
-tx.set((indexName, "segment", segId, "vector", newVecId), rec.serialize());
-segMeta.count += 1;
-// Check if segment is now full
-if (segMeta.count >= MAX_SEGMENT_SIZE) {
-segMeta.state = PENDING;
-// Using per-segment DirectorySubspace
-tx.set(segments/<segId>/.pack(("meta")), segMeta.serialize());
-// Create new active segment
-int newSegId = segId + 1;  // or use a global counter
-SegmentMeta newSegMeta = new SegmentMeta(state=ACTIVE, count=0);
-tx.set((indexName, "segment", newSegId, "meta"), newSegMeta.serialize());
-tx.set((indexName, "currentSegment"), newSegId);
-} else {
-// Just update count
-tx.set((indexName, "segment", segId, "meta"), segMeta.serialize());
-}
+  int segId = decodeInt(tx.get(indexDir.pack(("currentSegment"))));
+  // Resolve per-segment subspaces
+  Dir segDir = segmentsDir.open(tx, List.of(String.valueOf(segId))); // conceptual
+  byte[] metaBytes = tx.get(segDir.pack(("meta")));
+  SegmentMeta segMeta = SegmentMeta.parse(metaBytes);
+  int newVecId = segMeta.getCount();
+  // Prepare VectorRecord proto and write
+  VectorRecord rec = new VectorRecord(vector, meta, false);
+  tx.set(segDir.sub("vectors").pack((newVecId)), rec.serialize());
+  segMeta = segMeta.toBuilder().setCount(newVecId + 1).build();
+
+  // Check if segment is now full
+  if (segMeta.getCount() >= MAX_SEGMENT_SIZE) {
+    // Mark current as PENDING
+    tx.set(segDir.pack(("meta")), segMeta.toBuilder().setState(PENDING).build().toByteArray());
+    // Create next ACTIVE segment (pre-create subspaces and meta)
+    int newSegId = segId + 1; // or allocate via maxSegmentKey
+    Dir next = segmentsDir.createOrOpen(tx, List.of(String.valueOf(newSegId)));
+    SegmentMeta nextMeta = SegmentMeta.newBuilder().setSegmentId(newSegId).setState(ACTIVE).setCount(0).build();
+    tx.set(next.pack(("meta")), nextMeta.toByteArray());
+    tx.set(indexDir.pack(("currentSegment")), encodeInt(newSegId));
+  } else {
+    // Just update count on current segment
+    tx.set(segDir.pack(("meta")), segMeta.toByteArray());
+  }
 }); // automatic retry on conflict
 // If segment became PENDING, trigger background index build for segId (e.g. add to a queue)
 }
