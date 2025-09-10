@@ -48,13 +48,13 @@ Notes:
 4) Background builders (PQ + graph) with chunked writes
 5) Search pipeline (SEALED graph + ACTIVE brute‑force) and re‑rank
 6) Caching & tuning
-7) Maintenance tasks (vacuum, compaction skeleton)
+7) Maintenance tasks (vacuum, compaction merge MVP)
 8) Observability & docs
 9) Tests, benchmarks, hardening
 
 ---
 
-## Status Snapshot (as of 2025-09-09)
+## Status Snapshot (as of 2025-09-10)
 
 - Completed:
   - M1 Protos + Directory scaffolding (vectorsearch.proto, FdbDirectories).
@@ -66,7 +66,7 @@ Notes:
   - M8 Observability: OpenTelemetry gauges registered for cache size and stats; configurable metric attributes; tests use InMemoryMetricReader.
   - M9 Hardening: consolidated tests, added edge-case coverage; JaCoCo gates (≥90% lines / ≥75% branches) passing.
 - Not Started / Next:
-  - M7 Compaction skeleton wiring (vacuum + delete API shipped); merge planner.
+  - M7 Compaction: improve candidate selection and throttling (planner heuristics, backpressure).
   - M8 Observability (index-level): add per-query latency histograms, SLOs.
   - M9 Benchmarks (micro + macro latency harness): JMH + macro harness.
 
@@ -187,14 +187,14 @@ Status:
 ## 7) Maintenance Tasks
 
 - Tombstone vacuum: scan `vectorsDir` for deleted records; schedule in `tasks/` as `vacuum:<segId>`.
-- Compaction/merge (skeleton): read multiple small `segments/` and produce a consolidated segment; schedule via TaskQueue.
+- Compaction/merge (MVP implemented): read multiple small SEALED `segments/`, produce a consolidated WRITING segment, build PQ/graph, seal, and atomically swap into `segmentsIndex` while removing sources; scheduled via TaskQueue.
 
 Deliverables:
 - Vacuum job; compaction skeleton (optional for v1), both using DirectorySubspaces.
 
 Status:
 - Vacuum job shipped (tombstoned vectors physically removed; `deleted_count` decremented; `last_vacuum_at_ms` stamped). Cooldown-aware enqueueing after deletes based on configurable threshold.
-- Compaction/merge: skeleton next; see Path to 1B+ for plan.
+- Compaction/merge MVP shipped: `MaintenanceService.compactSegments(...)` writes a destination WRITING segment, invokes `SegmentBuildService.build(...)`, then swaps registry entries and cleans up sources. A simple heuristic (`findCompactionCandidates`) enqueues compaction when a segment falls below 50% capacity post‑vacuum. Future work: richer planner, throttling, and backpressure.
 
 ## 10) Path to 1B+ vectors (prioritized)
 
@@ -204,9 +204,8 @@ This section outlines the additional work needed to comfortably scale to billion
 - Implemented: a compact `segmentsIndex/<segId>` range under the index root. All queries list segments from this registry; no legacy fallback scans. A monotonic `maxSegmentId` is still maintained for rotation bookkeeping.
 
 2) Compaction/merge planner (sealed→sealed)
-- Merge many small sealed segments into larger targets to reduce per-segment overhead and search fan-out.
-- Minimal viable approach: offline read N sealed segments, produce a new sealed segment (reassign vecIds, rebuild PQ/graph), atomically swap into the registry.
-- Constraints: chunked writes, idempotency, backpressure and throttling. Keep adjacency/codebooks block-aligned for sequential I/O.
+- MVP implemented: read several SEALED segments, write WRITING destination, build PQ/graph, seal, and atomically swap via `segmentsIndex`; sources cleared.
+- Next: add planner heuristics (size/age aware), throttle concurrent compactions, and improve backpressure. Keep adjacency/codebooks block‑aligned.
 
 3) Graph construction quality (DiskANN/Vamana)
 - Add alpha/pruning and better candidate pool management to the builder; tune `graphDegree` and build breadth.
