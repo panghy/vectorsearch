@@ -9,6 +9,7 @@ import com.apple.foundationdb.KeyValue;
 import com.apple.foundationdb.Range;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.subspace.Subspace;
+import com.apple.foundationdb.tuple.ByteArrayUtil;
 import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.taskqueue.TaskQueue;
@@ -33,6 +34,7 @@ import io.github.panghy.vectorsearch.util.FloatPacker;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.Meter;
+import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -81,11 +83,13 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
 
   // Creates or opens the index asynchronously and returns a ready VectorIndex.
   public static CompletableFuture<FdbVectorIndex> createOrOpen(VectorIndexConfig config) {
-    return FdbDirectories.openIndex(config.getIndexDir(), config.getDatabase())
+    Database db = config.getDatabase();
+    return FdbDirectories.openIndex(config.getIndexDir(), db)
         .thenCompose(dirs -> createBuildQueue(config, dirs).thenCompose(buildQ -> {
           FdbVectorStore store = new FdbVectorStore(config, dirs, buildQ);
-          return store.createOrOpenIndex()
-              .thenCompose($ -> createMaintenanceQueue(config, dirs))
+          CompletableFuture<Void> init =
+              store.createOrOpenIndex().thenCompose(v -> ensureCurrentSubspaces(config, dirs));
+          return init.thenCompose(v -> createMaintenanceQueue(config, dirs))
               .thenApply(maintQ -> {
                 FdbVectorIndex ix = new FdbVectorIndex(config, store, dirs);
                 ix.buildQueue = buildQ;
@@ -105,6 +109,15 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                 return ix;
               });
         }));
+  }
+
+  private static CompletableFuture<Void> ensureCurrentSubspaces(
+      VectorIndexConfig config, FdbDirectories.IndexDirectories dirs) {
+    Database db = config.getDatabase();
+    return db.runAsync(tr -> tr.get(dirs.currentSegmentKey()).thenCompose(cur -> {
+      int sid = cur == null ? 0 : Math.toIntExact(ByteArrayUtil.decodeInt(cur));
+      return dirs.segmentKeys(tr, sid).thenApply(sk -> null);
+    }));
   }
 
   private static CompletableFuture<TaskQueue<String, BuildTask>> createBuildQueue(
@@ -224,17 +237,20 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
       CompletableFuture<?> prefetch = !config.isPrefetchCodebooksEnabled()
           ? completedFuture(null)
           : db.readAsync(tr -> {
-                List<CompletableFuture<byte[]>> gets = new ArrayList<>();
+                List<CompletableFuture<byte[]>> keyFs = new ArrayList<>();
                 List<Integer> ids = new ArrayList<>();
                 for (int segId : segIds) {
-                  gets.add(tr.get(indexDirs.segmentKeys(segId).metaKey()));
+                  keyFs.add(indexDirs
+                      .segmentKeys(tr, segId)
+                      .thenCompose(sk -> tr.get(sk.metaKey()))
+                      .exceptionally(ex -> null));
                   ids.add(segId);
                 }
-                return allOf(gets.toArray(CompletableFuture[]::new))
+                return allOf(keyFs.toArray(CompletableFuture[]::new))
                     .thenApply(v -> {
                       Set<Integer> sealedSegs = new HashSet<>();
                       for (int i = 0; i < ids.size(); i++) {
-                        byte[] b = gets.get(i).join();
+                        byte[] b = keyFs.get(i).getNow(null);
                         if (b == null) continue;
                         try {
                           SegmentMeta sm = SegmentMeta.parseFrom(b);
@@ -275,7 +291,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         }
         return allOf(perSeg.toArray(CompletableFuture[]::new)).thenApply(v -> {
           List<SearchResult> merged = new ArrayList<>();
-          for (CompletableFuture<List<SearchResult>> f : perSeg) merged.addAll(f.join());
+          for (CompletableFuture<List<SearchResult>> f : perSeg) merged.addAll(f.getNow(List.of()));
           merged.sort(Comparator.comparingDouble(SearchResult::score)
               .reversed()
               .thenComparingInt(SearchResult::vectorId));
@@ -345,8 +361,10 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     double thr = config.getVacuumMinDeletedRatio();
     List<CompletableFuture<Void>> fs = new ArrayList<>();
     for (int segId : segIds) {
-      fs.add(db.runAsync(
-          tr -> tr.get(indexDirs.segmentKeys(segId).metaKey()).thenCompose(bytes -> {
+      fs.add(db.runAsync(tr -> indexDirs
+          .segmentKeys(tr, segId)
+          .thenCompose(sk -> tr.get(sk.metaKey()))
+          .thenCompose(bytes -> {
             if (bytes == null) return completedFuture(null);
             try {
               SegmentMeta sm = SegmentMeta.parseFrom(bytes);
@@ -390,38 +408,43 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     double thr = config.getVacuumMinDeletedRatio();
     List<CompletableFuture<Void>> fs = new ArrayList<>();
     for (int segId : segIds) {
-      fs.add(tx.get(indexDirs.segmentKeys(segId).metaKey()).thenCompose(bytes -> {
-        if (bytes == null) return completedFuture(null);
-        try {
-          SegmentMeta sm = SegmentMeta.parseFrom(bytes);
-          long live = sm.getCount();
-          long del = sm.getDeletedCount();
-          double ratio = (live + del) == 0 ? 0.0 : ((double) del) / ((double) (live + del));
-          if (ratio < thr) {
-            if (vacSkipped != null) vacSkipped.add(1);
-            return completedFuture(null);
-          }
-          long cdMs = Math.max(0, config.getVacuumCooldown().toMillis());
-          if (cdMs > 0 && sm.getLastVacuumAtMs() > 0) {
-            long now = config.getInstantSource().instant().toEpochMilli();
-            if (now - sm.getLastVacuumAtMs() < cdMs) {
-              if (vacSkipped != null) vacSkipped.add(1);
-              return completedFuture(null);
+      fs.add(indexDirs
+          .segmentKeys(tx, segId)
+          .thenCompose(sk -> tx.get(sk.metaKey()))
+          .thenCompose(bytes -> {
+            if (bytes == null) return completedFuture(null);
+            try {
+              SegmentMeta sm = SegmentMeta.parseFrom(bytes);
+              long live = sm.getCount();
+              long del = sm.getDeletedCount();
+              double ratio = (live + del) == 0 ? 0.0 : ((double) del) / ((double) (live + del));
+              if (ratio < thr) {
+                if (vacSkipped != null) vacSkipped.add(1);
+                return completedFuture(null);
+              }
+              long cdMs = Math.max(0, config.getVacuumCooldown().toMillis());
+              if (cdMs > 0 && sm.getLastVacuumAtMs() > 0) {
+                long now = config.getInstantSource().instant().toEpochMilli();
+                if (now - sm.getLastVacuumAtMs() < cdMs) {
+                  if (vacSkipped != null) vacSkipped.add(1);
+                  return completedFuture(null);
+                }
+              }
+              MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
+                  .setSegId(segId)
+                  .setMinDeletedRatio(thr)
+                  .build();
+              MaintenanceTask mt =
+                  MaintenanceTask.newBuilder().setVacuum(v).build();
+              String key = "vacuum-if-needed:" + segId;
+              if (vacScheduled != null) vacScheduled.add(1);
+              return maintenanceQueue
+                  .enqueueIfNotExists(tx, key, mt)
+                  .thenApply(x -> null);
+            } catch (InvalidProtocolBufferException e) {
+              throw new RuntimeException(e);
             }
-          }
-          MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
-              .setSegId(segId)
-              .setMinDeletedRatio(thr)
-              .build();
-          MaintenanceTask mt =
-              MaintenanceTask.newBuilder().setVacuum(v).build();
-          String key = "vacuum-if-needed:" + segId;
-          if (vacScheduled != null) vacScheduled.add(1);
-          return maintenanceQueue.enqueueIfNotExists(tx, key, mt).thenApply(x -> null);
-        } catch (InvalidProtocolBufferException e) {
-          throw new RuntimeException(e);
-        }
-      }));
+          }));
     }
     return allOf(fs.toArray(CompletableFuture[]::new)).thenApply(x -> null);
   }
@@ -449,23 +472,28 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    */
   private CompletableFuture<List<SearchResult>> searchSegment(
       Database db, FdbDirectories.IndexDirectories dirs, int segId, float[] q, int k, SearchParams params) {
-    return db.readAsync(tr -> tr.get(dirs.segmentKeys(segId).metaKey()).thenCompose(metaB -> {
-      if (metaB == null) return completedFuture(List.of());
-      try {
-        SegmentMeta sm = SegmentMeta.parseFrom(metaB);
-        LOG.debug("searchSegment segId={} state={} count={}", segId, sm.getState(), sm.getCount());
-        if (sm.getState() == SegmentMeta.State.SEALED || sm.getState() == SegmentMeta.State.COMPACTING) {
-          return searchSealedSegment(db, dirs, segId, q, k, params);
-        }
-        if (sm.getState() == SegmentMeta.State.WRITING) {
-          // Destination segment under construction: not visible to search
-          return completedFuture(List.of());
-        }
-        return searchBruteForceSegment(db, dirs, segId, q, k);
-      } catch (InvalidProtocolBufferException e) {
-        throw new RuntimeException(e);
-      }
-    }));
+    return db.readAsync(tr -> indexDirs.segmentMetaKey(tr, segId).thenCompose(mk -> tr.get(mk)))
+        .thenCompose(metaB -> {
+          if (metaB == null) {
+            LOG.debug("searchSegment segId={} meta missing; returning empty", segId);
+            return completedFuture(List.of());
+          }
+          try {
+            SegmentMeta sm = SegmentMeta.parseFrom(metaB);
+            LOG.debug("searchSegment segId={} state={} count={}", segId, sm.getState(), sm.getCount());
+            if (sm.getState() == SegmentMeta.State.SEALED
+                || sm.getState() == SegmentMeta.State.COMPACTING) {
+              return searchSealedSegment(db, dirs, segId, q, k, params);
+            }
+            if (sm.getState() == SegmentMeta.State.WRITING) {
+              // Destination segment under construction: not visible to search
+              return completedFuture(List.of());
+            }
+            return searchBruteForceSegment(db, dirs, segId, q, k);
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+        });
   }
 
   /**
@@ -473,52 +501,54 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    */
   private CompletableFuture<List<SearchResult>> searchBruteForceSegment(
       Database db, FdbDirectories.IndexDirectories dirs, int segId, float[] q, int k) {
-    Subspace vectorsPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segId, "vectors")));
-    Range vr = vectorsPrefix.range();
-    return db.readAsync(tr -> tr.getRange(vr).asList().thenApply(kvs -> {
-      LOG.debug("Brute-force segId={} loaded {} vector records", segId, kvs.size());
-      List<SearchResult> results = new ArrayList<>();
-      for (KeyValue kv : kvs) {
-        try {
-          VectorRecord rec = VectorRecord.parseFrom(kv.getValue());
-          if (rec.getDeleted()) continue;
-          float[] emb = FloatPacker.bytesToFloats(rec.getEmbedding().toByteArray());
-          double score;
-          double distance;
-          if (config.getMetric() == VectorIndexConfig.Metric.COSINE) {
-            double sim = Distances.cosine(q, emb);
-            score = sim;
-            distance = 1.0 - sim;
-          } else {
-            double d = Distances.l2(q, emb);
-            score = -d;
-            distance = d;
+    return db.readAsync(tr -> indexDirs
+        .segmentKeys(tr, segId)
+        .thenCompose(sk -> tr.getRange(sk.vectorsDir().range()).asList())
+        .thenApply(kvs -> {
+          LOG.debug("Brute-force segId={} loaded {} vector records", segId, kvs.size());
+          List<SearchResult> results = new ArrayList<>();
+          for (KeyValue kv : kvs) {
+            try {
+              VectorRecord rec = VectorRecord.parseFrom(kv.getValue());
+              if (rec.getDeleted()) continue;
+              float[] emb =
+                  FloatPacker.bytesToFloats(rec.getEmbedding().toByteArray());
+              double score;
+              double distance;
+              if (config.getMetric() == VectorIndexConfig.Metric.COSINE) {
+                double sim = Distances.cosine(q, emb);
+                score = sim;
+                distance = 1.0 - sim;
+              } else {
+                double d = Distances.l2(q, emb);
+                score = -d;
+                distance = d;
+              }
+              results.add(SearchResult.builder()
+                  .segmentId(segId)
+                  .vectorId(rec.getVecId())
+                  .score(score)
+                  .distance(distance)
+                  .payload(rec.getPayload().toByteArray())
+                  .build());
+            } catch (InvalidProtocolBufferException e) {
+              throw new RuntimeException(e);
+            }
           }
-          results.add(SearchResult.builder()
-              .segmentId(segId)
-              .vectorId(rec.getVecId())
-              .score(score)
-              .distance(distance)
-              .payload(rec.getPayload().toByteArray())
-              .build());
-        } catch (InvalidProtocolBufferException e) {
-          throw new RuntimeException(e);
-        }
-      }
-      results.sort(Comparator.comparingDouble(SearchResult::score).reversed());
-      if (!results.isEmpty()) {
-        int limit = Math.min(3, results.size());
-        LOG.debug(
-            "Brute-force segId={} top {}: {}",
-            segId,
-            limit,
-            results.subList(0, limit).stream()
-                .map(r -> String.format("(id=%d,score=%.4f)", r.vectorId(), r.score()))
-                .toList());
-      }
-      if (results.size() > k) return results.subList(0, k);
-      return results;
-    }));
+          results.sort(Comparator.comparingDouble(SearchResult::score).reversed());
+          if (!results.isEmpty()) {
+            int limit = Math.min(3, results.size());
+            LOG.debug(
+                "Brute-force segId={} top {}: {}",
+                segId,
+                limit,
+                results.subList(0, limit).stream()
+                    .map(r -> String.format("(id=%d,score=%.4f)", r.vectorId(), r.score()))
+                    .toList());
+          }
+          if (results.size() > k) return results.subList(0, k);
+          return results;
+        }));
   }
 
   /**
@@ -532,11 +562,14 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         return completedFuture(List.of());
       }
       double[][] lut = buildLut(centroids, q);
-      Subspace codesPrefix = new Subspace(dirs.segmentsDir().pack(Tuple.from(segId, "pq", "codes")));
-      Range cr = codesPrefix.range();
       return config.getDatabase()
-          .readAsync(tr -> tr.getRange(cr).asList())
-          .thenCompose(codeKvs -> {
+          .readAsync(tr -> indexDirs.segmentKeys(tr, segId).thenCompose(sk -> tr.getRange(
+                  sk.pqCodesDir().range())
+              .asList()
+              .thenApply(kvs -> new SimpleEntry<>(sk, kvs))))
+          .thenCompose(entry -> {
+            var sk = entry.getKey();
+            var codeKvs = entry.getValue();
             LOG.debug("Sealed segId={} has {} PQ code entries", segId, codeKvs.size());
             // Build approx distances for all codes and retain a map for quick lookup
             List<Approx> approxAll = new ArrayList<>();
@@ -545,7 +578,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
             int kCent = centroids[0].length;
             for (KeyValue kv : codeKvs) {
               int vecId =
-                  (int) dirs.segmentsDir().unpack(kv.getKey()).getLong(3);
+                  (int) sk.pqCodesDir().unpack(kv.getKey()).getLong(0);
               byte[] codes = kv.getValue();
               if (codes == null || codes.length < m) continue;
               codeMap.put(vecId, codes);
@@ -769,11 +802,10 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
       List<Approx> cand,
       int k) {
     LOG.debug("Exact rerank segId={} candidates={}", segId, cand.size());
-    return db.readAsync(tr -> {
+    return db.readAsync(tr -> indexDirs.segmentKeys(tr, segId).thenCompose(sk -> {
       List<CompletableFuture<VectorRecord>> recF = new ArrayList<>();
       for (Approx a : cand) {
-        byte[] key = dirs.segmentKeys(segId).vectorKey(a.vecId());
-        recF.add(tr.get(key).thenApply(v -> {
+        recF.add(tr.get(sk.vectorKey(a.vecId())).thenApply(v -> {
           if (v == null) return null;
           try {
             return VectorRecord.parseFrom(v);
@@ -785,7 +817,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
       return allOf(recF.toArray(CompletableFuture[]::new)).thenApply(v -> {
         List<SearchResult> out = new ArrayList<>();
         for (int i = 0; i < cand.size(); i++) {
-          VectorRecord rec = recF.get(i).join();
+          VectorRecord rec = recF.get(i).getNow(null);
           if (rec == null || rec.getDeleted()) continue;
           float[] emb = FloatPacker.bytesToFloats(rec.getEmbedding().toByteArray());
           double score;
@@ -829,7 +861,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         if (out.size() > k) return out.subList(0, k);
         return out;
       });
-    });
+    }));
   }
 
   private static double[][] buildLut(float[][][] centroids, float[] q) {
