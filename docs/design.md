@@ -18,14 +18,14 @@ Data Model and Key-Value Schema
 
 All data is stored in FoundationDB using a structured key design to group related information together. The index is divided into segments (each up to a fixed size, e.g. 100,000 vectors). Each segment has its own vector data, graph, and PQ compression metadata. The `maxSegmentSize` is a hard cap: once an ACTIVE segment's count reaches this threshold, the next insert rotates to a new ACTIVE segment before writing. The vector that triggers rotation is stored as `vecId=0` in the new segment, while the previous segment flips to PENDING in the same transaction and is later SEALED by the background builder.
 
-Key-Value Schema: We use a tuple-like key structure prefixed by an IndexID or name to support multiple indexes. Below is an example schema (using a hypothetical indexName as prefix):
-•	Index Metadata – Key: (indexName, "meta") → Value: Global index settings (serialized), e.g. {dimension: 1000, metric: "L2", maxSegmentSize: 100000, PQ_m: 16, PQ_k: 256, ...}. This includes the fixed vector dimension and metric chosen at index creation, as well as configurable parameters (see Configurability section).
-•	Current Segment Pointer – Key: (indexName, "currentSegment") → Value: ID of the current Active segment (e.g. an integer). This helps locate where new vectors should be inserted.
-•	Segment Metadata – Key: (indexName, "segment", <segId>, "meta") → Value: Metadata for segment <segId> (serialized proto). Contains fields like state (ACTIVE, PENDING, or SEALED), current count of vectors, perhaps creation timestamp, and statistics (e.g. deletion count). For SEALED segments it can include pointers to where graph and PQ data are stored.
-•	Vector Record – Key: (indexName, "segment", <segId>, "vector", <vecId>) → Value: Serialized VectorRecord containing the vector’s raw embedding and any associated metadata. This is stored as a Protocol Buffer that might include: the vector’s components (e.g. 1000-d, stored as float16 bytes), an optional external ID or payload, and a deletion tombstone flag. When a vector is inserted, it’s assigned a <vecId> within its segment (e.g. an incrementing integer from 0 up to ~100k).
-•	PQ Codebook – Key: (indexName, "segment", <segId>, "pq", "codebook") → Value: Serialized PQ codebook for segment <segId>. This includes the trained centroids for each sub-space. For example, if using M sub-vectors and K centroids per sub-vector, the codebook contains M sets of K centroids (each centroid is a vector of dimension dimension/M). This data is typically a few hundred KB and is stored once per sealed segment. (Hot codebooks will also be cached in memory via Caffeine for fast access.)
-•	PQ Compressed Codes – Key: (indexName, "segment", <segId>, "pq", "code", <vecId>) → Value: The PQ compressed code for vector <vecId> in segment <segId>. This is a short binary code (e.g. M bytes if using 256 centroids per sub-vector) representing the vector. Storing it separately allows querying the compressed vector without reading the full embedding. (Alternative design: the PQ code could be embedded in the VectorRecord after the segment is sealed, to avoid a separate read. This requires updating the VectorRecord post-indexing, or storing the code in a parallel key as shown.)
-•	Graph Adjacency – Key: (indexName, "segment", <segId>, "graph", <vecId>) → Value: Encoded list of neighbor vector IDs for <vecId> in the DiskANN graph. For a SEALED segment, each vector has a list of approximately R neighbors (where R is a configurable graph degree, e.g. 64). This list is stored as a small serialized array of vector IDs (and possibly distance or level information if needed by the algorithm). Neighbor lists are stored contiguously by vector ID, enabling efficient range reads or prefetching of multiple adjacency lists in one call.
+Key-Value Schema (DirectoryLayer-based): We use DirectorySubspaces to avoid manual tuple prefixing. Each index has an `indexDir` with child subspaces for `segments/`, `tasks/`, and a registry `segmentsIndex/`. Each segment is its own child DirectorySubspace `segments/<segId>/` with subspaces for `vectors/`, `pq/{codebook,codes/}`, and `graph/`.
+• Index Metadata – Key: indexDir.pack(("meta")) → Global index settings (serialized), e.g. {dimension, metric, maxSegmentSize, pq_m, pq_k, graph_degree, oversample}.
+• Current Segment Pointer – Key: indexDir.pack(("currentSegment")) → Integer segId of the ACTIVE segment.
+• Segment Metadata – Key: segments/<segId>/.pack(("meta")) → SegmentMeta for segId (state, count, timestamps, deleted_count).
+• Vector Record – Key: segments/<segId>/vectors/.pack((vecId)) → Serialized VectorRecord with embedding/payload/deleted.
+• PQ Codebook – Key: segments/<segId>/pq/.pack(("codebook")) → Serialized PQCodebook for the segment.
+• PQ Compressed Codes – Key: segments/<segId>/pq/codes/.pack((vecId)) → PQ code bytes for vecId.
+• Graph Adjacency – Key: segments/<segId>/graph/.pack((vecId)) → Encoded neighbor IDs for vecId in the segment graph (about R neighbors).
 
 Tombstones: Deletions are handled via tombstone markers. Instead of immediately removing a vector’s data, we mark it as deleted:
 •	The VectorRecord contains a boolean deleted flag that is set to true in a deletion transaction. (Alternatively, a separate key (indexName, "segment", <segId>, "deleted", <vecId>) -> true could mark deletions, but using an inline flag avoids extra keys.)
@@ -33,12 +33,12 @@ Tombstones: Deletions are handled via tombstone markers. Instead of immediately 
 
 Figure: FoundationDB Key-Value Schema (for one segment):
 
-("segmentsIndex", segId)                        -> empty (presence indicates known segment)
-(segId:int, "meta")                              -> { state: ACTIVE/PENDING/SEALED, count: N, ... }
-(segId:int, "vectors", vecId:int)                -> { VectorRecord proto (embedding, metadata, deleted_flag) }
-(segId:int, "pq", "codebook")                   -> { PQCodebook proto (centroids for each subspace) }
-(segId:int, "pq", "code", vecId:int)            -> (binary PQ code for vector)
-(segId:int, "graph", vecId:int)                  -> [ neighbor_vecId1, neighbor_vecId2, ... neighbor_vecIdR ]
+segmentsIndex/(segId)                            -> empty (presence indicates known segment)
+segments/<segId>/meta                            -> { state: ACTIVE/PENDING/SEALED/WRITING/COMPACTING, count, ... }
+segments/<segId>/vectors/(vecId)                 -> { VectorRecord proto (embedding, metadata, deleted_flag) }
+segments/<segId>/pq/codebook                     -> { PQCodebook proto (centroids for each subspace) }
+segments/<segId>/pq/codes/(vecId)                -> (binary PQ code for vector)
+segments/<segId>/graph/(vecId)                   -> [ neighbor_vecId1, neighbor_vecId2, ... neighbor_vecIdR ]
 
 All keys under `segmentsDir` are lexicographically ordered by `segId` then sub‑keys, so data for a segment is clustered (enabling range reads over a segment’s data). Listing segments is done by scanning `segmentsIndex/<segId>` under the index root.
 
@@ -236,7 +236,8 @@ segMeta.count += 1;
 // Check if segment is now full
 if (segMeta.count >= MAX_SEGMENT_SIZE) {
 segMeta.state = PENDING;
-tx.set((indexName, "segment", segId, "meta"), segMeta.serialize());
+// Using per-segment DirectorySubspace
+tx.set(segments/<segId>/.pack(("meta")), segMeta.serialize());
 // Create new active segment
 int newSegId = segId + 1;  // or use a global counter
 SegmentMeta newSegMeta = new SegmentMeta(state=ACTIVE, count=0);
