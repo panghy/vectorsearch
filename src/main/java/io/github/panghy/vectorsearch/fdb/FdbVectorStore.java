@@ -290,6 +290,20 @@ public final class FdbVectorStore {
                     VectorRecord updated =
                         rec.toBuilder().setDeleted(true).build();
                     tr.set(sk.vectorKey(vecIds.get(i)), updated.toByteArray());
+                    // Clear gid mappings
+                    byte[] revK = indexDirs
+                        .gidRevDir()
+                        .pack(com.apple.foundationdb.tuple.Tuple.from(segId, vecIds.get(i)));
+                    byte[] gb = tr.get(revK).join();
+                    if (gb != null) {
+                      long gid = com.apple.foundationdb.tuple.Tuple.fromBytes(gb)
+                          .getLong(0);
+                      byte[] mapK = indexDirs
+                          .gidMapDir()
+                          .pack(com.apple.foundationdb.tuple.Tuple.from(gid));
+                      tr.clear(mapK);
+                    }
+                    tr.clear(revK);
                     dec++;
                     incDel++;
                   }
