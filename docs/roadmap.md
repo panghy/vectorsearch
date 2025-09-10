@@ -27,18 +27,20 @@ Tree (conceptual):
       meta                            (key in indexDir)
       currentSegment                  (key in indexDir)
       segments/                       (segmentsDir)
-        (segId, "meta")               SegmentMeta (segId is an integer tuple field)
-        (segId, "vectors", vecId)     VectorRecord
-        (segId, "pq", "codebook")     PQCodebook
-        (segId, "pq", "codes", vecId) PQ code bytes
-        (segId, "graph", vecId)       Adjacency list bytes
+        <segId>/                      (child DirectorySubspace per segment)
+          meta                        SegmentMeta
+          vectors/                    (subdir) vector KV: vectors/(vecId)
+          pq/                         (subdir)
+            codebook                  PQCodebook
+            codes/                    (subdir) codes/(vecId)
+          graph/                      (subdir) graph/(vecId)
       segmentsIndex/                  (indexDir subspace; one key per existing segId)
         <segId>                       empty value (presence = exists)
       tasks/                          (taskQueueBaseDir for TaskQueue)
 
 Notes:
-- `segId` is now encoded as an integer in tuple keys (breaking change, no migration/back‑compat maintained).
-- All key building is via `DirectorySubspace.pack(Tuple.from(...))`. Per‑segment data is not its own DirectorySubspace; it lives under `segmentsDir` keyed by `(segId, ...)` for compact listing and scanning.
+- `segId` is an integer identifier; each segment is its own child `DirectorySubspace` under `segments/`.
+- Keys are built via the appropriate `DirectorySubspace.pack(Tuple.from(...))`, typically the per‑segment subspaces for vectors, pq, codes, and graph. Segment listing is done via a compact `segmentsIndex/` registry (one key per segId).
 
 ## Milestones Overview
 
