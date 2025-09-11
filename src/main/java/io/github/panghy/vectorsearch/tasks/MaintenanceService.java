@@ -1,11 +1,15 @@
 package io.github.panghy.vectorsearch.tasks;
 
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.CompletableFuture.*;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.KeyValue;
+import com.apple.foundationdb.directory.NoSuchDirectoryException;
+import com.apple.foundationdb.subspace.Subspace;
 import com.apple.foundationdb.tuple.ByteArrayUtil;
+import com.apple.foundationdb.tuple.Tuple;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.taskqueue.TaskQueueConfig;
@@ -15,9 +19,13 @@ import io.github.panghy.vectorsearch.fdb.FdbDirectories;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import io.github.panghy.vectorsearch.proto.VectorRecord;
+import io.github.panghy.vectorsearch.util.FloatPacker;
 import java.util.AbstractMap.SimpleEntry;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,7 +65,7 @@ public final class MaintenanceService {
    * ratio {@code deleted_count / (deleted_count + count)} from {@code SegmentMeta} and returns
    * early when below the threshold.</p>
    *
-   * @param segId segment identifier
+   * @param segId           segment identifier
    * @param minDeletedRatio minimum deletion ratio required to perform the vacuum (0 to always run)
    * @return a future completing when vacuum is finished or a no-op if below threshold
    */
@@ -67,9 +75,9 @@ public final class MaintenanceService {
             .thenApply(b -> new SimpleEntry<>(sk, b))))
         .exceptionally(ex -> {
           // If the segment directory does not exist yet, vacuum is a no-op.
-          Throwable c = ex instanceof java.util.concurrent.CompletionException ? ex.getCause() : ex;
-          if (c instanceof com.apple.foundationdb.directory.NoSuchDirectoryException) return null;
-          throw new java.util.concurrent.CompletionException(ex);
+          Throwable c = ex instanceof CompletionException ? ex.getCause() : ex;
+          if (c instanceof NoSuchDirectoryException) return null;
+          throw new CompletionException(ex);
         })
         .thenCompose(entry -> {
           if (entry == null) return completedFuture(null);
@@ -103,16 +111,6 @@ public final class MaintenanceService {
     final long soft = (long) (config.getBuildTxnLimitBytes() * config.getBuildTxnSoftLimitRatio());
     final int checkEvery = config.getBuildSizeCheckEvery();
     return deleteSome(db, sk, kvs, 0, 0, checkEvery, soft).thenApply(res -> res.removed);
-  }
-
-  private static final class Res {
-    final int next;
-    final int removed;
-
-    Res(int n, int r) {
-      this.next = n;
-      this.removed = r;
-    }
   }
 
   private CompletableFuture<Res> deleteSome(
@@ -201,24 +199,21 @@ public final class MaintenanceService {
 
   private CompletableFuture<TaskQueue<String, MaintenanceTask>> getOrCreateMaintQueue(Database db) {
     if (maintQueue != null) return maintQueue;
-    maintQueue = indexDirs
-        .tasksDir()
-        .createOrOpen(db, java.util.List.of("maint"))
-        .thenCompose(maintDir -> {
-          TaskQueueConfig<String, MaintenanceTask> tqc = TaskQueueConfig.builder(
-                  db,
-                  maintDir,
-                  new ProtoSerializers.StringSerializer(),
-                  new ProtoSerializers.MaintenanceTaskSerializer())
-              .estimatedWorkerCount(config.getEstimatedWorkerCount())
-              .defaultTtl(config.getDefaultTtl())
-              .defaultThrottle(config.getDefaultThrottle())
-              .taskNameExtractor(t -> t.hasVacuum()
-                  ? ("vacuum-segment:" + t.getVacuum().getSegId())
-                  : (t.hasCompact() ? "compact" : "find-candidates"))
-              .build();
-          return TaskQueues.createTaskQueue(tqc);
-        });
+    maintQueue = indexDirs.tasksDir().createOrOpen(db, List.of("maint")).thenCompose(maintDir -> {
+      TaskQueueConfig<String, MaintenanceTask> tqc = TaskQueueConfig.builder(
+              db,
+              maintDir,
+              new ProtoSerializers.StringSerializer(),
+              new ProtoSerializers.MaintenanceTaskSerializer())
+          .estimatedWorkerCount(config.getEstimatedWorkerCount())
+          .defaultTtl(config.getDefaultTtl())
+          .defaultThrottle(config.getDefaultThrottle())
+          .taskNameExtractor(t -> t.hasVacuum()
+              ? ("vacuum-segment:" + t.getVacuum().getSegId())
+              : (t.hasCompact() ? "compact" : "find-candidates"))
+          .build();
+      return TaskQueues.createTaskQueue(tqc);
+    });
     return maintQueue;
   }
 
@@ -258,59 +253,62 @@ public final class MaintenanceService {
 
       return reserve.thenCompose(newSegId -> {
         // 2) Read all vectors from source segments and their global ids
+        List<float[]> vectors = new ArrayList<>();
+        List<byte[]> payloads = new ArrayList<>();
+        List<Long> gids = new ArrayList<>();
+        List<int[]> srcPairs = new ArrayList<>();
         return db.readAsync(tr -> {
-              java.util.List<float[]> vectors = new java.util.ArrayList<>();
-              java.util.List<byte[]> payloads = new java.util.ArrayList<>();
-              java.util.List<Long> gids = new java.util.ArrayList<>();
-              java.util.List<int[]> srcPairs = new java.util.ArrayList<>();
-              java.util.List<CompletableFuture<Void>> perSeg = new java.util.ArrayList<>();
+              CompletableFuture<Void> chain = completedFuture(null);
               for (int sid : segIds) {
-                perSeg.add(indexDirs.segmentKeys(tr, sid).thenCompose(sk2 -> tr.getRange(sk2.vectorsDir().range()).asList())
-                    .thenCompose(kvs -> {
-                      java.util.List<CompletableFuture<Void>> inner = new java.util.ArrayList<>();
-                      for (KeyValue kv : kvs) {
-                        int vecId = (int) sk2.vectorsDir().unpack(kv.getKey()).getLong(0);
-                        inner.add(tr.get(kv.getKey()).thenCompose(vb -> tr.get(indexDirs.gidRevDir()
-                                .pack(com.apple.foundationdb.tuple.Tuple.from(sid, vecId)))
-                            .thenApply(gb -> new java.util.AbstractMap.SimpleEntry<>(vb, gb))
-                            .thenApply(entry -> {
-                              byte[] vbytes = entry.getKey();
-                              byte[] gbytes = entry.getValue();
-                              try {
-                                VectorRecord rec = VectorRecord.parseFrom(vbytes);
-                                if (rec.getDeleted()) return null;
-                                vectors.add(io.github.panghy.vectorsearch.util.FloatPacker
-                                    .bytesToFloats(rec.getEmbedding().toByteArray()));
-                                payloads.add(rec.getPayload().toByteArray());
-                                long gid = (gbytes == null)
-                                    ? -1L
-                                    : com.apple.foundationdb.tuple.Tuple.fromBytes(gbytes).getLong(0);
-                                gids.add(gid);
-                                srcPairs.add(new int[] {sid, vecId});
-                                return null;
-                              } catch (InvalidProtocolBufferException e) {
-                                throw new RuntimeException(e);
-                              }
-                            }));
-                      }
-                      return java.util.concurrent.CompletableFuture.allOf(inner.toArray(CompletableFuture[]::new))
-                          .thenApply(x -> null);
-                    }));
+                chain = chain.thenCompose(
+                    vv -> indexDirs.segmentKeys(tr, sid).thenCompose(sk2 -> tr.getRange(
+                            sk2.vectorsDir().range())
+                        .asList()
+                        .thenCompose(kvs -> {
+                          CompletableFuture<Void> inner = completedFuture(null);
+                          for (KeyValue kv : kvs) {
+                            int vecId = (int) sk2.vectorsDir()
+                                .unpack(kv.getKey())
+                                .getLong(0);
+                            inner = inner.thenCompose(zz -> tr.get(kv.getKey())
+                                .thenCombine(
+                                    tr.get(
+                                        indexDirs
+                                            .gidRevDir()
+                                            .pack(Tuple.from(sid, vecId))),
+                                    (vbytes, gbytes) -> {
+                                      try {
+                                        VectorRecord rec =
+                                            VectorRecord.parseFrom(vbytes);
+                                        if (rec.getDeleted()) return null;
+                                        vectors.add(
+                                            FloatPacker.bytesToFloats(
+                                                rec.getEmbedding()
+                                                    .toByteArray()));
+                                        payloads.add(
+                                            rec.getPayload()
+                                                .toByteArray());
+                                        long gid = (gbytes == null)
+                                            ? -1L
+                                            : Tuple.fromBytes(gbytes)
+                                                .getLong(0);
+                                        gids.add(gid);
+                                        srcPairs.add(new int[] {sid, vecId});
+                                        return null;
+                                      } catch (InvalidProtocolBufferException e) {
+                                        throw new RuntimeException(e);
+                                      }
+                                    }));
+                          }
+                          return inner;
+                        })));
               }
-              return java.util.concurrent.CompletableFuture.allOf(perSeg.toArray(CompletableFuture[]::new))
-                  .thenApply(x -> new java.util.AbstractMap.SimpleEntry<>(
-                      vectors,
-                      new java.util.AbstractMap.SimpleEntry<>(
-                          payloads, new java.util.AbstractMap.SimpleEntry<>(gids, srcPairs))));
+              return chain;
             })
-            .thenCompose(bundle -> {
-              var vectors = bundle.getKey();
-              var payloads = bundle.getValue().getKey();
-              var gids = bundle.getValue().getValue().getKey();
-              var srcPairs = bundle.getValue().getValue().getValue();
+            .thenCompose(ignored -> {
               // 3) Write combined vectors into new segment in batches
               final int batchSize = 1000;
-              java.util.concurrent.CompletableFuture<Void> w = completedFuture(null);
+              CompletableFuture<Void> w = completedFuture(null);
               for (int i = 0; i < vectors.size(); i += batchSize) {
                 final int start = i;
                 final int end = Math.min(vectors.size(), i + batchSize);
@@ -319,30 +317,39 @@ public final class MaintenanceService {
                     .thenApply(sk -> {
                       for (int j = start; j < end; j++) {
                         int vecId = j;
+                        byte[] pl = (j < payloads.size()) ? payloads.get(j) : new byte[0];
                         VectorRecord rec = VectorRecord.newBuilder()
                             .setSegId(newSegId)
                             .setVecId(vecId)
-                            .setEmbedding(com.google.protobuf.ByteString.copyFrom(
-                                io.github.panghy.vectorsearch.util.FloatPacker
-                                    .floatsToBytes(vectors.get(j))))
+                            .setEmbedding(ByteString.copyFrom(
+                                FloatPacker.floatsToBytes(vectors.get(j))))
                             .setDeleted(false)
-                            .setPayload(com.google.protobuf.ByteString.copyFrom(
-                                payloads.get(j)))
+                            .setPayload(ByteString.copyFrom(pl))
                             .build();
                         tr.set(sk.vectorKey(vecId), rec.toByteArray());
                         // Update gid mappings to keep global ids stable
-                        long gid = gids.get(j);
+                        long gid = (j < gids.size()) ? gids.get(j) : -1L;
                         if (gid >= 0) {
-                          byte[] mapK = indexDirs.gidMapDir().pack(
-                              com.apple.foundationdb.tuple.Tuple.from(gid));
-                          tr.set(mapK, com.apple.foundationdb.tuple.Tuple.from(newSegId, vecId).pack());
-                          int[] src = srcPairs.get(j);
-                          byte[] oldRev = indexDirs.gidRevDir().pack(
-                              com.apple.foundationdb.tuple.Tuple.from(src[0], src[1]));
-                          tr.clear(oldRev);
-                          byte[] newRev = indexDirs.gidRevDir().pack(
-                              com.apple.foundationdb.tuple.Tuple.from(newSegId, vecId));
-                          tr.set(newRev, com.apple.foundationdb.tuple.Tuple.from(gid).pack());
+                          byte[] mapK = indexDirs
+                              .gidMapDir()
+                              .pack(Tuple.from(gid));
+                          tr.set(
+                              mapK,
+                              Tuple.from(newSegId, vecId)
+                                  .pack());
+                          int[] src = (j < srcPairs.size()) ? srcPairs.get(j) : null;
+                          byte[] oldRev = indexDirs
+                              .gidRevDir()
+                              .pack(Tuple.from(
+                                  src != null ? src[0] : -1,
+                                  src != null ? src[1] : -1));
+                          if (src != null) tr.clear(oldRev);
+                          byte[] newRev = indexDirs
+                              .gidRevDir()
+                              .pack(Tuple.from(newSegId, vecId));
+                          tr.set(
+                              newRev,
+                              Tuple.from(gid).pack());
                         }
                       }
                       // Update meta with running count while WRITING; remains invisible to
@@ -367,7 +374,7 @@ public final class MaintenanceService {
             .thenCompose(segId -> db.runAsync(tr -> {
               // 4) Registry swap and old segments cleanup atomically
               tr.set(indexDirs.segmentsIndexKey(segId), new byte[0]);
-              java.util.List<CompletableFuture<Void>> clears = new java.util.ArrayList<>();
+              List<CompletableFuture<Void>> clears = new ArrayList<>();
               for (int sid : segIds) {
                 clears.add(indexDirs.segmentKeys(tr, sid).thenApply(sk2 -> {
                   tr.clear(
@@ -385,8 +392,7 @@ public final class MaintenanceService {
                   return null;
                 }));
               }
-              return java.util.concurrent.CompletableFuture.allOf(
-                      clears.toArray(CompletableFuture[]::new))
+              return allOf(clears.toArray(CompletableFuture[]::new))
                   .thenApply(v -> null);
             }));
       });
@@ -398,56 +404,64 @@ public final class MaintenanceService {
    * Heuristic: choose SEALED segments with the smallest counts first until their
    * combined live counts reach at least ~80% of maxSegmentSize or up to 4 segments.
    */
-  public CompletableFuture<java.util.List<Integer>> findCompactionCandidates(int anchorSegId) {
+  public CompletableFuture<List<Integer>> findCompactionCandidates(int anchorSegId) {
     Database db = config.getDatabase();
     int maxSize = config.getMaxSegmentSize();
-    com.apple.foundationdb.subspace.Subspace reg = indexDirs.segmentsIndexSubspace();
+    Subspace reg = indexDirs.segmentsIndexSubspace();
     return db.readAsync(tr -> tr.getRange(reg.range()).asList()).thenCompose(kvs -> {
-      java.util.List<Integer> ids = new java.util.ArrayList<>(kvs.size());
-      for (com.apple.foundationdb.KeyValue kv : kvs) {
+      List<Integer> ids = new ArrayList<>(kvs.size());
+      for (KeyValue kv : kvs) {
         int sid = Math.toIntExact(reg.unpack(kv.getKey()).getLong(0));
         ids.add(sid);
       }
-      java.util.List<java.util.concurrent.CompletableFuture<byte[]>> metas = new java.util.ArrayList<>();
+      List<CompletableFuture<byte[]>> metas = new ArrayList<>();
       for (int sid : ids)
         metas.add(db.readAsync(tr -> indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey()))));
-      return java.util.concurrent.CompletableFuture.allOf(
-              metas.toArray(java.util.concurrent.CompletableFuture[]::new))
-          .thenApply(v -> {
-            java.util.List<int[]> sealed = new java.util.ArrayList<>(); // [segId, count]
-            for (int i = 0; i < ids.size(); i++) {
-              byte[] b = metas.get(i).getNow(null);
-              if (b == null) continue;
-              try {
-                var sm = io.github.panghy.vectorsearch.proto.SegmentMeta.parseFrom(b);
-                if (sm.getState() == io.github.panghy.vectorsearch.proto.SegmentMeta.State.SEALED) {
-                  sealed.add(new int[] {ids.get(i), sm.getCount()});
-                }
-              } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-                throw new RuntimeException(e);
-              }
+      return allOf(metas.toArray(CompletableFuture[]::new)).thenApply(v -> {
+        List<int[]> sealed = new ArrayList<>(); // [segId, count]
+        for (int i = 0; i < ids.size(); i++) {
+          byte[] b = metas.get(i).getNow(null);
+          if (b == null) continue;
+          try {
+            var sm = SegmentMeta.parseFrom(b);
+            if (sm.getState() == SegmentMeta.State.SEALED) {
+              sealed.add(new int[] {ids.get(i), sm.getCount()});
             }
-            sealed.sort(java.util.Comparator.comparingInt(a -> a[1]));
-            int budget = (int) Math.max(1, Math.round(0.8 * maxSize));
-            int sum = 0;
-            java.util.List<Integer> pick = new java.util.ArrayList<>();
-            // Ensure anchor is present (if sealed)
-            for (int[] pair : sealed)
-              if (pair[0] == anchorSegId) {
-                pick.add(anchorSegId);
-                sum += pair[1];
-                break;
-              }
-            for (int[] pair : sealed) {
-              if (pick.contains(pair[0])) continue;
-              if (pick.size() >= 4) break;
-              pick.add(pair[0]);
-              sum += pair[1];
-              if (sum >= budget) break;
-            }
-            if (pick.size() <= 1) return java.util.List.of();
-            return pick;
-          });
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+        }
+        sealed.sort(Comparator.comparingInt(a -> a[1]));
+        int budget = (int) Math.max(1, Math.round(0.8 * maxSize));
+        int sum = 0;
+        List<Integer> pick = new ArrayList<>();
+        // Ensure anchor is present (if sealed)
+        for (int[] pair : sealed)
+          if (pair[0] == anchorSegId) {
+            pick.add(anchorSegId);
+            sum += pair[1];
+            break;
+          }
+        for (int[] pair : sealed) {
+          if (pick.contains(pair[0])) continue;
+          if (pick.size() >= 4) break;
+          pick.add(pair[0]);
+          sum += pair[1];
+          if (sum >= budget) break;
+        }
+        if (pick.size() <= 1) return List.of();
+        return pick;
+      });
     });
+  }
+
+  private static final class Res {
+    final int next;
+    final int removed;
+
+    Res(int n, int r) {
+      this.next = n;
+      this.removed = r;
+    }
   }
 }

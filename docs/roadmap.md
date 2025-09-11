@@ -37,6 +37,9 @@ Tree (conceptual):
       segmentsIndex/                  (indexDir subspace; one key per existing segId)
         <segId>                       empty value (presence = exists)
       tasks/                          (taskQueueBaseDir for TaskQueue)
+      gid/                            (global id subspaces)
+        map/                          gid -> (segId, vecId)
+        rev/                          (segId, vecId) -> gid
 
 Notes:
 - `segId` is an integer identifier; each segment is its own child `DirectorySubspace` under `segments/`.
@@ -50,7 +53,7 @@ Notes:
 4) Background builders (PQ + graph) with chunked writes
 5) Search pipeline (SEALED graph + ACTIVE brute‑force) and re‑rank
 6) Caching & tuning
-7) Maintenance tasks (vacuum, compaction merge MVP)
+7) Maintenance tasks (vacuum, compaction merge MVP with stable global ids)
 8) Observability & docs
 9) Tests, benchmarks, hardening
 
@@ -68,7 +71,7 @@ Notes:
   - M8 Observability: OpenTelemetry gauges registered for cache size and stats; configurable metric attributes; tests use InMemoryMetricReader.
   - M9 Hardening: consolidated tests, added edge-case coverage; JaCoCo gates (≥90% lines / ≥75% branches) passing.
 - Not Started / Next:
-  - M7 Compaction: improve candidate selection and throttling (planner heuristics, backpressure).
+  - M7 Compaction: improve candidate selection and throttling (planner heuristics, backpressure). Global ids remain stable across merges via `gid/{map,rev}` updates.
   - M8 Observability (index-level): add per-query latency histograms, SLOs.
   - M9 Benchmarks (micro + macro latency harness): JMH + macro harness.
 
@@ -111,9 +114,10 @@ Deliverables:
 - API skeleton (all async):
   - `VectorIndex`:
     - `CompletableFuture<Void> createIndex(IndexMeta)` → sets `meta`, `currentSegment`, creates directories
-    - `CompletableFuture<int[]> add(float[] embedding, byte[] payload)` → returns `[segId, vecId]`
-    - `CompletableFuture<Void> delete(int segId, int vecId)`
+    - `CompletableFuture<Long> add(float[] embedding, byte[] payload)` → returns 64‑bit gid
+    - `CompletableFuture<Void> delete(long gid)`
     - `CompletableFuture<List<Result>> query(float[] q, int k)`
+    - `CompletableFuture<int[][]> resolveIds(long[] gids)` → (segmentId, vectorId) for tests/admin
     - `CompletableFuture<Void> sealActiveIfNeeded()`
     - `CompletableFuture<List<SegmentMeta>> listSegments()`
 - ACTIVE insert transaction:
@@ -324,7 +328,7 @@ Status:
   - Refactor internal helpers to compose futures rather than open transactions internally where possible.
 
 - Delete API and vacuum skeleton:
-  - Add `delete(segId, vecId)` to set tombstone and increment `deleted_count`.
+  - Add `delete(gid)` to set tombstone and increment `deleted_count`.
   - Create `VacuumJob` queued under `tasks/` that erases tombstoned vectors and associated PQ/graph keys in chunked commits.
   - Tests for deletion visibility in queries and vacuum idempotency.
 
