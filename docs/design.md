@@ -18,7 +18,13 @@ Data Model and Key-Value Schema
 
 All data is stored in FoundationDB using a structured key design to group related information together. The index is divided into segments (each up to a fixed size, e.g. 100,000 vectors). Each segment has its own vector data, graph, and PQ compression metadata. The `maxSegmentSize` is a hard cap: once an ACTIVE segment's count reaches this threshold, the next insert rotates to a new ACTIVE segment before writing. The vector that triggers rotation is stored as `vecId=0` in the new segment, while the previous segment flips to PENDING in the same transaction and is later SEALED by the background builder.
 
-Key-Value Schema (DirectoryLayer-based): We use DirectorySubspaces to avoid manual tuple prefixing. Each index has an `indexDir` with child subspaces for `segments/`, `tasks/`, and a registry `segmentsIndex/`. Each segment is its own child DirectorySubspace `segments/<segId>/` with subspaces for `vectors/`, `pq/{codebook,codes/}`, and `graph/`.
+Key-Value Schema (DirectoryLayer-based): We use DirectorySubspaces to avoid manual tuple prefixing. Each index has an `indexDir` with child subspaces for `segments/`, `tasks/`, a registry `segmentsIndex/`, and a `gid/` subtree for global ids. Each segment is its own child DirectorySubspace `segments/<segId>/` with subspaces for `vectors/`, `pq/{codebook,codes/}`, and `graph/`.
+
+Global Ids (gid): Public APIs return a single 64‑bit gid per vector. Internally we keep two mappings under `gid/`:
+- `gid/map`: `pack(gid) -> pack(segId, vecId)`
+- `gid/rev`: `pack(segId, vecId) -> pack(gid)`
+
+Compaction preserves gids by rewriting both mappings when records move to the WRITING destination segment, ensuring ids remain stable even as `(segId, vecId)` changes.
 • Index Metadata – Key: indexDir.pack(("meta")) → Global index settings (serialized), e.g. {dimension, metric, maxSegmentSize, pq_m, pq_k, graph_degree, oversample}.
 • Current Segment Pointer – Key: indexDir.pack(("currentSegment")) → Integer segId of the ACTIVE segment.
 • Segment Metadata – Key: segments/<segId>/.pack(("meta")) → SegmentMeta for segId (state, count, timestamps, deleted_count).

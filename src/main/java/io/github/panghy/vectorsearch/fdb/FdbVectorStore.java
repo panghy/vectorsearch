@@ -11,6 +11,7 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.tuple.ByteArrayUtil;
+import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.taskqueue.TaskQueue;
@@ -27,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -291,16 +293,11 @@ public final class FdbVectorStore {
                         rec.toBuilder().setDeleted(true).build();
                     tr.set(sk.vectorKey(vecIds.get(i)), updated.toByteArray());
                     // Clear gid mappings
-                    byte[] revK = indexDirs
-                        .gidRevDir()
-                        .pack(com.apple.foundationdb.tuple.Tuple.from(segId, vecIds.get(i)));
+                    byte[] revK = indexDirs.gidRevDir().pack(Tuple.from(segId, vecIds.get(i)));
                     byte[] gb = tr.get(revK).join();
                     if (gb != null) {
-                      long gid = com.apple.foundationdb.tuple.Tuple.fromBytes(gb)
-                          .getLong(0);
-                      byte[] mapK = indexDirs
-                          .gidMapDir()
-                          .pack(com.apple.foundationdb.tuple.Tuple.from(gid));
+                      long gid = Tuple.fromBytes(gb).getLong(0);
+                      byte[] mapK = indexDirs.gidMapDir().pack(Tuple.from(gid));
                       tr.clear(mapK);
                     }
                     tr.clear(revK);
@@ -349,14 +346,19 @@ public final class FdbVectorStore {
           .thenCompose(metaBytes -> {
             try {
               SegmentMeta sm = SegmentMeta.parseFrom(metaBytes);
-              List<CompletableFuture<byte[]>> reads = new ArrayList<>();
-              for (int vId : vecIds) reads.add(tr.get(sk.vectorKey(vId)));
-              return allOf(reads.toArray(CompletableFuture[]::new))
+              List<CompletableFuture<byte[]>> vecReads = new ArrayList<>();
+              List<CompletableFuture<byte[]>> gidReads = new ArrayList<>();
+              for (int vId : vecIds) {
+                vecReads.add(tr.get(sk.vectorKey(vId)));
+                gidReads.add(tr.get(indexDirs.gidRevDir().pack(Tuple.from(segId, vId))));
+              }
+              return allOf(Stream.concat(vecReads.stream(), gidReads.stream())
+                      .toArray(CompletableFuture[]::new))
                   .thenApply($ -> {
                     int dec = 0;
                     int incDel = 0;
                     for (int i = 0; i < vecIds.size(); i++) {
-                      byte[] bytes = reads.get(i).getNow(null);
+                      byte[] bytes = vecReads.get(i).getNow(null);
                       if (bytes == null) continue;
                       try {
                         VectorRecord rec = VectorRecord.parseFrom(bytes);
@@ -365,6 +367,18 @@ public final class FdbVectorStore {
                               .setDeleted(true)
                               .build();
                           tr.set(sk.vectorKey(vecIds.get(i)), updated.toByteArray());
+                          // Clear gid mappings if present
+                          byte[] gb = gidReads.get(i).getNow(null);
+                          if (gb != null) {
+                            long gid = Tuple.fromBytes(gb)
+                                .getLong(0);
+                            tr.clear(indexDirs
+                                .gidMapDir()
+                                .pack(Tuple.from(gid)));
+                          }
+                          tr.clear(indexDirs
+                              .gidRevDir()
+                              .pack(Tuple.from(segId, vecIds.get(i))));
                           dec++;
                           incDel++;
                         }
@@ -536,34 +550,51 @@ public final class FdbVectorStore {
                     });
               }
               int toWrite = Math.min(capacity, remaining);
-              for (int i = 0; i < toWrite; i++) {
-                int vecId = count + i;
-                int j = idx.get() + i;
-                float[] e = embeddings[j];
-                byte[] p = (payloads != null && j < payloads.length) ? payloads[j] : null;
-                VectorRecord rec = VectorRecord.newBuilder()
-                    .setSegId(seg)
-                    .setVecId(vecId)
-                    .setEmbedding(ByteString.copyFrom(FloatPacker.floatsToBytes(e)))
-                    .setDeleted(false)
-                    .setPayload(p == null ? ByteString.EMPTY : ByteString.copyFrom(p))
-                    .build();
-                tr.set(sk.vectorKey(vecId), rec.toByteArray());
-                outIds.add(new int[] {seg, vecId});
-              }
-              int newCount = count + toWrite;
-              tr.set(
-                  sk.metaKey(),
-                  sm.toBuilder().setCount(newCount).build().toByteArray());
-              idx.addAndGet(toWrite);
-              if (newCount < max) {
-                return completedFuture(idx.get() < embeddings.length);
-              }
-              return rotateToNextActive(tr, sk, curSegK, sm, seg, Math.max(sm.getCount(), newCount))
-                  .thenCompose($ -> {
-                    curSeg.set(seg + 1);
-                    return enqueueBuildTask(tr, seg).thenApply(xx -> true);
-                  });
+              return tr.get(indexDirs.nextGidKey()).thenCompose(nextBytes -> {
+                long base = (nextBytes == null)
+                    ? 0L
+                    : Tuple.fromBytes(nextBytes).getLong(0);
+                long next = base + toWrite;
+                tr.set(indexDirs.nextGidKey(), Tuple.from(next).pack());
+                for (int i = 0; i < toWrite; i++) {
+                  int vecId = count + i;
+                  int j = idx.get() + i;
+                  float[] e = embeddings[j];
+                  byte[] p = (payloads != null && j < payloads.length) ? payloads[j] : null;
+                  VectorRecord rec = VectorRecord.newBuilder()
+                      .setSegId(seg)
+                      .setVecId(vecId)
+                      .setEmbedding(ByteString.copyFrom(FloatPacker.floatsToBytes(e)))
+                      .setDeleted(false)
+                      .setPayload(p == null ? ByteString.EMPTY : ByteString.copyFrom(p))
+                      .build();
+                  tr.set(sk.vectorKey(vecId), rec.toByteArray());
+                  long gid = base + i; // opaque, monotonic
+                  tr.set(
+                      indexDirs.gidMapDir().pack(Tuple.from(gid)),
+                      Tuple.from(seg, vecId).pack());
+                  tr.set(
+                      indexDirs.gidRevDir().pack(Tuple.from(seg, vecId)),
+                      Tuple.from(gid).pack());
+                  outIds.add(new int[] {seg, vecId});
+                }
+                int newCount = count + toWrite;
+                tr.set(
+                    sk.metaKey(),
+                    sm.toBuilder()
+                        .setCount(newCount)
+                        .build()
+                        .toByteArray());
+                idx.addAndGet(toWrite);
+                if (newCount < max) {
+                  return completedFuture(idx.get() < embeddings.length);
+                }
+                return rotateToNextActive(tr, sk, curSegK, sm, seg, Math.max(sm.getCount(), newCount))
+                    .thenCompose($ -> {
+                      curSeg.set(seg + 1);
+                      return enqueueBuildTask(tr, seg).thenApply(xx -> true);
+                    });
+              });
             });
           });
         })
@@ -582,19 +613,25 @@ public final class FdbVectorStore {
       int checkEvery,
       long softLimit,
       List<int[]> outIds) {
-    return writeSomeVectorsRec(
-        tr,
-        sk,
-        segId,
-        startVecCount,
-        inputStartIdx,
-        0,
-        toWrite,
-        embeddings,
-        payloads,
-        checkEvery,
-        softLimit,
-        outIds);
+    return tr.get(indexDirs.nextGidKey()).thenCompose(nextBytes -> {
+      long base = (nextBytes == null) ? 0L : Tuple.fromBytes(nextBytes).getLong(0);
+      long next = base + toWrite;
+      tr.set(indexDirs.nextGidKey(), Tuple.from(next).pack());
+      return writeSomeVectorsRec(
+          tr,
+          sk,
+          segId,
+          startVecCount,
+          inputStartIdx,
+          0,
+          toWrite,
+          base,
+          embeddings,
+          payloads,
+          checkEvery,
+          softLimit,
+          outIds);
+    });
   }
 
   private CompletableFuture<Integer> writeSomeVectorsRec(
@@ -605,6 +642,7 @@ public final class FdbVectorStore {
       int inputStartIdx,
       int wroteSoFar,
       int toWrite,
+      long gidBase,
       float[][] embeddings,
       byte[][] payloads,
       int checkEvery,
@@ -624,6 +662,15 @@ public final class FdbVectorStore {
           .setPayload(p == null ? ByteString.EMPTY : ByteString.copyFrom(p))
           .build();
       tr.set(sk.vectorKey(startVecCount + i), rec.toByteArray());
+      // Write gid mappings using opaque gid block
+      int vecId = startVecCount + i;
+      long gid = gidBase + i;
+      tr.set(
+          indexDirs.gidMapDir().pack(Tuple.from(gid)),
+          Tuple.from(segId, vecId).pack());
+      tr.set(
+          indexDirs.gidRevDir().pack(Tuple.from(segId, vecId)),
+          Tuple.from(gid).pack());
       outIds.add(new int[] {segId, startVecCount + i});
       if (((i + 1) % Math.max(1, checkEvery)) == 0) {
         int nextCount = i + 1;
@@ -639,6 +686,7 @@ public final class FdbVectorStore {
               inputStartIdx,
               nextCount,
               toWrite,
+              gidBase,
               embeddings,
               payloads,
               checkEvery,

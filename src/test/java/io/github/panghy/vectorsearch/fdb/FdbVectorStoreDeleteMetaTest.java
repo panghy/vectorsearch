@@ -6,7 +6,6 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
-import io.github.panghy.vectorsearch.api.SegmentVectorId;
 import io.github.panghy.vectorsearch.api.VectorIndex;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
@@ -67,7 +66,7 @@ public class FdbVectorStoreDeleteMetaTest {
       float[] v = new float[] {i, i + 1, i + 2, i + 3};
       ids[i] = index.add(v, null).get(5, TimeUnit.SECONDS);
     }
-    int seg = SegmentVectorId.segmentId(ids[0]);
+    int seg = index.resolveIds(new long[] {ids[0]}).get(5, TimeUnit.SECONDS)[0][0];
     // Before delete
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     SegmentMeta before = db.readAsync(tr -> dirs.segmentKeys(tr, seg)

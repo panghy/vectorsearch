@@ -40,14 +40,14 @@ VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
 // Create/open
 VectorIndex index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
 
-// Insert
-int[] id = index.add(new float[]{1,0,0,0,0,0,0,0}, null).get();
+// Insert: returns a 64-bit gid (stable across compaction)
+long id = index.add(new float[]{1,0,0,0,0,0,0,0}, null).get();
 
 // Query (top-K, default BEST_FIRST)
 List<SearchResult> hits = index.query(new float[]{1,0,0,0,0,0,0,0}, 10).get();
 
 // Delete (tombstone) and schedule cooldown-aware vacuum if threshold satisfied
-index.delete(id[0], id[1]).get();
+index.delete(id).get();
 
 // Optionally wait for builders to drain (uses hasVisibleUnclaimedTasks + hasClaimedTasks)
 // Waits for build queue emptiness (no polling/reflection)
@@ -115,10 +115,15 @@ See `src/main/java/.../VectorIndexConfig.java` for the full builder.
 
 ## Design Highlights
 
- - DirectoryLayer layout per index: `meta`, `currentSegment`, `segmentsIndex/<segId>`, `segments/<segId>/{meta,vectors/,pq/{codebook,codes/},graph/}`, `tasks/`
+ - DirectoryLayer layout per index: `meta`, `currentSegment`, `segmentsIndex/<segId>`, `segments/<segId>/{meta,vectors/,pq/{codebook,codes/},graph/}`, `tasks/`, and `gid/{map,rev}` for global id mapping.
 - Async batched I/O with transaction size guards (FDB 10MB/5s)
 - Caffeine AsyncLoadingCache with bulk loaders, optional prefetch for codebooks
 - Deterministic seeding and auto‑tuning for BEST_FIRST traversal
+
+### IDs
+
+- Public APIs return a single 64‑bit global id (gid). Use `SearchResult.gid()` in query results.
+- For testing/admin tooling, `VectorIndex.resolveIds(long[] gids)` returns `(segmentId, vectorId)` pairs.
 
 ## Contributing
 

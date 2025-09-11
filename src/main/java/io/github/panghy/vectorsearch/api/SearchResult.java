@@ -9,10 +9,10 @@ import lombok.Builder;
  * - L2: score = -distance (higher is better)
  * - COSINE: score = similarity in [-1, 1] (higher is better)
  *
- * @param segmentVectorId Packed id (segmentId << 32 | vectorId & 0xffffffff).
+ * @param gid Global 64-bit id for the vector (stable across compaction).
  * @param score     Ranking score (see class Javadoc for semantics).
  * @param distance  Convenience distance value for display or tie-breaking.
  * @param payload   Optional payload stored with the vector (may be empty).
  */
 @Builder
-public record SearchResult(long segmentVectorId, double score, double distance, byte[] payload) {}
+public record SearchResult(long gid, double score, double distance, byte[] payload) {}

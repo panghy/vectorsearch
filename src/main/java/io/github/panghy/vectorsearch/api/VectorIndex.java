@@ -51,7 +51,7 @@ public interface VectorIndex extends AutoCloseable {
    *                  Implementations may throw {@link IllegalArgumentException} if the length
    *                  does not match.
    * @param payload   optional payload bytes to store verbatim with the vector; may be {@code null}.
-   * @return a future with the assigned identifier {@code [segmentId, vectorId]}.
+   * @return a future with the assigned 64-bit global id (gid), which remains stable across compaction.
    */
   CompletableFuture<Long> add(float[] embedding, byte[] payload);
 
@@ -68,7 +68,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param tx        existing FDB transaction to use
    * @param embedding vector values; length must equal {@link VectorIndexConfig#getDimension()}.
    * @param payload   optional payload bytes, may be {@code null}
-   * @return a future with the assigned identifier {@code [segmentId, vectorId]}.
+   * @return a future with the assigned 64-bit global id (gid), which remains stable across compaction.
    */
   CompletableFuture<Long> add(Transaction tx, float[] embedding, byte[] payload);
 
@@ -84,7 +84,7 @@ public interface VectorIndex extends AutoCloseable {
    *
    * @param embeddings array of vectors; each vector's length must equal the configured dimension
    * @param payloads   optional per-vector payloads; may be {@code null} or shorter than embeddings
-   * @return a future with assigned IDs per vector (same order as input)
+   * @return a future with assigned 64-bit gids per vector (same order as input)
    */
   CompletableFuture<List<Long>> addAll(float[][] embeddings, byte[][] payloads);
 
@@ -100,7 +100,7 @@ public interface VectorIndex extends AutoCloseable {
    * @param tx         existing FDB transaction to use
    * @param embeddings vectors to insert; each vector length must equal the configured dimension
    * @param payloads   optional per-vector payloads (see {@link #addAll(float[][], byte[][])} rules)
-   * @return a future with assigned IDs per vector (same order as input)
+   * @return a future with assigned 64-bit gids per vector (same order as input)
    */
   CompletableFuture<List<Long>> addAll(Transaction tx, float[][] embeddings, byte[][] payloads);
 
@@ -130,10 +130,10 @@ public interface VectorIndex extends AutoCloseable {
   CompletableFuture<List<SearchResult>> query(float[] q, int k, SearchParams params);
 
   /**
-   * Marks one vector as deleted (tombstone) and updates per-segment counters.
+   * Marks a vector as deleted (tombstone) by global id and updates per-segment counters.
+   * Also clears the gid mapping so future resolves do not return a stale location.
    *
-   * @param segId segment identifier
-   * @param vecId vector identifier within the segment
+   * @param segmentVectorId packed 64-bit gid returned by add/addAll
    * @return a future that completes when the mutation is persisted
    */
   CompletableFuture<Void> delete(long segmentVectorId);
@@ -141,17 +141,16 @@ public interface VectorIndex extends AutoCloseable {
   /**
    * Single-transaction delete using a caller-provided {@link Transaction}.
    *
-   * @param tx    existing FDB transaction to use
-   * @param segId segment identifier
-   * @param vecId vector identifier within the segment
+   * @param tx               existing FDB transaction to use
+   * @param segmentVectorId  packed 64-bit gid returned by add/addAll
    * @return a future that completes when the mutation is persisted
    */
   CompletableFuture<Void> delete(Transaction tx, long segmentVectorId);
 
   /**
-   * Batch delete convenience for many {@code [segmentId, vectorId]} pairs.
+   * Batch delete convenience for many gids.
    *
-   * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
+   * @param segmentVectorIds array of gids; {@code null} or empty is a no-op
    * @return a future that completes when all mutations are persisted
    */
   CompletableFuture<Void> deleteAll(long[] segmentVectorIds);
@@ -159,8 +158,8 @@ public interface VectorIndex extends AutoCloseable {
   /**
    * Batch delete within a single caller-provided {@link Transaction}.
    *
-   * @param tx  existing FDB transaction to use
-   * @param ids array of {@code [segId, vecId]} pairs; {@code null} or empty is a no-op
+   * @param tx                existing FDB transaction to use
+   * @param segmentVectorIds  array of gids; {@code null} or empty is a no-op
    * @return a future that completes when mutations are persisted
    */
   CompletableFuture<Void> deleteAll(Transaction tx, long[] segmentVectorIds);
@@ -186,9 +185,8 @@ public interface VectorIndex extends AutoCloseable {
   long getAdjacencyCacheSize();
 
   /**
-   * Resolves packed global ids to (segmentId, vectorId) pairs. Primarily for tests or
-   * administrative tooling; production code should generally avoid relying on physical
-   * locations because compaction can rewrite ids.
+   * Resolves packed gids to (segmentId, vectorId) pairs. Intended for tests/admin tooling.
+   * Production code should not rely on physical locations because compaction may rewrite them.
    */
   CompletableFuture<int[][]> resolveIds(long[] segmentVectorIds);
 
