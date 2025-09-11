@@ -184,51 +184,74 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   }
 
   @Override
-  public CompletableFuture<Void> delete(long segmentVectorId) {
-    int segId = (int) (segmentVectorId >>> 32);
-    int vecId = (int) segmentVectorId;
-    // Marks the record deleted and, if the per-segment deleted ratio is high enough,
-    // enqueues a maintenance vacuum task to reclaim storage for that segment.
-    return store.delete(segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(Set.of(segId)));
+  public CompletableFuture<Void> delete(long gid) {
+    Database db = config.getDatabase();
+    return db.readAsync(tr -> tr.get(indexDirs.gidMapDir().pack(Tuple.from(gid))))
+        .thenCompose(bytes -> {
+          if (bytes == null) return completedFuture(null);
+          Tuple t = Tuple.fromBytes(bytes);
+          int segId = Math.toIntExact(t.getLong(0));
+          int vecId = Math.toIntExact(t.getLong(1));
+          return store.delete(segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(Set.of(segId)));
+        });
   }
 
   @Override
-  public CompletableFuture<Void> delete(Transaction tx, long segmentVectorId) {
-    int segId = (int) (segmentVectorId >>> 32);
-    int vecId = (int) segmentVectorId;
-    return store.delete(tx, segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(tx, Set.of(segId)));
+  public CompletableFuture<Void> delete(Transaction tx, long gid) {
+    return tx.get(indexDirs.gidMapDir().pack(Tuple.from(gid))).thenCompose(bytes -> {
+      if (bytes == null) return completedFuture(null);
+      Tuple t = Tuple.fromBytes(bytes);
+      int segId = Math.toIntExact(t.getLong(0));
+      int vecId = Math.toIntExact(t.getLong(1));
+      return store.delete(tx, segId, vecId).thenCompose(v -> scheduleVacuumIfNeeded(tx, Set.of(segId)));
+    });
   }
 
   @Override
-  public CompletableFuture<Void> deleteAll(long[] ids) {
-    Set<Integer> segs = new HashSet<>();
-    int[][] pairs = new int[ids == null ? 0 : ids.length][2];
-    if (ids != null) {
-      for (int i = 0; i < ids.length; i++) {
-        int s = (int) (ids[i] >>> 32);
-        int v = (int) ids[i];
-        pairs[i][0] = s;
-        pairs[i][1] = v;
+  public CompletableFuture<Void> deleteAll(long[] gids) {
+    if (gids == null || gids.length == 0) return completedFuture(null);
+    Database db = config.getDatabase();
+    return db.readAsync(tr -> {
+          List<CompletableFuture<byte[]>> reads = new ArrayList<>();
+          for (long gid : gids) reads.add(tr.get(indexDirs.gidMapDir().pack(Tuple.from(gid))));
+          return allOf(reads.toArray(CompletableFuture[]::new)).thenApply(v -> {
+            List<int[]> out = new ArrayList<>();
+            Set<Integer> segs = new HashSet<>();
+            for (CompletableFuture<byte[]> f : reads) {
+              byte[] b = f.getNow(null);
+              if (b == null) continue;
+              Tuple t = Tuple.fromBytes(b);
+              int s = Math.toIntExact(t.getLong(0));
+              int v2 = Math.toIntExact(t.getLong(1));
+              out.add(new int[] {s, v2});
+              segs.add(s);
+            }
+            return new SimpleEntry<>(out, segs);
+          });
+        })
+        .thenCompose(entry -> store.deleteBatch(entry.getKey().toArray(new int[0][]))
+            .thenCompose(v -> scheduleVacuumIfNeeded(entry.getValue())));
+  }
+
+  @Override
+  public CompletableFuture<Void> deleteAll(Transaction tx, long[] gids) {
+    if (gids == null || gids.length == 0) return completedFuture(null);
+    List<CompletableFuture<byte[]>> reads = new ArrayList<>();
+    for (long gid : gids) reads.add(tx.get(indexDirs.gidMapDir().pack(Tuple.from(gid))));
+    return allOf(reads.toArray(CompletableFuture[]::new)).thenCompose(vv -> {
+      List<int[]> out = new ArrayList<>();
+      Set<Integer> segs = new HashSet<>();
+      for (CompletableFuture<byte[]> f : reads) {
+        byte[] b = f.getNow(null);
+        if (b == null) continue;
+        Tuple t = Tuple.fromBytes(b);
+        int s = Math.toIntExact(t.getLong(0));
+        int v2 = Math.toIntExact(t.getLong(1));
+        out.add(new int[] {s, v2});
         segs.add(s);
       }
-    }
-    return store.deleteBatch(pairs).thenCompose(v -> scheduleVacuumIfNeeded(segs));
-  }
-
-  @Override
-  public CompletableFuture<Void> deleteAll(Transaction tx, long[] ids) {
-    Set<Integer> segs = new HashSet<>();
-    int[][] pairs = new int[ids == null ? 0 : ids.length][2];
-    if (ids != null) {
-      for (int i = 0; i < ids.length; i++) {
-        int s = (int) (ids[i] >>> 32);
-        int v = (int) ids[i];
-        pairs[i][0] = s;
-        pairs[i][1] = v;
-        segs.add(s);
-      }
-    }
-    return store.deleteBatch(tx, pairs).thenCompose(v -> scheduleVacuumIfNeeded(tx, segs));
+      return store.deleteBatch(tx, out.toArray(new int[0][])).thenCompose(v -> scheduleVacuumIfNeeded(tx, segs));
+    });
   }
 
   @Override
