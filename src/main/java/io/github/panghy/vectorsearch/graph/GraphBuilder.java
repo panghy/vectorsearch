@@ -63,30 +63,23 @@ public final class GraphBuilder {
       int limit = Math.max(0, Math.min(lBuild, n - 1));
       int[] selected = new int[Math.min(degree, limit)];
       int s = 0;
-      outer:
       for (int k = 0; k < limit && s < selected.length; k++) {
         int u = idx[k];
-        if (!prune) {
-          selected[s++] = u;
-          continue;
-        }
-        double diu = distToI[u];
-        for (int t = 0; t < s; t++) {
-          int pnb = selected[t];
-          double dup = l2(vectors[u], vectors[pnb]);
-          if (dup <= alpha * diu) {
-            continue outer; // pruned
+        boolean keep = true;
+        if (prune) {
+          double diu = distToI[u];
+          for (int t = 0; t < s; t++) {
+            int pnb = selected[t];
+            double dup = l2(vectors[u], vectors[pnb]);
+            if (dup <= alpha * diu) {
+              keep = false;
+              break;
+            }
           }
         }
-        selected[s++] = u;
+        if (keep) selected[s++] = u;
       }
-      if (s < selected.length) {
-        int[] shrink = new int[s];
-        System.arraycopy(selected, 0, shrink, 0, s);
-        neigh[i] = shrink;
-      } else {
-        neigh[i] = selected;
-      }
+      neigh[i] = (s == selected.length) ? selected : java.util.Arrays.copyOf(selected, s);
     }
     return neigh;
   }
