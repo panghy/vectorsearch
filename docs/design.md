@@ -227,6 +227,31 @@ Search Defaults and Caching (Updated)
 •	Codebooks: each maybe ~0.5 MB, if we had 50 segments that’s 25 MB.
 •	Graph neighbors: 100k * R (say 64) * 4 bytes ≈ 25 MB per segment if fully cached. Caching all segments fully isn’t necessary – we rely on partial caching and fast I/O.
 
+Traversal Parameters
+
+•	Mode
+   – BEST_FIRST (default): priority queue by approximate (PQ LUT) distance.
+   – BEAM (debug): fixed-width frontier for experiments and parity checks.
+
+•	Entry seeds (pivots)
+   – PQ-seeded candidates: top-N by PQ distance as initial seeds.
+   – Optional deterministic random pivots (SearchParams.SeedStrategy) to broaden coverage.
+
+•	ef and maxExplore
+   – ef controls breadth before exact rerank; higher ef → better recall, more I/O/CPU.
+   – maxExplore caps total expansions to bound worst-case latency.
+
+•	Per-segment fan-in
+   – Limit candidates per segment (≥ k, typically k×oversample) to keep tail latency bounded when many segments exist.
+   – Future: dynamic budgeting by segment size/age and early-stopping when improvement stalls.
+
+•	Cosine normalization
+   – For COSINE, exact rerank can normalize on read if requested via SearchParams.
+
+•	Prefetch and caches
+   – PQ codebooks: optional prefetch; test-only flag can block until warm.
+   – Adjacency: async bulk loaders with getAll; batch cache fetches for frontier nodes.
+
 Guidance for Implementation: Below we outline how some operations can be implemented in pseudocode to tie the design together:
 •	Insertion (Single Vector): (simplified pseudocode)
 
