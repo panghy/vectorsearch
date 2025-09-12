@@ -188,7 +188,7 @@ public final class VectorIndexConfig {
     return graphBuildBreadth;
   }
 
-  /** Returns the pruning alpha parameter (>1.0 disables aggressive pruning). */
+  /** Returns the pruning alpha parameter (>1.0 enables pruning; <= 1.0 disables). */
   public double getGraphAlpha() {
     return graphAlpha;
   }
@@ -420,7 +420,7 @@ public final class VectorIndexConfig {
       return this;
     }
 
-    /** Sets the Vamana-like pruning alpha (>= 0). 0 or 1 disables pruning. */
+    /** Sets the Vamana-like pruning alpha (>= 0). alpha <= 1.0 disables pruning. */
     public Builder graphAlpha(double alpha) {
       this.graphAlpha = alpha;
       return this;
