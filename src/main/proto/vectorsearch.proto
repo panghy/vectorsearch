@@ -57,6 +57,12 @@ message IndexMeta {
   // - oversample: multiplier of K for candidate collection before exact rerank
   int32 graph_degree = 7;
   int32 oversample = 8;
+  // Graph build breadth (L_build): how many nearest candidates to consider
+  // when constructing neighbors (before pruning). Typical values: graph_degree*4.
+  int32 graph_build_breadth = 9;
+  // Vamana-style pruning alpha parameter (>1.0). Lower removes more edges.
+  // Set to 0 or 1 to disable pruning (keep top-L_build by distance).
+  double graph_alpha = 10;
 
 }
 

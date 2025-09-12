@@ -36,6 +36,55 @@ public final class GraphBuilder {
     return neigh;
   }
 
+  /**
+   * Builds neighbors with simple Vamana-style pruning.
+   *
+   * <p>Algorithm:
+   * 1) For each node i, compute distances to all j != i and take the top L_build by distance.
+   * 2) Greedily add candidates in order, pruning a candidate u if there exists a kept neighbor p
+   *    such that dist(u, p) <= alpha * dist(u, i). Set alpha <= 1 to disable pruning.
+   */
+  public static int[][] buildPrunedNeighbors(float[][] vectors, int degree, int lBuild, double alpha) {
+    int n = vectors.length;
+    int[][] neigh = new int[n][];
+    boolean prune = alpha > 1.0;
+    for (int i = 0; i < n; i++) {
+      Integer[] idx = new Integer[n - 1];
+      int p = 0;
+      for (int j = 0; j < n; j++) if (j != i) idx[p++] = j;
+      final int ii = i;
+      Arrays.sort(idx, Comparator.comparingDouble(j -> l2(vectors[ii], vectors[j])));
+      int limit = Math.max(0, Math.min(lBuild, n - 1));
+      int[] selected = new int[Math.min(degree, limit)];
+      int s = 0;
+      outer:
+      for (int k = 0; k < limit && s < selected.length; k++) {
+        int u = idx[k];
+        if (!prune) {
+          selected[s++] = u;
+          continue;
+        }
+        double diu = l2(vectors[ii], vectors[u]);
+        for (int t = 0; t < s; t++) {
+          int pnb = selected[t];
+          double dup = l2(vectors[u], vectors[pnb]);
+          if (dup <= alpha * diu) {
+            continue outer; // pruned
+          }
+        }
+        selected[s++] = u;
+      }
+      if (s < selected.length) {
+        int[] shrink = new int[s];
+        System.arraycopy(selected, 0, shrink, 0, s);
+        neigh[i] = shrink;
+      } else {
+        neigh[i] = selected;
+      }
+    }
+    return neigh;
+  }
+
   private static double l2(float[] a, float[] b) {
     double s = 0.0;
     for (int i = 0; i < a.length; i++) {
