@@ -33,6 +33,8 @@ public final class VectorIndexConfig {
   private final int pqK;
   private final int graphDegree;
   private final int oversample;
+  private final int graphBuildBreadth;
+  private final double graphAlpha;
 
   private final int estimatedWorkerCount;
   private final int localWorkerThreads;
@@ -72,6 +74,11 @@ public final class VectorIndexConfig {
     this.pqK = b.pqK;
     if (b.graphDegree <= 0) throw new IllegalArgumentException("graphDegree must be positive");
     this.graphDegree = b.graphDegree;
+    if (b.graphBuildBreadth < b.graphDegree)
+      throw new IllegalArgumentException("graphBuildBreadth must be >= graphDegree");
+    if (b.graphAlpha < 0.0) throw new IllegalArgumentException("graphAlpha must be >= 0");
+    this.graphBuildBreadth = b.graphBuildBreadth;
+    this.graphAlpha = b.graphAlpha;
     if (b.oversample <= 0) throw new IllegalArgumentException("oversample must be positive");
     this.oversample = b.oversample;
 
@@ -174,6 +181,16 @@ public final class VectorIndexConfig {
    */
   public int getGraphDegree() {
     return graphDegree;
+  }
+
+  /** Returns the graph build breadth (L_build). */
+  public int getGraphBuildBreadth() {
+    return graphBuildBreadth;
+  }
+
+  /** Returns the pruning alpha parameter (>1.0 disables aggressive pruning). */
+  public double getGraphAlpha() {
+    return graphAlpha;
   }
 
   /**
@@ -324,6 +341,8 @@ public final class VectorIndexConfig {
     private int pqK = 256;
     private int graphDegree = 64;
     private int oversample = 2;
+    private int graphBuildBreadth = 256;
+    private double graphAlpha = 1.2;
     private int estimatedWorkerCount = 1;
     private int localWorkerThreads = 0;
     private int localMaintenanceWorkerThreads = 0;
@@ -392,6 +411,18 @@ public final class VectorIndexConfig {
      */
     public Builder graphDegree(int graphDegree) {
       this.graphDegree = graphDegree;
+      return this;
+    }
+
+    /** Sets the graph build breadth (L_build). Must be >= graphDegree. */
+    public Builder graphBuildBreadth(int breadth) {
+      this.graphBuildBreadth = breadth;
+      return this;
+    }
+
+    /** Sets the Vamana-like pruning alpha (>= 0). 0 or 1 disables pruning. */
+    public Builder graphAlpha(double alpha) {
+      this.graphAlpha = alpha;
       return this;
     }
 

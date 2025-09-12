@@ -87,6 +87,8 @@ public final class FdbVectorStore {
               .setPqK(config.getPqK())
               .setGraphDegree(config.getGraphDegree())
               .setOversample(config.getOversample())
+              .setGraphBuildBreadth(config.getGraphBuildBreadth())
+              .setGraphAlpha(config.getGraphAlpha())
               .build();
           tr.set(metaK, meta.toByteArray());
         } else {
@@ -147,6 +149,15 @@ public final class FdbVectorStore {
     if (existing.getGraphDegree() != config.getGraphDegree()) {
       throw new IllegalArgumentException("graphDegree mismatch: existing=" + existing.getGraphDegree()
           + ", requested=" + config.getGraphDegree());
+    }
+    if (existing.getGraphBuildBreadth() != 0 && existing.getGraphBuildBreadth() != config.getGraphBuildBreadth()) {
+      throw new IllegalArgumentException("graphBuildBreadth mismatch: existing=" + existing.getGraphBuildBreadth()
+          + ", requested=" + config.getGraphBuildBreadth());
+    }
+    if (Double.compare(existing.getGraphAlpha(), 0.0) != 0
+        && Double.compare(existing.getGraphAlpha(), config.getGraphAlpha()) != 0) {
+      throw new IllegalArgumentException("graphAlpha mismatch: existing=" + existing.getGraphAlpha()
+          + ", requested=" + config.getGraphAlpha());
     }
     if (existing.getOversample() != config.getOversample()) {
       throw new IllegalArgumentException("oversample mismatch: existing=" + existing.getOversample()

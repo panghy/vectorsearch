@@ -1,6 +1,7 @@
 package io.github.panghy.vectorsearch.tasks;
 
 import static io.github.panghy.vectorsearch.graph.GraphBuilder.buildL2Neighbors;
+import static io.github.panghy.vectorsearch.graph.GraphBuilder.buildPrunedNeighbors;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
@@ -176,9 +177,12 @@ public class SegmentBuildService {
     final int checkEvery = config.getBuildSizeCheckEvery();
 
     // Precompute adjacency using raw vectors
-    final int[][] neighbors = buildL2Neighbors(
-        vectors.toArray(new float[0][]),
-        Math.max(0, Math.min(config.getGraphDegree(), Math.max(0, vectors.size() - 1))));
+    int degree = Math.max(0, Math.min(config.getGraphDegree(), Math.max(0, vectors.size() - 1)));
+    int lBuild = Math.max(degree, config.getGraphBuildBreadth());
+    double alpha = config.getGraphAlpha();
+    final int[][] neighbors = (alpha <= 1.0)
+        ? buildL2Neighbors(vectors.toArray(new float[0][]), degree)
+        : buildPrunedNeighbors(vectors.toArray(new float[0][]), degree, lBuild, alpha);
     final float[][][] cCentroids = centroids;
     final List<float[]> vVectors = vectors;
 
