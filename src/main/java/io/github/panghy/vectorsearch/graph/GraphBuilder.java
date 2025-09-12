@@ -53,7 +53,13 @@ public final class GraphBuilder {
       int p = 0;
       for (int j = 0; j < n; j++) if (j != i) idx[p++] = j;
       final int ii = i;
-      Arrays.sort(idx, Comparator.comparingDouble(j -> l2(vectors[ii], vectors[j])));
+      // Precompute distances to i for sorting and reuse in pruning
+      final double[] distToI = new double[n];
+      Arrays.sort(idx, Comparator.comparingDouble(j -> {
+        double d = l2(vectors[ii], vectors[j]);
+        distToI[j] = d;
+        return d;
+      }));
       int limit = Math.max(0, Math.min(lBuild, n - 1));
       int[] selected = new int[Math.min(degree, limit)];
       int s = 0;
@@ -64,7 +70,7 @@ public final class GraphBuilder {
           selected[s++] = u;
           continue;
         }
-        double diu = l2(vectors[ii], vectors[u]);
+        double diu = distToI[u];
         for (int t = 0; t < s; t++) {
           int pnb = selected[t];
           double dup = l2(vectors[u], vectors[pnb]);
