@@ -325,10 +325,9 @@ Status:
   - Provide storage/query overloads that accept `Transaction`/`ReadTransaction` in addition to convenience methods, per project standards.
   - Refactor internal helpers to compose futures rather than open transactions internally where possible.
 
-- Delete API and vacuum skeleton:
-  - Add `delete(gid)` to set tombstone and increment `deleted_count`.
-  - Create `VacuumJob` queued under `tasks/` that erases tombstoned vectors and associated PQ/graph keys in chunked commits.
-  - Tests for deletion visibility in queries and vacuum idempotency.
+- Vacuum job polish:
+  - Verify chunk sizing and cadence under load; expose metrics (rows removed, bytes cleared, duration).
+  - Expand tests for edge cases (empty segments, all-tombstoned segments, concurrent deletes during vacuum).
 
 - Observability:
   - Wire OpenTelemetry spans and metrics around add/rotate/build/query and queue operations.
