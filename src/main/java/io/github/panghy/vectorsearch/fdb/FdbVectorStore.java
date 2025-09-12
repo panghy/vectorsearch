@@ -154,8 +154,7 @@ public final class FdbVectorStore {
       throw new IllegalArgumentException("graphBuildBreadth mismatch: existing=" + existing.getGraphBuildBreadth()
           + ", requested=" + config.getGraphBuildBreadth());
     }
-    if (Double.compare(existing.getGraphAlpha(), 0.0) != 0
-        && Double.compare(existing.getGraphAlpha(), config.getGraphAlpha()) != 0) {
+    if (existing.getGraphAlpha() != 0.0 && existing.getGraphAlpha() != config.getGraphAlpha()) {
       throw new IllegalArgumentException("graphAlpha mismatch: existing=" + existing.getGraphAlpha()
           + ", requested=" + config.getGraphAlpha());
     }
