@@ -66,7 +66,8 @@ Notes:
   - M2 ACTIVE CRUD and rotation (FdbVectorStore + tests) honoring strict-cap rotation semantics.
   - M3 Segment lifecycle with TaskQueue under `tasks/` (enqueue on rotate; worker processes one build at a time).
   - M4 Background builders writing PQ codebook/codes and L2-based adjacency; segment sealing.
-  - M5 Search: Graph-guided traversal for SEALED segments seeded by PQ with exact re‑rank; BEAM and BEST_FIRST modes implemented; default is BEST_FIRST. Adjacency I/O batched; explored caps and early‑exit honored. WRITING segments are ignored by search; COMPACTING sources are treated as sealed.
+- M5 Search: Graph-guided traversal for SEALED segments seeded by PQ with exact re‑rank; BEAM and BEST_FIRST modes implemented; default is BEST_FIRST. Adjacency I/O batched; explored caps and early‑exit honored. WRITING segments are ignored by search; COMPACTING sources are treated as sealed.
+  - M5 Search: Graph‑guided traversal for SEALED segments seeded by PQ with exact re‑rank; BEST_FIRST default (BEAM retained for debug). Implemented with adjacency batch loads, explored caps, and early‑exit. WRITING is skipped; COMPACTING treated as SEALED.
   - M6 Caching: Async Caffeine caches for PQ codebooks and adjacency with asyncLoadAll; code paths use `getAll` for batch warms; optional query-time codebook prefetch for SEALED segments.
   - M8 Observability: OpenTelemetry gauges registered for cache size and stats; configurable metric attributes; tests use InMemoryMetricReader.
   - M9 Hardening: consolidated tests, added edge-case coverage; JaCoCo gates (≥90% lines / ≥75% branches) passing.
@@ -317,11 +318,9 @@ Status:
 
 ## Next Steps (Next 3–5 Days)
 
-- Graph‑based SEALED search:
-  - Add `GraphSearcher` that performs best‑first/beam search over adjacency, seeded by multiple entry points.
-  - Integrate with existing PQ LUT scoring to prioritize frontier; fall back to small PQ scan when needed.
-  - Update `VectorIndex.query(...)` to use graph traversal for SEALED segments; keep exact rerank.
-  - Tests: verify parity vs brute‑force on small data and reduced IO on larger data.
+- Compaction planner + throttling:
+  - Add size/age‑aware heuristics; cap concurrent compactions; simple backpressure.
+  - Metrics: scheduled/running/duration/bytes moved; tests for deterministic picks.
 
 - Transaction‑scoped APIs:
   - Provide storage/query overloads that accept `Transaction`/`ReadTransaction` in addition to convenience methods, per project standards.
