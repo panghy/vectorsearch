@@ -11,6 +11,11 @@ import io.github.panghy.vectorsearch.fdb.FdbDirectories.IndexDirectories;
 import io.github.panghy.vectorsearch.fdb.FdbVectorIndex;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
+import io.github.panghy.vectorsearch.util.Metrics;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.Tracer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -57,7 +62,24 @@ public final class MaintenanceWorker {
     MaintenanceService svc = new MaintenanceService(config, indexDirs);
     if (t.hasVacuum()) {
       var v = t.getVacuum();
-      return svc.vacuumSegment(v.getSegId(), v.getMinDeletedRatio());
+      Tracer tracer = Metrics.tracer();
+      Span span = tracer.spanBuilder("vectorsearch.vacuum")
+          .setSpanKind(SpanKind.INTERNAL)
+          .setAttribute("segId", v.getSegId())
+          .startSpan();
+      long t0 = System.nanoTime();
+      return svc.vacuumSegment(v.getSegId(), v.getMinDeletedRatio()).whenComplete((vv2, ex) -> {
+        long durMs = (System.nanoTime() - t0) / 1_000_000;
+        Attributes attrs =
+            Attributes.builder().put("segId", v.getSegId()).build();
+        Metrics.VACUUM_RUN_COUNT.add(1, attrs);
+        Metrics.VACUUM_DURATION_MS.record((double) durMs, attrs);
+        if (ex != null) {
+          span.recordException(ex);
+          span.setStatus(io.opentelemetry.api.trace.StatusCode.ERROR);
+        }
+        span.end();
+      });
     }
     if (t.hasCompact()) {
       return svc.compactSegments(t.getCompact().getSegIdsList());
@@ -71,6 +93,12 @@ public final class MaintenanceWorker {
 
   private CompletableFuture<Void> handleFindCandidates(MaintenanceService svc, int anchor, Database db) {
     if (config.getMaxConcurrentCompactions() <= 0) return completedFuture(null);
+    Tracer tracer = Metrics.tracer();
+    Span span = tracer.spanBuilder("vectorsearch.compaction")
+        .setSpanKind(SpanKind.INTERNAL)
+        .setAttribute("anchorSegId", anchor)
+        .startSpan();
+    long t0 = System.nanoTime();
     return svc.findCompactionCandidates(anchor).thenCompose(cands -> {
       if (cands.size() <= 1) return completedFuture(null);
       return svc.countInFlightCompactions()

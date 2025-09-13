@@ -31,9 +31,11 @@ import io.github.panghy.vectorsearch.tasks.ProtoSerializers.StringSerializer;
 import io.github.panghy.vectorsearch.tasks.SegmentBuildWorkerPool;
 import io.github.panghy.vectorsearch.util.Distances;
 import io.github.panghy.vectorsearch.util.FloatPacker;
-import io.opentelemetry.api.GlobalOpenTelemetry;
-import io.opentelemetry.api.metrics.LongCounter;
-import io.opentelemetry.api.metrics.Meter;
+import io.github.panghy.vectorsearch.util.Metrics;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.Tracer;
 import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -64,9 +66,9 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   private MaintenanceWorkerPool maintenancePool;
   private SegmentBuildWorkerPool workerPool;
 
-  private final Meter meter;
-  private final LongCounter vacScheduled;
-  private final LongCounter vacSkipped;
+  private final io.opentelemetry.api.metrics.Meter meter;
+  private final io.opentelemetry.api.metrics.LongCounter vacScheduled;
+  private final io.opentelemetry.api.metrics.LongCounter vacSkipped;
 
   private FdbVectorIndex(VectorIndexConfig config, FdbVectorStore store, FdbDirectories.IndexDirectories indexDirs) {
     this.config = config;
@@ -75,7 +77,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     this.caches = new SegmentCaches(config, indexDirs);
     this.caches.registerMetrics(config);
     // Register index-level metrics
-    this.meter = GlobalOpenTelemetry.getMeter("io.github.panghy.vectorsearch");
+    this.meter = io.opentelemetry.api.GlobalOpenTelemetry.getMeter("io.github.panghy.vectorsearch");
     this.vacScheduled = meter.counterBuilder("vectorsearch.maintenance.vacuum.scheduled")
         .build();
     this.vacSkipped =
@@ -292,6 +294,11 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   @Override
   public CompletableFuture<List<SearchResult>> query(float[] q, int k, SearchParams params) {
     Database db = config.getDatabase();
+    Tracer tracer = Metrics.tracer();
+    Span span = tracer.spanBuilder("vectorsearch.query")
+        .setSpanKind(SpanKind.INTERNAL)
+        .startSpan();
+    long t0 = System.nanoTime();
     LOG.debug(
         "Query start: k={} metric={} dim={} oversample={}",
         k,
@@ -302,84 +309,104 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     if (params.mode() == SearchParams.Mode.BEAM && BeamWarn.once()) {
       LOG.warn("Search mode BEAM is deprecated; prefer BEST_FIRST.");
     }
-    return listSegmentsWithMeta(indexDirs).thenCompose(segIds -> {
-      LOG.debug("Discovered {} segment(s) for search: {}", segIds.size(), segIds);
-      // Prefetch codebooks for SEALED segments via async cache getAll (batched inside loader)
-      CompletableFuture<?> prefetch = !config.isPrefetchCodebooksEnabled()
-          ? completedFuture(null)
-          : db.readAsync(tr -> {
-                List<CompletableFuture<byte[]>> keyFs = new ArrayList<>();
-                List<Integer> ids = new ArrayList<>();
-                for (int segId : segIds) {
-                  keyFs.add(indexDirs
-                      .segmentKeys(tr, segId)
-                      .thenCompose(sk -> tr.get(sk.metaKey()))
-                      .exceptionally(ex -> null));
-                  ids.add(segId);
-                }
-                return allOf(keyFs.toArray(CompletableFuture[]::new))
-                    .thenApply(v -> {
-                      Set<Integer> sealedSegs = new HashSet<>();
-                      for (int i = 0; i < ids.size(); i++) {
-                        byte[] b = keyFs.get(i).getNow(null);
-                        if (b == null) continue;
-                        try {
-                          SegmentMeta sm = SegmentMeta.parseFrom(b);
-                          if (sm.getState() == SegmentMeta.State.SEALED)
-                            sealedSegs.add(ids.get(i));
-                        } catch (InvalidProtocolBufferException e) {
-                          throw new RuntimeException(e);
-                        }
-                      }
-                      return sealedSegs;
-                    });
-              })
-              .thenCompose(sealedSegs -> {
-                if (sealedSegs.isEmpty()) {
-                  return completedFuture(null);
-                }
-                return caches.getCodebookCacheAsync()
-                    .getAll(sealedSegs)
-                    .thenApply(m -> null);
-              })
-              .exceptionally(ex -> null);
-      CompletableFuture<Void> prefetchBarrier =
-          config.isPrefetchCodebooksSync() ? prefetch.thenApply(v -> null) : completedFuture(null);
-      return prefetchBarrier.thenCompose(ignored -> {
-        List<CompletableFuture<List<SearchResult>>> perSeg = new ArrayList<>();
-        for (int segId : segIds) {
-          int perSegLimit = Math.max(k, k * Math.max(1, config.getOversample()));
-          LOG.debug(
-              "Scheduling per-segment search: segId={} perSegLimit={} mode={} ef={} beam={}"
-                  + " maxExplore={}",
-              segId,
-              perSegLimit,
-              params.mode(),
-              params.efSearch(),
-              params.beamWidth(),
-              params.maxExplore());
-          perSeg.add(searchSegment(db, indexDirs, segId, q, perSegLimit, params));
-        }
-        return allOf(perSeg.toArray(CompletableFuture[]::new)).thenApply(v -> {
-          List<SearchResult> merged = new ArrayList<>();
-          for (CompletableFuture<List<SearchResult>> f : perSeg) merged.addAll(f.getNow(List.of()));
-          merged.sort(Comparator.comparingDouble(SearchResult::score).reversed());
-          if (merged.size() > k) merged = merged.subList(0, k);
-          if (!merged.isEmpty()) {
-            int limit = Math.min(5, merged.size());
-            LOG.debug(
-                "Merged top {} results: {}",
-                limit,
-                merged.subList(0, limit).stream()
-                    .map(r -> String.format(
-                        "(seg=%d,id=%d,score=%.4f)",
-                        (int) (r.gid() >>> 32), (int) r.gid(), r.score()))
-                    .toList());
+    return listSegmentsWithMeta(indexDirs)
+        .thenCompose(segIds -> {
+          LOG.debug("Discovered {} segment(s) for search: {}", segIds.size(), segIds);
+          // Prefetch codebooks for SEALED segments via async cache getAll (batched inside loader)
+          CompletableFuture<?> prefetch = !config.isPrefetchCodebooksEnabled()
+              ? completedFuture(null)
+              : db.readAsync(tr -> {
+                    List<CompletableFuture<byte[]>> keyFs = new ArrayList<>();
+                    List<Integer> ids = new ArrayList<>();
+                    for (int segId : segIds) {
+                      keyFs.add(indexDirs
+                          .segmentKeys(tr, segId)
+                          .thenCompose(sk -> tr.get(sk.metaKey()))
+                          .exceptionally(ex -> null));
+                      ids.add(segId);
+                    }
+                    return allOf(keyFs.toArray(CompletableFuture[]::new))
+                        .thenApply(v -> {
+                          Set<Integer> sealedSegs = new HashSet<>();
+                          for (int i = 0; i < ids.size(); i++) {
+                            byte[] b = keyFs.get(i).getNow(null);
+                            if (b == null) continue;
+                            try {
+                              SegmentMeta sm = SegmentMeta.parseFrom(b);
+                              if (sm.getState() == SegmentMeta.State.SEALED)
+                                sealedSegs.add(ids.get(i));
+                            } catch (InvalidProtocolBufferException e) {
+                              throw new RuntimeException(e);
+                            }
+                          }
+                          return sealedSegs;
+                        });
+                  })
+                  .thenCompose(sealedSegs -> {
+                    if (sealedSegs.isEmpty()) {
+                      return completedFuture(null);
+                    }
+                    return caches.getCodebookCacheAsync()
+                        .getAll(sealedSegs)
+                        .thenApply(m -> null);
+                  })
+                  .exceptionally(ex -> null);
+          CompletableFuture<Void> prefetchBarrier =
+              config.isPrefetchCodebooksSync() ? prefetch.thenApply(v -> null) : completedFuture(null);
+          return prefetchBarrier.thenCompose(ignored -> {
+            List<CompletableFuture<List<SearchResult>>> perSeg = new ArrayList<>();
+            for (int segId : segIds) {
+              int perSegLimit = Math.max(k, k * Math.max(1, config.getOversample()));
+              LOG.debug(
+                  "Scheduling per-segment search: segId={} perSegLimit={} mode={} ef={} beam={}"
+                      + " maxExplore={}",
+                  segId,
+                  perSegLimit,
+                  params.mode(),
+                  params.efSearch(),
+                  params.beamWidth(),
+                  params.maxExplore());
+              perSeg.add(searchSegment(db, indexDirs, segId, q, perSegLimit, params));
+            }
+            return allOf(perSeg.toArray(CompletableFuture[]::new)).thenApply(v -> {
+              List<SearchResult> merged = new ArrayList<>();
+              for (CompletableFuture<List<SearchResult>> f : perSeg) merged.addAll(f.getNow(List.of()));
+              merged.sort(Comparator.comparingDouble(SearchResult::score)
+                  .reversed());
+              if (merged.size() > k) merged = merged.subList(0, k);
+              if (!merged.isEmpty()) {
+                int limit = Math.min(5, merged.size());
+                LOG.debug(
+                    "Merged top {} results: {}",
+                    limit,
+                    merged.subList(0, limit).stream()
+                        .map(r -> String.format(
+                            "(seg=%d,id=%d,score=%.4f)",
+                            (int) (r.gid() >>> 32), (int) r.gid(), r.score()))
+                        .toList());
+              }
+              long durMs = (System.nanoTime() - t0) / 1_000_000;
+              Attributes attrs = Attributes.builder()
+                  .put("metric", config.getMetric().name())
+                  .put("dim", config.getDimension())
+                  .put("k", k)
+                  .build();
+              Metrics.QUERY_COUNT.add(1, attrs);
+              Metrics.QUERY_DURATION_MS.record((double) durMs, attrs);
+              span.setAttribute("k", k);
+              span.setAttribute("dimension", config.getDimension());
+              span.end();
+              return merged;
+            });
+          });
+        })
+        .whenComplete((r, ex) -> {
+          if (ex != null) {
+            span.recordException(ex);
+            span.setStatus(io.opentelemetry.api.trace.StatusCode.ERROR);
+            span.end();
           }
-          return merged;
         });
-      });
-    });
   }
 
   private static final class BeamWarn {
