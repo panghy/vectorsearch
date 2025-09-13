@@ -417,39 +417,39 @@ public final class MaintenanceService {
       for (int sid : ids)
         metas.add(db.readAsync(tr -> indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey()))));
       return allOf(metas.toArray(CompletableFuture[]::new)).thenApply(v -> {
-        List<long[]> sealed = new ArrayList<>(); // [segId, count, createdAtMs]
+        List<SealedSegment> sealed = new ArrayList<>();
         for (int i = 0; i < ids.size(); i++) {
           byte[] b = metas.get(i).getNow(null);
           if (b == null) continue;
           try {
             var sm = SegmentMeta.parseFrom(b);
             if (sm.getState() == SegmentMeta.State.SEALED) {
-              sealed.add(new long[] {ids.get(i), sm.getCount(), sm.getCreatedAtMs()});
+              sealed.add(new SealedSegment(ids.get(i), sm.getCount(), sm.getCreatedAtMs()));
             }
           } catch (InvalidProtocolBufferException e) {
             throw new RuntimeException(e);
           }
         }
         sealed.sort((a, b2) -> {
-          int c = Long.compare(a[1], b2[1]);
+          int c = Long.compare(a.count(), b2.count());
           if (c != 0) return c;
-          return Long.compare(a[2], b2[2]); // older first
+          return Long.compare(a.createdAtMs(), b2.createdAtMs()); // older first
         });
         int budget = (int) Math.max(1, Math.round(0.8 * maxSize));
         int sum = 0;
         List<Integer> pick = new ArrayList<>();
         // Ensure anchor is present (if sealed)
-        for (long[] pair : sealed)
-          if (pair[0] == anchorSegId) {
+        for (SealedSegment s : sealed)
+          if (s.segId() == anchorSegId) {
             pick.add(anchorSegId);
-            sum += (int) pair[1];
+            sum += (int) s.count();
             break;
           }
-        for (long[] pair : sealed) {
-          if (pick.contains((int) pair[0])) continue;
+        for (SealedSegment s : sealed) {
+          if (pick.contains(s.segId())) continue;
           if (pick.size() >= 4) break;
-          pick.add((int) pair[0]);
-          sum += (int) pair[1];
+          pick.add(s.segId());
+          sum += (int) s.count();
           if (sum >= budget) break;
         }
         if (pick.size() <= 1) return List.of();
@@ -495,4 +495,7 @@ public final class MaintenanceService {
       this.removed = r;
     }
   }
+
+  // Improves readability over raw long[] tuples in candidate planning
+  private static record SealedSegment(int segId, long count, long createdAtMs) {}
 }
