@@ -1,13 +1,16 @@
 package io.github.panghy.vectorsearch.tasks;
 
+import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
+import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories.IndexDirectories;
 import io.github.panghy.vectorsearch.fdb.FdbVectorIndex;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
+import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -42,128 +45,78 @@ public final class MaintenanceWorker {
    */
   public CompletableFuture<Boolean> runOnce() {
     Database db = config.getDatabase();
-    return completedFuture(indexDirs)
-        .thenCompose(d -> queue.awaitAndClaimTask().thenCompose(claim -> {
-          MaintenanceTask t = claim.task();
-          MaintenanceService svc = new MaintenanceService(config, indexDirs);
-          CompletableFuture<Void> work;
-          if (t.hasVacuum()) {
-            var v = t.getVacuum();
-            work = svc.vacuumSegment(v.getSegId(), v.getMinDeletedRatio());
-          } else if (t.hasCompact()) {
-            work = svc.compactSegments(t.getCompact().getSegIdsList());
-          } else if (t.hasFindCandidates()) {
-            // Heuristic handled by MaintenanceService.findCompactionCandidates(anchor):
-            // pick sealed small segments until we approximately fill one target
-            int anchor = t.getFindCandidates().getAnchorSegId();
-            work = svc.findCompactionCandidates(anchor).thenCompose(cands -> {
-              if (cands.size() <= 1) return completedFuture(null);
-              if (config.getMaxConcurrentCompactions() <= 0) return completedFuture(null);
-              return new MaintenanceService(config, indexDirs)
-                  .countInFlightCompactions()
-                  .thenCompose(inflight -> {
-                    if (inflight >= config.getMaxConcurrentCompactions())
-                      return completedFuture(null);
-                    return db.runAsync(tr -> {
-                          // First validate all candidates are SEALED
-                          java.util.List<java.util.concurrent.CompletableFuture<byte[]>>
-                              metas = new java.util.ArrayList<>();
-                          for (int sid : cands) {
-                            metas.add(indexDirs
-                                .segmentKeys(tr, sid)
-                                .thenCompose(sk -> tr.get(sk.metaKey())));
-                          }
-                          return java.util.concurrent.CompletableFuture.allOf(metas.toArray(
-                                  java.util.concurrent.CompletableFuture[]::new))
-                              .thenCompose(v2 -> {
-                                for (var mbF : metas) {
-                                  byte[] mb = mbF.getNow(null);
-                                  if (mb == null) return completedFuture(false);
-                                  try {
-                                    var sm = io.github.panghy.vectorsearch.proto
-                                        .SegmentMeta.parseFrom(mb);
-                                    if (sm.getState()
-                                        != io.github.panghy.vectorsearch.proto
-                                            .SegmentMeta.State.SEALED) {
-                                      return completedFuture(false);
-                                    }
-                                  } catch (
-                                      com.google.protobuf
-                                              .InvalidProtocolBufferException
-                                          e) {
-                                    throw new RuntimeException(e);
-                                  }
-                                }
-                                // Now mark all as COMPACTING
-                                java.util.List<
-                                        java.util.concurrent.CompletableFuture<
-                                            Void>>
-                                    sets = new java.util.ArrayList<>();
-                                for (int sid : cands) {
-                                  sets.add(indexDirs
-                                      .segmentKeys(tr, sid)
-                                      .thenCompose(sk -> tr.get(sk.metaKey())
-                                          .thenApply(
-                                              bytes -> {
-                                                try {
-                                                  var sm = io.github
-                                                      .panghy
-                                                      .vectorsearch
-                                                      .proto
-                                                      .SegmentMeta
-                                                      .parseFrom(
-                                                          bytes);
-                                                  var updated =
-                                                      sm
-                                                          .toBuilder()
-                                                          .setState(
-                                                              io
-                                                                  .github
-                                                                  .panghy
-                                                                  .vectorsearch
-                                                                  .proto
-                                                                  .SegmentMeta
-                                                                  .State
-                                                                  .COMPACTING)
-                                                          .build();
-                                                  tr.set(
-                                                      sk
-                                                          .metaKey(),
-                                                      updated
-                                                          .toByteArray());
-                                                  return null;
-                                                } catch (
-                                                    com.google
-                                                            .protobuf
-                                                            .InvalidProtocolBufferException
-                                                        e) {
-                                                  throw new RuntimeException(
-                                                      e);
-                                                }
-                                              })));
-                                }
-                                return java.util.concurrent.CompletableFuture.allOf(
-                                        sets.toArray(
-                                            java.util.concurrent
-                                                        .CompletableFuture
-                                                    []::new))
-                                    .thenApply(x -> true);
-                              });
-                        })
-                        .thenCompose(marked -> marked
-                            ? FdbVectorIndex.createOrOpen(config)
-                                .thenCompose(ix -> ((FdbVectorIndex) ix)
-                                    .requestCompaction(cands)
-                                    .whenComplete((vv, ex) -> ix.close()))
-                            : completedFuture(null));
-                  });
-            });
-          } else {
-            work = completedFuture(null);
+    return queue.awaitAndClaimTask().thenCompose(claim -> processTask(claim.task(), db)
+        .handle((vv, ex) -> ex)
+        .thenCompose(ex -> (ex == null) ? claim.complete() : claim.fail())
+        .thenApply(v -> true));
+  }
+
+  private CompletableFuture<Void> processTask(MaintenanceTask t, Database db) {
+    MaintenanceService svc = new MaintenanceService(config, indexDirs);
+    if (t.hasVacuum()) {
+      var v = t.getVacuum();
+      return svc.vacuumSegment(v.getSegId(), v.getMinDeletedRatio());
+    }
+    if (t.hasCompact()) {
+      return svc.compactSegments(t.getCompact().getSegIdsList());
+    }
+    if (t.hasFindCandidates()) {
+      int anchor = t.getFindCandidates().getAnchorSegId();
+      return handleFindCandidates(svc, anchor, db);
+    }
+    return completedFuture(null);
+  }
+
+  private CompletableFuture<Void> handleFindCandidates(MaintenanceService svc, int anchor, Database db) {
+    if (config.getMaxConcurrentCompactions() <= 0) return completedFuture(null);
+    return svc.findCompactionCandidates(anchor).thenCompose(cands -> {
+      if (cands.size() <= 1) return completedFuture(null);
+      return svc.countInFlightCompactions()
+          .thenCompose(inflight -> inflight >= config.getMaxConcurrentCompactions()
+              ? completedFuture(null)
+              : markCandidatesCompacting(db, cands)
+                  .thenCompose(marked -> marked
+                      ? FdbVectorIndex.createOrOpen(config)
+                          .thenCompose(ix -> ((FdbVectorIndex) ix)
+                              .requestCompaction(cands)
+                              .whenComplete((vv, ex) -> ix.close()))
+                      : completedFuture(null)));
+    });
+  }
+
+  private CompletableFuture<Boolean> markCandidatesCompacting(Database db, java.util.List<Integer> cands) {
+    return db.runAsync(tr -> {
+      java.util.List<java.util.concurrent.CompletableFuture<byte[]>> metas = new java.util.ArrayList<>();
+      for (int sid : cands) metas.add(indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey())));
+      return allOf(metas.toArray(CompletableFuture[]::new)).thenCompose(v -> {
+        for (var f : metas) {
+          byte[] mb = f.getNow(null);
+          if (mb == null) return completedFuture(false);
+          try {
+            var sm = SegmentMeta.parseFrom(mb);
+            if (sm.getState() != SegmentMeta.State.SEALED) return completedFuture(false);
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
           }
-          return work.handle((vv, ex) -> ex)
-              .thenCompose(ex -> (ex == null) ? claim.complete() : claim.fail())
-              .thenApply(v -> true);
-        }));
+        }
+        java.util.List<java.util.concurrent.CompletableFuture<Void>> sets = new java.util.ArrayList<>();
+        for (int sid : cands) {
+          sets.add(indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey())
+              .thenApply(bytes -> {
+                try {
+                  var sm = SegmentMeta.parseFrom(bytes);
+                  var updated = sm.toBuilder()
+                      .setState(SegmentMeta.State.COMPACTING)
+                      .build();
+                  tr.set(sk.metaKey(), updated.toByteArray());
+                  return null;
+                } catch (InvalidProtocolBufferException e) {
+                  throw new RuntimeException(e);
+                }
+              })));
+        }
+        return allOf(sets.toArray(CompletableFuture[]::new)).thenApply(x -> true);
+      });
+    });
   }
 }
