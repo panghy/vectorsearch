@@ -11,6 +11,9 @@ import io.github.panghy.vectorsearch.fdb.FdbDirectories.IndexDirectories;
 import io.github.panghy.vectorsearch.fdb.FdbVectorIndex;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -77,16 +80,16 @@ public final class MaintenanceWorker {
               : markCandidatesCompacting(db, cands)
                   .thenCompose(marked -> marked
                       ? FdbVectorIndex.createOrOpen(config)
-                          .thenCompose(ix -> ((FdbVectorIndex) ix)
+                          .thenCompose(ix -> ix
                               .requestCompaction(cands)
                               .whenComplete((vv, ex) -> ix.close()))
                       : completedFuture(null)));
     });
   }
 
-  private CompletableFuture<Boolean> markCandidatesCompacting(Database db, java.util.List<Integer> cands) {
+  private CompletableFuture<Boolean> markCandidatesCompacting(Database db, List<Integer> cands) {
     return db.runAsync(tr -> {
-      java.util.List<java.util.concurrent.CompletableFuture<byte[]>> metas = new java.util.ArrayList<>();
+      List<CompletableFuture<byte[]>> metas = new ArrayList<>();
       for (int sid : cands) metas.add(indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey())));
       return allOf(metas.toArray(CompletableFuture[]::new)).thenCompose(v -> {
         for (var f : metas) {
@@ -99,7 +102,7 @@ public final class MaintenanceWorker {
             throw new RuntimeException(e);
           }
         }
-        java.util.List<java.util.concurrent.CompletableFuture<Void>> sets = new java.util.ArrayList<>();
+        List<CompletableFuture<Void>> sets = new ArrayList<>();
         for (int sid : cands) {
           sets.add(indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey())
               .thenApply(bytes -> {
