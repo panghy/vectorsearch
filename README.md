@@ -62,21 +62,33 @@ index.close();
 - Search: SEALED (and COMPACTING sources) use PQ/graph traversal + exact re-rank; ACTIVE/PENDING use brute-force. WRITING segments are ignored by search.
 - Maintenance: Deletes set a tombstone flag and updates counters. If the deleted ratio exceeds a threshold, the index enqueues a vacuum maintenance task (with a configurable cooldown). Vacuum physically removes vector, PQ code, and adjacency, and decrements `deleted_count` while stamping `last_vacuum_at_ms`.
 
-## Metrics
 
-- `vectorsearch.cache.size{cache=codebook|adjacency}` (gauge)
-- `vectorsearch.cache.*` hit/miss/load counters (gauges of Caffeine stats)
-- `vectorsearch.segments.state_count{state=ACTIVE|PENDING|SEALED|COMPACTING|WRITING}` (gauge)
-- `vectorsearch.maintenance.vacuum.scheduled|skipped` (counters)
+## Telemetry (OpenTelemetry)
 
-To use OTel in tests:
-```java
-InMemoryMetricReader reader = InMemoryMetricReader.create();
-SdkMeterProvider mp = SdkMeterProvider.builder().registerMetricReader(reader).build();
-OpenTelemetrySdk sdk = OpenTelemetrySdk.builder().setMeterProvider(mp).build();
-GlobalOpenTelemetry.resetForTest();
-GlobalOpenTelemetry.set(sdk);
-```
+This library emits OpenTelemetry metrics and spans. It uses the global OpenTelemetry SDK (GlobalOpenTelemetry), so you can plug any exporter (OTLP/Prometheus/etc.) without code changes.
+
+Metrics (histograms are in milliseconds):
+- vectorsearch.query.duration_ms (histogram)
+- vectorsearch.query.count (counter)
+- vectorsearch.build.duration_ms (histogram)
+- vectorsearch.build.count (counter)
+- vectorsearch.vacuum.duration_ms (histogram)
+- vectorsearch.vacuum.run (counter)
+- vectorsearch.vacuum.removed (counter)
+- vectorsearch.compaction.duration_ms (histogram)
+- vectorsearch.compaction.run (counter)
+
+Common attributes on spans and metrics:
+- index.path: user‑readable DirectorySubspace path of the index (e.g. indexes/myIndex)
+- metric, dim, k (queries)
+- segId (vacuum/build)
+- anchorSegId (compaction)
+
+Spans:
+- vectorsearch.query, vectorsearch.build, vectorsearch.vacuum, vectorsearch.compaction
+
+Enablement:
+- Provide a GlobalOpenTelemetry instance in your app initialization with your preferred exporter. If none is provided, no‑op SDK is used and metrics/spans are dropped.
 
 ## Build, Test, and Coverage
 
@@ -99,6 +111,10 @@ VectorIndexConfig includes:
 See `src/main/java/.../VectorIndexConfig.java` for the full builder.
 
 ## Maintenance
+
+### Compaction Throttling
+
+Background compactions are planned from small SEALED segments and throttled by `maxConcurrentCompactions` in `VectorIndexConfig`. Set it to `0` to disable compactions. The maintenance worker only transitions segments to COMPACTING when the in‑flight count is below the limit.
 
 - Deletes: `index.delete(...)` marks tombstones and updates counters. If the deleted ratio exceeds the configured threshold and cooldown allows, a vacuum task is enqueued automatically.
 - Programmatic vacuum:
@@ -134,34 +150,3 @@ See `src/main/java/.../VectorIndexConfig.java` for the full builder.
 ## License
 
 Apache 2.0
-
-### Compaction Throttling
-
-Background compactions are planned from small SEALED segments and throttled by `maxConcurrentCompactions` in `VectorIndexConfig`. Set it to `0` to disable compactions. The maintenance worker only transitions segments to COMPACTING when the in‑flight count is below the limit.
-
-## Telemetry (OpenTelemetry)
-
-This library emits OpenTelemetry metrics and spans. It uses the global OpenTelemetry SDK (GlobalOpenTelemetry), so you can plug any exporter (OTLP/Prometheus/etc.) without code changes.
-
-Metrics (histograms are in milliseconds):
-- vectorsearch.query.duration_ms (histogram)
-- vectorsearch.query.count (counter)
-- vectorsearch.build.duration_ms (histogram)
-- vectorsearch.build.count (counter)
-- vectorsearch.vacuum.duration_ms (histogram)
-- vectorsearch.vacuum.run (counter)
-- vectorsearch.vacuum.removed (counter)
-- vectorsearch.compaction.duration_ms (histogram)
-- vectorsearch.compaction.run (counter)
-
-Common attributes on spans and metrics:
-- index.path: user‑readable DirectorySubspace path of the index (e.g. indexes/myIndex)
-- metric, dim, k (queries)
-- segId (vacuum/build)
-- anchorSegId (compaction)
-
-Spans:
-- vectorsearch.query, vectorsearch.build, vectorsearch.vacuum, vectorsearch.compaction
-
-Enablement:
-- Provide a GlobalOpenTelemetry instance in your app initialization with your preferred exporter. If none is provided, no‑op SDK is used and metrics/spans are dropped.
