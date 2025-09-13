@@ -394,3 +394,12 @@ Sources:
 •	Microsoft DiskANN paper: graph-based ANN index with PQ compression (stores full vectors on disk, compressed in memory) ￼ ￼.
 •	Azure Cosmos DB: use of Product Quantization and oversampling to refine top-K results ￼ ￼.
 •	Manu (Zilliz Cloud) architecture: segment lifecycle (growing→sealed), brute-force on growing segments, merging segments, and distributed search merge ￼ ￼.
+
+## Compaction Planning & Throttling
+
+- Planning selects SEALED segments with the smallest `count` first and breaks ties by older `created_at_ms`.
+- The anchor segment is included when sealed; candidates are added until roughly 80% of `maxSegmentSize` is reached (up to 4 segments).
+- Throttling is enforced via `maxConcurrentCompactions` in `VectorIndexConfig`:
+  - `0` disables compactions (planner may run but the worker will not transition any segment to COMPACTING).
+  - When `> 0`, the maintenance worker counts segments currently in COMPACTING; if the count is at the limit, the task is a no‑op.
+- The worker atomically marks selected candidates as COMPACTING before calling the compaction request hook, preventing overlap.

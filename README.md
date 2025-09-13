@@ -134,3 +134,7 @@ See `src/main/java/.../VectorIndexConfig.java` for the full builder.
 ## License
 
 Apache 2.0
+
+### Compaction Throttling
+
+Background compactions are planned from small SEALED segments and throttled by `maxConcurrentCompactions` in `VectorIndexConfig`. Set it to `0` to disable compactions. The maintenance worker only transitions segments to COMPACTING when the in‑flight count is below the limit.

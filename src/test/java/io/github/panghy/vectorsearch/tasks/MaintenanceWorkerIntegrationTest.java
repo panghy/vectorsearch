@@ -100,4 +100,58 @@ public class MaintenanceWorkerIntegrationTest {
     boolean processed = worker.runOnce().get(5, TimeUnit.SECONDS);
     assertThat(processed).isTrue();
   }
+
+  @Test
+  public void throttlingZeroDisablesCompaction() throws Exception {
+    // Create a small index and seal two segments so they are candidates for compaction.
+    VectorIndexConfig sealCfg = VectorIndexConfig.builder(db, root)
+        .dimension(8)
+        .pqM(4)
+        .pqK(16)
+        .graphDegree(8)
+        .maxSegmentSize(10)
+        .build();
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+    // Insert into seg 0, build; then seg 1, build.
+    VectorIndex tmp = VectorIndex.createOrOpen(sealCfg).get(5, TimeUnit.SECONDS);
+    tmp.add(new float[] {1, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    tmp.add(new float[] {0, 1, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    new SegmentBuildService(sealCfg, dirs).build(0).get(5, TimeUnit.SECONDS);
+    tmp.add(new float[] {0, 0, 1, 0}, null).get(5, TimeUnit.SECONDS);
+    new SegmentBuildService(sealCfg, dirs).build(1).get(5, TimeUnit.SECONDS);
+    tmp.close();
+
+    // Build maintenance queue with maxConcurrentCompactions = 0 and enqueue a find-candidates task.
+    VectorIndexConfig cfgNoCompact = VectorIndexConfig.builder(db, root)
+        .dimension(8)
+        .maxConcurrentCompactions(0)
+        .build();
+    var maintDir = dirs.tasksDir().createOrOpen(db, List.of("maint")).get(5, TimeUnit.SECONDS);
+    var tqc = TaskQueueConfig.builder(
+            db,
+            maintDir,
+            new ProtoSerializers.StringSerializer(),
+            new ProtoSerializers.MaintenanceTaskSerializer())
+        .build();
+    var queue = TaskQueues.createTaskQueue(tqc).get(5, TimeUnit.SECONDS);
+    queue.enqueue(
+            "find-candidates:0",
+            io.github.panghy.vectorsearch.proto.MaintenanceTask.newBuilder()
+                .setFindCandidates(
+                    io.github.panghy.vectorsearch.proto.MaintenanceTask.FindCompactionCandidates
+                        .newBuilder()
+                        .setAnchorSegId(0)
+                        .build())
+                .build())
+        .get(5, TimeUnit.SECONDS);
+
+    // Run the worker once; with throttling at 0, it should not mark any segments COMPACTING.
+    boolean processed =
+        new MaintenanceWorker(cfgNoCompact, dirs, queue).runOnce().get(5, TimeUnit.SECONDS);
+    assertThat(processed).isTrue();
+    int inflight = new MaintenanceService(cfgNoCompact, dirs)
+        .countInFlightCompactions()
+        .get(5, TimeUnit.SECONDS);
+    assertThat(inflight).isEqualTo(0);
+  }
 }

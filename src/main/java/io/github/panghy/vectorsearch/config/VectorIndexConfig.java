@@ -39,6 +39,7 @@ public final class VectorIndexConfig {
   private final int estimatedWorkerCount;
   private final int localWorkerThreads;
   private final int localMaintenanceWorkerThreads;
+  private final int maxConcurrentCompactions;
   private final Duration vacuumCooldown;
   private final double vacuumMinDeletedRatio;
   private final Duration defaultTtl;
@@ -89,6 +90,8 @@ public final class VectorIndexConfig {
     if (b.localMaintenanceWorkerThreads < 0)
       throw new IllegalArgumentException("localMaintenanceWorkerThreads must be >= 0");
     this.localMaintenanceWorkerThreads = b.localMaintenanceWorkerThreads;
+    if (b.maxConcurrentCompactions < 0) throw new IllegalArgumentException("maxConcurrentCompactions must be >= 0");
+    this.maxConcurrentCompactions = b.maxConcurrentCompactions;
     if (b.vacuumCooldown.isNegative()) throw new IllegalArgumentException("vacuumCooldown must be >= 0");
     this.vacuumCooldown = b.vacuumCooldown;
     if (!(b.vacuumMinDeletedRatio >= 0.0 && b.vacuumMinDeletedRatio <= 1.0))
@@ -220,6 +223,11 @@ public final class VectorIndexConfig {
   public int getLocalMaintenanceWorkerThreads() {
     return localMaintenanceWorkerThreads;
   }
+
+  /** Maximum number of in-flight compactions per index. */
+  public int getMaxConcurrentCompactions() {
+    return maxConcurrentCompactions;
+  }
   /** Returns the cooldown between repeated vacuum enqueues for the same segment. */
   public Duration getVacuumCooldown() {
     return vacuumCooldown;
@@ -346,6 +354,7 @@ public final class VectorIndexConfig {
     private int estimatedWorkerCount = 1;
     private int localWorkerThreads = 0;
     private int localMaintenanceWorkerThreads = 0;
+    private int maxConcurrentCompactions = 1;
     private Duration vacuumCooldown = Duration.ZERO;
     private double vacuumMinDeletedRatio = 0.25;
     private Duration defaultTtl = Duration.ofMinutes(5);
@@ -455,6 +464,12 @@ public final class VectorIndexConfig {
      */
     public Builder localMaintenanceWorkerThreads(int localMaintenanceWorkerThreads) {
       this.localMaintenanceWorkerThreads = localMaintenanceWorkerThreads;
+      return this;
+    }
+
+    /** Sets maximum number of in-flight compactions per index (default 1). */
+    public Builder maxConcurrentCompactions(int max) {
+      this.maxConcurrentCompactions = max;
       return this;
     }
 

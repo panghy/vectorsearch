@@ -22,7 +22,6 @@ import io.github.panghy.vectorsearch.proto.VectorRecord;
 import io.github.panghy.vectorsearch.util.FloatPacker;
 import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -418,39 +417,71 @@ public final class MaintenanceService {
       for (int sid : ids)
         metas.add(db.readAsync(tr -> indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey()))));
       return allOf(metas.toArray(CompletableFuture[]::new)).thenApply(v -> {
-        List<int[]> sealed = new ArrayList<>(); // [segId, count]
+        List<long[]> sealed = new ArrayList<>(); // [segId, count, createdAtMs]
         for (int i = 0; i < ids.size(); i++) {
           byte[] b = metas.get(i).getNow(null);
           if (b == null) continue;
           try {
             var sm = SegmentMeta.parseFrom(b);
             if (sm.getState() == SegmentMeta.State.SEALED) {
-              sealed.add(new int[] {ids.get(i), sm.getCount()});
+              sealed.add(new long[] {ids.get(i), sm.getCount(), sm.getCreatedAtMs()});
             }
           } catch (InvalidProtocolBufferException e) {
             throw new RuntimeException(e);
           }
         }
-        sealed.sort(Comparator.comparingInt(a -> a[1]));
+        sealed.sort((a, b2) -> {
+          int c = Long.compare(a[1], b2[1]);
+          if (c != 0) return c;
+          return Long.compare(a[2], b2[2]); // older first
+        });
         int budget = (int) Math.max(1, Math.round(0.8 * maxSize));
         int sum = 0;
         List<Integer> pick = new ArrayList<>();
         // Ensure anchor is present (if sealed)
-        for (int[] pair : sealed)
+        for (long[] pair : sealed)
           if (pair[0] == anchorSegId) {
             pick.add(anchorSegId);
-            sum += pair[1];
+            sum += (int) pair[1];
             break;
           }
-        for (int[] pair : sealed) {
-          if (pick.contains(pair[0])) continue;
+        for (long[] pair : sealed) {
+          if (pick.contains((int) pair[0])) continue;
           if (pick.size() >= 4) break;
-          pick.add(pair[0]);
-          sum += pair[1];
+          pick.add((int) pair[0]);
+          sum += (int) pair[1];
           if (sum >= budget) break;
         }
         if (pick.size() <= 1) return List.of();
         return pick;
+      });
+    });
+  }
+
+  /** Counts segments currently in COMPACTING state (in-flight compactions). */
+  public CompletableFuture<Integer> countInFlightCompactions() {
+    Database db = config.getDatabase();
+    Subspace reg = indexDirs.segmentsIndexSubspace();
+    return db.readAsync(tr -> tr.getRange(reg.range()).asList()).thenCompose(kvs -> {
+      List<Integer> ids = new ArrayList<>(kvs.size());
+      for (KeyValue kv : kvs)
+        ids.add(Math.toIntExact(reg.unpack(kv.getKey()).getLong(0)));
+      List<CompletableFuture<byte[]>> metas = new ArrayList<>();
+      for (int sid : ids)
+        metas.add(db.readAsync(tr -> indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey()))));
+      return allOf(metas.toArray(CompletableFuture[]::new)).thenApply(v -> {
+        int count = 0;
+        for (CompletableFuture<byte[]> f : metas) {
+          byte[] b = f.getNow(null);
+          if (b == null) continue;
+          try {
+            var sm = SegmentMeta.parseFrom(b);
+            if (sm.getState() == SegmentMeta.State.COMPACTING) count++;
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+        }
+        return count;
       });
     });
   }
