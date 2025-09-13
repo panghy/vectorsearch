@@ -235,7 +235,7 @@ This section outlines the additional work needed to comfortably scale to billion
 
 8) Operability
 - Backpressure: limit concurrent builders and queue depth; auto-shed enqueue when FDB latency rises.
-- Fine-grained metrics: p50/p95/p99 query latency, builder durations, compaction metrics.
+- Fine-grained metrics: p50/p95/p99 query latency, builder durations, compaction metrics. (partially shipped via OTel histograms and spans)
 - Admin accessors: list segments, deleted ratios, last vacuum time; on-demand maintenance.
 
 9) Benchmarks & continuous tuning
@@ -342,3 +342,5 @@ Status:
   - Add examples for transaction‑scoped usage patterns in CLAUDE.md.
 
 Note: Compaction runs are throttled via `maxConcurrentCompactions` and can be disabled by setting it to `0`.
+
+Status update: OpenTelemetry spans/metrics shipped for queries, builds, vacuum, and compaction; metrics include index.path attribute for per-index aggregation.
