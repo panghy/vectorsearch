@@ -11,7 +11,6 @@ import io.github.panghy.vectorsearch.fdb.FdbDirectories.IndexDirectories;
 import io.github.panghy.vectorsearch.fdb.FdbVectorIndex;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -80,8 +79,7 @@ public final class MaintenanceWorker {
               : markCandidatesCompacting(db, cands)
                   .thenCompose(marked -> marked
                       ? FdbVectorIndex.createOrOpen(config)
-                          .thenCompose(ix -> ix
-                              .requestCompaction(cands)
+                          .thenCompose(ix -> ix.requestCompaction(cands)
                               .whenComplete((vv, ex) -> ix.close()))
                       : completedFuture(null)));
     });
