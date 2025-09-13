@@ -132,6 +132,7 @@ public class SegmentBuildService {
               .put("segId", (long) segId)
               .put("dim", config.getDimension())
               .put("degree", config.getGraphDegree())
+              .put("index.path", io.github.panghy.vectorsearch.util.Metrics.dirPath(indexDirs.indexDir()))
               .build();
           Metrics.BUILD_COUNT.add(1, attrs);
           Metrics.BUILD_DURATION_MS.record((double) durMs, attrs);
