@@ -66,6 +66,8 @@ public final class MaintenanceWorker {
       Span span = tracer.spanBuilder("vectorsearch.vacuum")
           .setSpanKind(SpanKind.INTERNAL)
           .setAttribute("segId", v.getSegId())
+          .setAttribute(
+              "index.path", io.github.panghy.vectorsearch.util.Metrics.dirPath(indexDirs.indexDir()))
           .startSpan();
       long t0 = System.nanoTime();
       return svc.vacuumSegment(v.getSegId(), v.getMinDeletedRatio()).whenComplete((vv2, ex) -> {
@@ -97,6 +99,7 @@ public final class MaintenanceWorker {
     Span span = tracer.spanBuilder("vectorsearch.compaction")
         .setSpanKind(SpanKind.INTERNAL)
         .setAttribute("anchorSegId", anchor)
+        .setAttribute("index.path", io.github.panghy.vectorsearch.util.Metrics.dirPath(indexDirs.indexDir()))
         .startSpan();
     long t0 = System.nanoTime();
     return svc.findCompactionCandidates(anchor).thenCompose(cands -> {
