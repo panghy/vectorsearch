@@ -340,3 +340,5 @@ Status:
 - Docs:
   - Update `design.md` with the DirectoryLayer layout now used and the SEALED search plan.
   - Add examples for transaction‑scoped usage patterns in CLAUDE.md.
+
+Note: Compaction runs are throttled via `maxConcurrentCompactions` and can be disabled by setting it to `0`.
