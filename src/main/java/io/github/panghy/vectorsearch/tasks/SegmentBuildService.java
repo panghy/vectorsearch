@@ -22,6 +22,11 @@ import io.github.panghy.vectorsearch.proto.PQCodebook;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import io.github.panghy.vectorsearch.proto.VectorRecord;
 import io.github.panghy.vectorsearch.util.FloatPacker;
+import io.github.panghy.vectorsearch.util.Metrics;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.Tracer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.time.Instant;
@@ -66,6 +71,12 @@ public class SegmentBuildService {
    */
   public CompletableFuture<Void> build(long segId) {
     Database db = config.getDatabase();
+    Tracer tracer = Metrics.tracer();
+    Span span = tracer.spanBuilder("vectorsearch.build")
+        .setSpanKind(SpanKind.INTERNAL)
+        .setAttribute("segId", (long) segId)
+        .startSpan();
+    long t0 = System.nanoTime();
     FdbDirectories.IndexDirectories dirs = indexDirs;
     LOGGER.debug("Building segment {}", segId);
     // Ensure per-segment subspaces exist (idempotent) before any reads.
@@ -111,9 +122,20 @@ public class SegmentBuildService {
         .whenComplete((v, ex) -> {
           if (ex != null) {
             LOGGER.error("Failed to build segment {}", segId, ex);
+            span.recordException(ex);
+            span.setStatus(io.opentelemetry.api.trace.StatusCode.ERROR);
           } else {
             LOGGER.debug("Built segment {}", segId);
           }
+          long durMs = (System.nanoTime() - t0) / 1_000_000;
+          Attributes attrs = Attributes.builder()
+              .put("segId", (long) segId)
+              .put("dim", config.getDimension())
+              .put("degree", config.getGraphDegree())
+              .build();
+          Metrics.BUILD_COUNT.add(1, attrs);
+          Metrics.BUILD_DURATION_MS.record((double) durMs, attrs);
+          span.end();
         });
   }
 
