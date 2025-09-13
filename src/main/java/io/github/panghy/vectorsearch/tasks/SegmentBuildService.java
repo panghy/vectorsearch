@@ -74,7 +74,7 @@ public class SegmentBuildService {
     Tracer tracer = Metrics.tracer();
     Span span = tracer.spanBuilder("vectorsearch.build")
         .setSpanKind(SpanKind.INTERNAL)
-        .setAttribute("segId", (long) segId)
+        .setAttribute("segId", segId)
         .startSpan();
     long t0 = System.nanoTime();
     FdbDirectories.IndexDirectories dirs = indexDirs;
@@ -129,7 +129,7 @@ public class SegmentBuildService {
           }
           long durMs = (System.nanoTime() - t0) / 1_000_000;
           Attributes attrs = Attributes.builder()
-              .put("segId", (long) segId)
+              .put("segId", segId)
               .put("dim", config.getDimension())
               .put("degree", config.getGraphDegree())
               .put("index.path", io.github.panghy.vectorsearch.util.Metrics.dirPath(indexDirs.indexDir()))

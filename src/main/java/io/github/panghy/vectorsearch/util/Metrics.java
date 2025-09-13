@@ -7,7 +7,6 @@ import io.opentelemetry.api.metrics.DoubleHistogram;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Tracer;
-import java.util.stream.Collectors;
 
 /**
  * Centralizes OpenTelemetry instruments and helpers.
@@ -62,7 +61,7 @@ public final class Metrics {
 
   public static String dirPath(DirectorySubspace dir) {
     try {
-      return String.join("/", dir.getPath().stream().map(Object::toString).collect(Collectors.toList()));
+      return String.join("/", dir.getPath().stream().map(Object::toString).toList());
     } catch (Exception e) {
       return "";
     }
