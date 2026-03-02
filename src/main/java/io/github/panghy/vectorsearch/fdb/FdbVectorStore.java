@@ -362,8 +362,9 @@ public final class FdbVectorStore {
     for (var e : bySeg.entrySet()) {
       int segId = e.getKey();
       List<Integer> vecIds = e.getValue();
-      chain = chain.thenCompose(v -> indexDirs.segmentKeys(tr, segId).thenCompose(sk -> tr.get(sk.metaKey())
-          .thenCompose(metaBytes -> {
+      chain = chain.thenCompose(v -> indexDirs
+          .segmentKeys(tr, segId)
+          .thenCompose(sk -> tr.get(sk.metaKey()).thenCompose(metaBytes -> {
             try {
               SegmentMeta sm = SegmentMeta.parseFrom(metaBytes);
               List<CompletableFuture<byte[]>> vecReads = new ArrayList<>();
@@ -428,8 +429,9 @@ public final class FdbVectorStore {
       byte[] curSegK = indexDirs.currentSegmentKey();
       return tr.get(curSegK).thenCompose(curSegV -> {
         int segId = Math.toIntExact(decodeInt(curSegV));
-        return indexDirs.segmentKeys(tr, segId).thenCompose(sk -> tr.get(sk.metaKey())
-            .thenCompose(segMetaBytes -> {
+        return indexDirs
+            .segmentKeys(tr, segId)
+            .thenCompose(sk -> tr.get(sk.metaKey()).thenCompose(segMetaBytes -> {
               SegmentMeta sm;
               try {
                 if (segMetaBytes == null) {

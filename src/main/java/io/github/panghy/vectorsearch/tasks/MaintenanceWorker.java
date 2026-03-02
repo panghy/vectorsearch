@@ -52,10 +52,11 @@ public final class MaintenanceWorker {
    */
   public CompletableFuture<Boolean> runOnce() {
     Database db = config.getDatabase();
-    return queue.awaitAndClaimTask().thenCompose(claim -> processTask(claim.task(), db)
-        .handle((vv, ex) -> ex)
-        .thenCompose(ex -> (ex == null) ? claim.complete() : claim.fail())
-        .thenApply(v -> true));
+    return queue.awaitAndClaimTask()
+        .thenCompose(claim -> processTask(claim.task(), db)
+            .handle((vv, ex) -> ex)
+            .thenCompose(ex -> (ex == null) ? claim.complete() : claim.fail())
+            .thenApply(v -> true));
   }
 
   private CompletableFuture<Void> processTask(MaintenanceTask t, Database db) {
@@ -133,8 +134,9 @@ public final class MaintenanceWorker {
         }
         List<CompletableFuture<Void>> sets = new ArrayList<>();
         for (int sid : cands) {
-          sets.add(indexDirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey())
-              .thenApply(bytes -> {
+          sets.add(indexDirs
+              .segmentKeys(tr, sid)
+              .thenCompose(sk -> tr.get(sk.metaKey()).thenApply(bytes -> {
                 try {
                   var sm = SegmentMeta.parseFrom(bytes);
                   var updated = sm.toBuilder()
