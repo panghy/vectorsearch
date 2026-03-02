@@ -1,10 +1,14 @@
 package io.github.panghy.vectorsearch.graph;
 
+import static io.github.panghy.vectorsearch.util.Distances.l2Squared;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.Set;
 
 /**
  * Builds k-nearest neighbor adjacency graphs for vector sets using L2 distance.
@@ -36,7 +40,7 @@ public final class GraphBuilder {
       int p = 0;
       for (int j = 0; j < n; j++) if (j != i) idx[p++] = j;
       final int ii = i;
-      Arrays.sort(idx, Comparator.comparingDouble(j -> l2(vectors[ii], vectors[j])));
+      Arrays.sort(idx, Comparator.comparingDouble(j -> l2Squared(vectors[ii], vectors[j])));
       int take = Math.min(degree, n - 1);
       neigh[i] = new int[take];
       for (int k = 0; k < take; k++) neigh[i][k] = idx[k];
@@ -64,7 +68,7 @@ public final class GraphBuilder {
       // Precompute distances to i for sorting and reuse in pruning
       final double[] distToI = new double[n];
       Arrays.sort(idx, Comparator.comparingDouble(j -> {
-        double d = l2(vectors[ii], vectors[j]);
+        double d = l2Squared(vectors[ii], vectors[j]);
         distToI[j] = d;
         return d;
       }));
@@ -78,7 +82,7 @@ public final class GraphBuilder {
           double diu = distToI[u];
           for (int t = 0; t < s; t++) {
             int pnb = selected[t];
-            double dup = l2(vectors[u], vectors[pnb]);
+            double dup = l2Squared(vectors[u], vectors[pnb]);
             if (dup <= alpha * diu) {
               keep = false;
               break;
@@ -114,11 +118,14 @@ public final class GraphBuilder {
     if (n == 0) return new int[0][];
     if (n == 1) return new int[][] {new int[0]};
 
-    // Initialize adjacency lists
+    // Initialize adjacency lists and parallel sets for O(1) membership checks
     @SuppressWarnings("unchecked")
     List<Integer>[] adj = new List[n];
+    @SuppressWarnings("unchecked")
+    Set<Integer>[] adjSets = new Set[n];
     for (int i = 0; i < n; i++) {
       adj[i] = new ArrayList<>();
+      adjSets[i] = new HashSet<>();
     }
 
     // Compute medoid: vector closest to centroid
@@ -147,14 +154,17 @@ public final class GraphBuilder {
       // Robust prune to select neighbors for node
       List<Integer> pruned = robustPrune(vectors, node, candidates, degree, alpha);
       adj[node] = new ArrayList<>(pruned);
+      adjSets[node] = new HashSet<>(pruned);
 
       // Reverse edge updates: for each neighbor v of node, consider adding node as neighbor of v
       for (int v : pruned) {
-        if (!adj[v].contains(node)) {
+        if (!adjSets[v].contains(node)) {
           adj[v].add(node);
+          adjSets[v].add(node);
           // If v exceeds degree, prune v's neighbor list
           if (adj[v].size() > degree) {
             adj[v] = robustPrune(vectors, v, toCandidatesWithDist(vectors, v, adj[v]), degree, alpha);
+            adjSets[v] = new HashSet<>(adj[v]);
           }
         }
       }
@@ -211,7 +221,7 @@ public final class GraphBuilder {
     PriorityQueue<double[]> candidates = new PriorityQueue<>(Comparator.comparingDouble(a -> a[1]));
     boolean[] visited = new boolean[vectors.length];
 
-    double startDist = l2(vectors[startNode], query);
+    double startDist = l2Squared(vectors[startNode], query);
     candidates.add(new double[] {startNode, startDist});
     visited[startNode] = true;
 
@@ -233,7 +243,7 @@ public final class GraphBuilder {
       for (int nb : adj[curNode]) {
         if (!visited[nb] && inserted[nb]) {
           visited[nb] = true;
-          double dist = l2(vectors[nb], query);
+          double dist = l2Squared(vectors[nb], query);
           candidates.add(new double[] {nb, dist});
 
           // Insert into bestL maintaining sorted order
@@ -278,10 +288,10 @@ public final class GraphBuilder {
     for (int[] cand : candidates) {
       int p = cand[0];
       if (p == node) continue;
-      double distToNode = l2(vectors[p], vectors[node]);
+      double distToNode = l2Squared(vectors[p], vectors[node]);
       boolean keep = true;
       for (int n : selected) {
-        double distToNeighbor = l2(vectors[p], vectors[n]);
+        double distToNeighbor = l2Squared(vectors[p], vectors[n]);
         if (distToNeighbor <= alpha * distToNode) {
           keep = false;
           break;
@@ -299,7 +309,7 @@ public final class GraphBuilder {
   private static List<int[]> toCandidatesWithDist(float[][] vectors, int node, List<Integer> neighbors) {
     List<double[]> withDist = new ArrayList<>();
     for (int nb : neighbors) {
-      withDist.add(new double[] {nb, l2(vectors[nb], vectors[node])});
+      withDist.add(new double[] {nb, l2Squared(vectors[nb], vectors[node])});
     }
     withDist.sort(Comparator.comparingDouble(a -> a[1]));
     List<int[]> result = new ArrayList<>();
@@ -307,14 +317,5 @@ public final class GraphBuilder {
       result.add(new int[] {(int) entry[0]});
     }
     return result;
-  }
-
-  private static double l2(float[] a, float[] b) {
-    double s = 0.0;
-    for (int i = 0; i < a.length; i++) {
-      double d = (double) a[i] - b[i];
-      s += d * d;
-    }
-    return s;
   }
 }
