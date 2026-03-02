@@ -208,6 +208,7 @@ public final class FdbVectorStore {
    * @return future with assigned ids per vector in the same order
    */
   public CompletableFuture<List<int[]>> addBatch(float[][] embeddings, byte[][] payloads) {
+    validateEmbeddingDimensions(embeddings);
     Database db = config.getDatabase();
     List<int[]> assigned = new ArrayList<>(embeddings.length);
     AtomicInteger pos = new AtomicInteger(0);
@@ -234,6 +235,7 @@ public final class FdbVectorStore {
    * @return future with assigned ids per vector in the same order
    */
   public CompletableFuture<List<int[]>> addBatch(Transaction tr, float[][] embeddings, byte[][] payloads) {
+    validateEmbeddingDimensions(embeddings);
     List<int[]> assigned = new ArrayList<>(embeddings.length);
     byte[] curSegK = indexDirs.currentSegmentKey();
     return tr.get(curSegK).thenCompose(curSegV -> {
@@ -287,45 +289,53 @@ public final class FdbVectorStore {
         return tr.get(sk.metaKey()).thenCompose(metaBytes -> {
           try {
             SegmentMeta sm = SegmentMeta.parseFrom(metaBytes);
-            // Gather reads for the ids
-            List<CompletableFuture<byte[]>> reads = new ArrayList<>();
-            for (int vId : vecIds) reads.add(tr.get(sk.vectorKey(vId)));
-            return allOf(reads.toArray(CompletableFuture[]::new)).thenApply($ -> {
-              int dec = 0;
-              int incDel = 0;
-              for (int i = 0; i < vecIds.size(); i++) {
-                byte[] bytes = reads.get(i).getNow(null);
-                if (bytes == null) continue;
-                try {
-                  VectorRecord rec = VectorRecord.parseFrom(bytes);
-                  if (!rec.getDeleted()) {
-                    VectorRecord updated =
-                        rec.toBuilder().setDeleted(true).build();
-                    tr.set(sk.vectorKey(vecIds.get(i)), updated.toByteArray());
-                    // Clear gid mappings
-                    byte[] revK = indexDirs.gidRevDir().pack(Tuple.from(segId, vecIds.get(i)));
-                    byte[] gb = tr.get(revK).join();
-                    if (gb != null) {
-                      long gid = Tuple.fromBytes(gb).getLong(0);
-                      byte[] mapK = indexDirs.gidMapDir().pack(Tuple.from(gid));
-                      tr.clear(mapK);
+            // Gather reads for vectors and gid reverse mappings
+            List<CompletableFuture<byte[]>> vecReads = new ArrayList<>();
+            List<CompletableFuture<byte[]>> gidReads = new ArrayList<>();
+            for (int vId : vecIds) {
+              vecReads.add(tr.get(sk.vectorKey(vId)));
+              gidReads.add(tr.get(indexDirs.gidRevDir().pack(Tuple.from(segId, vId))));
+            }
+            return allOf(Stream.concat(vecReads.stream(), gidReads.stream())
+                    .toArray(CompletableFuture[]::new))
+                .thenApply($ -> {
+                  int dec = 0;
+                  int incDel = 0;
+                  for (int i = 0; i < vecIds.size(); i++) {
+                    byte[] bytes = vecReads.get(i).getNow(null);
+                    if (bytes == null) continue;
+                    try {
+                      VectorRecord rec = VectorRecord.parseFrom(bytes);
+                      if (!rec.getDeleted()) {
+                        VectorRecord updated = rec.toBuilder()
+                            .setDeleted(true)
+                            .build();
+                        tr.set(sk.vectorKey(vecIds.get(i)), updated.toByteArray());
+                        // Clear gid mappings if present
+                        byte[] gb = gidReads.get(i).getNow(null);
+                        if (gb != null) {
+                          long gid =
+                              Tuple.fromBytes(gb).getLong(0);
+                          tr.clear(indexDirs
+                              .gidMapDir()
+                              .pack(Tuple.from(gid)));
+                        }
+                        tr.clear(indexDirs.gidRevDir().pack(Tuple.from(segId, vecIds.get(i))));
+                        dec++;
+                        incDel++;
+                      }
+                    } catch (InvalidProtocolBufferException ex) {
+                      throw new RuntimeException(ex);
                     }
-                    tr.clear(revK);
-                    dec++;
-                    incDel++;
                   }
-                } catch (InvalidProtocolBufferException ex) {
-                  throw new RuntimeException(ex);
-                }
-              }
-              // Update meta with computed deltas
-              SegmentMeta updated = sm.toBuilder()
-                  .setCount(Math.max(0, sm.getCount() - dec))
-                  .setDeletedCount(Math.max(0, sm.getDeletedCount() + incDel))
-                  .build();
-              tr.set(sk.metaKey(), updated.toByteArray());
-              return null;
-            });
+                  // Update meta with computed deltas
+                  SegmentMeta updated = sm.toBuilder()
+                      .setCount(Math.max(0, sm.getCount() - dec))
+                      .setDeletedCount(Math.max(0, sm.getDeletedCount() + incDel))
+                      .build();
+                  tr.set(sk.metaKey(), updated.toByteArray());
+                  return null;
+                });
           } catch (InvalidProtocolBufferException ex) {
             throw new RuntimeException(ex);
           }
@@ -729,5 +739,21 @@ public final class FdbVectorStore {
             throw new RuntimeException(e);
           }
         }));
+  }
+
+  /**
+   * Validates that every embedding in the array has the expected dimension.
+   *
+   * @param embeddings vectors to validate
+   * @throws IllegalArgumentException if any embedding has the wrong length
+   */
+  private void validateEmbeddingDimensions(float[][] embeddings) {
+    int expected = config.getDimension();
+    for (int i = 0; i < embeddings.length; i++) {
+      if (embeddings[i].length != expected) {
+        throw new IllegalArgumentException("Embedding at index " + i + " has dimension " + embeddings[i].length
+            + " but the index is configured for dimension " + expected);
+      }
+    }
   }
 }

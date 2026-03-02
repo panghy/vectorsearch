@@ -23,6 +23,20 @@ class DistancesTest {
     assertThat(cosAC).isCloseTo(1.0, within(1e-6));
   }
 
+  @Test
+  void l2Squared_returns_squared_distance() {
+    float[] a = new float[] {1f, 2f, 3f};
+    float[] b = new float[] {4f, 6f, 3f};
+
+    // squared distance = (4-1)^2 + (6-2)^2 + (3-3)^2 = 9 + 16 + 0 = 25
+    assertThat(Distances.l2Squared(a, b)).isCloseTo(25.0, within(1e-9));
+    // l2 should be sqrt of l2Squared
+    assertThat(Distances.l2(a, b)).isCloseTo(5.0, within(1e-9));
+
+    // identical vectors
+    assertThat(Distances.l2Squared(a, a)).isEqualTo(0.0);
+  }
+
   private static org.assertj.core.data.Offset<Double> within(double d) {
     return org.assertj.core.data.Offset.offset(d);
   }
