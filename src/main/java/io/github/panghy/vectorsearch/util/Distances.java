@@ -9,17 +9,39 @@ public final class Distances {
   /**
    * Computes Euclidean (L2) distance between two vectors.
    *
+   * <p>Use this when you need the true geometric distance (e.g., for reporting or thresholds
+   * expressed in the original metric). For nearest-neighbor comparisons where only relative ordering
+   * matters, prefer {@link #l2Squared(float[], float[])} to avoid the sqrt overhead.
+   *
    * @param a vector A (must be same length as B)
    * @param b vector B
    * @return L2 distance (non-negative)
+   * @see #l2Squared(float[], float[])
    */
   public static double l2(float[] a, float[] b) {
+    return Math.sqrt(l2Squared(a, b));
+  }
+
+  /**
+   * Computes squared Euclidean (L2²) distance between two vectors.
+   *
+   * <p>This is equivalent to {@code l2(a, b) * l2(a, b)} but avoids the {@link Math#sqrt} call.
+   * Because sqrt is monotonic, squared distance preserves the same ordering as true L2 distance,
+   * making it ideal for nearest-neighbor comparisons, graph construction, and pruning where only
+   * relative ordering matters.
+   *
+   * @param a vector A (must be same length as B)
+   * @param b vector B
+   * @return squared L2 distance (non-negative)
+   * @see #l2(float[], float[])
+   */
+  public static double l2Squared(float[] a, float[] b) {
     double sum = 0.0;
     for (int i = 0; i < a.length; i++) {
       double d = (double) a[i] - b[i];
       sum += d * d;
     }
-    return Math.sqrt(sum);
+    return sum;
   }
 
   /**
