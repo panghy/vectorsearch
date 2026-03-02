@@ -114,10 +114,10 @@ public class MaintenanceWorkerIntegrationTest {
     var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
     // Insert into seg 0, build; then seg 1, build.
     VectorIndex tmp = VectorIndex.createOrOpen(sealCfg).get(5, TimeUnit.SECONDS);
-    tmp.add(new float[] {1, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
-    tmp.add(new float[] {0, 1, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    tmp.add(new float[] {1, 0, 0, 0, 0, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    tmp.add(new float[] {0, 1, 0, 0, 0, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
     new SegmentBuildService(sealCfg, dirs).build(0).get(5, TimeUnit.SECONDS);
-    tmp.add(new float[] {0, 0, 1, 0}, null).get(5, TimeUnit.SECONDS);
+    tmp.add(new float[] {0, 0, 1, 0, 0, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
     new SegmentBuildService(sealCfg, dirs).build(1).get(5, TimeUnit.SECONDS);
     tmp.close();
 
