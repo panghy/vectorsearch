@@ -154,19 +154,6 @@ public final class GraphBuilder {
           adj[v].add(node);
           // If v exceeds degree, prune v's neighbor list
           if (adj[v].size() > degree) {
-            List<int[]> vCandidates = new ArrayList<>();
-            for (int nb : adj[v]) {
-              vCandidates.add(new int[] {nb, 0}); // placeholder distance
-            }
-            // Recompute distances for v's candidates
-            vCandidates.clear();
-            for (int nb : adj[v]) {
-              vCandidates.add(new int[] {nb});
-            }
-            List<int[]> vCandidatesFull = new ArrayList<>();
-            for (int nb : adj[v]) {
-              vCandidatesFull.add(new int[] {nb});
-            }
             adj[v] = robustPrune(vectors, v, toCandidatesWithDist(vectors, v, adj[v]), degree, alpha);
           }
         }
@@ -295,7 +282,7 @@ public final class GraphBuilder {
       boolean keep = true;
       for (int n : selected) {
         double distToNeighbor = l2(vectors[p], vectors[n]);
-        if (distToNeighbor * alpha < distToNode) {
+        if (distToNeighbor <= alpha * distToNode) {
           keep = false;
           break;
         }

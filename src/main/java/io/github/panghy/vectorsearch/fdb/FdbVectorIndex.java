@@ -419,8 +419,6 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                   .put("metric", config.getMetric().name())
                   .put("dim", config.getDimension())
                   .put("k", k)
-                  .put("segments", segIds.size())
-                  .put("results", merged.size())
                   .build();
               Metrics.QUERY_COUNT.add(1, attrs);
               Metrics.QUERY_DURATION_MS.record((double) durMs, attrs);
