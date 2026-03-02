@@ -520,95 +520,59 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   private CompletableFuture<Void> scheduleVacuumIfNeeded(Set<Integer> segIds) {
     if (maintenanceQueue == null || segIds == null || segIds.isEmpty()) return completedFuture(null);
     Database db = config.getDatabase();
-    double thr = config.getVacuumMinDeletedRatio();
     List<CompletableFuture<Void>> fs = new ArrayList<>();
     for (int segId : segIds) {
-      fs.add(db.runAsync(tr -> indexDirs
-          .segmentKeys(tr, segId)
-          .thenCompose(sk -> tr.get(sk.metaKey()))
-          .thenCompose(bytes -> {
-            if (bytes == null) return completedFuture(null);
-            try {
-              SegmentMeta sm = SegmentMeta.parseFrom(bytes);
-              long live = sm.getCount();
-              long del = sm.getDeletedCount();
-              double ratio = (live + del) == 0 ? 0.0 : ((double) del) / ((double) (live + del));
-              if (ratio < thr) {
-                if (vacSkipped != null) vacSkipped.add(1);
-                return completedFuture(null);
-              }
-              // Cooldown: skip if last vacuum completion is within cooldown window
-              long cdMs = Math.max(0, config.getVacuumCooldown().toMillis());
-              if (cdMs > 0 && sm.getLastVacuumAtMs() > 0) {
-                long now = config.getInstantSource().instant().toEpochMilli();
-                if (now - sm.getLastVacuumAtMs() < cdMs) {
-                  if (vacSkipped != null) vacSkipped.add(1);
-                  return completedFuture(null);
-                }
-              }
-              MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
-                  .setSegId(segId)
-                  .setMinDeletedRatio(thr)
-                  .build();
-              MaintenanceTask mt =
-                  MaintenanceTask.newBuilder().setVacuum(v).build();
-              String key = "vacuum-if-needed:" + segId;
-              if (vacScheduled != null) vacScheduled.add(1);
-              return maintenanceQueue
-                  .enqueueIfNotExists(tr, key, mt)
-                  .thenApply(x -> null);
-            } catch (InvalidProtocolBufferException e) {
-              throw new RuntimeException(e);
-            }
-          })));
+      fs.add(db.runAsync(tr -> scheduleVacuumForSegment(tr, segId)));
     }
     return allOf(fs.toArray(CompletableFuture[]::new)).thenApply(x -> null);
   }
 
   private CompletableFuture<Void> scheduleVacuumIfNeeded(Transaction tx, Set<Integer> segIds) {
     if (maintenanceQueue == null || segIds == null || segIds.isEmpty()) return completedFuture(null);
-    double thr = config.getVacuumMinDeletedRatio();
     List<CompletableFuture<Void>> fs = new ArrayList<>();
     for (int segId : segIds) {
-      fs.add(indexDirs
-          .segmentKeys(tx, segId)
-          .thenCompose(sk -> tx.get(sk.metaKey()))
-          .thenCompose(bytes -> {
-            if (bytes == null) return completedFuture(null);
-            try {
-              SegmentMeta sm = SegmentMeta.parseFrom(bytes);
-              long live = sm.getCount();
-              long del = sm.getDeletedCount();
-              double ratio = (live + del) == 0 ? 0.0 : ((double) del) / ((double) (live + del));
-              if (ratio < thr) {
+      fs.add(scheduleVacuumForSegment(tx, segId));
+    }
+    return allOf(fs.toArray(CompletableFuture[]::new)).thenApply(x -> null);
+  }
+
+  private CompletableFuture<Void> scheduleVacuumForSegment(Transaction tx, int segId) {
+    double thr = config.getVacuumMinDeletedRatio();
+    return indexDirs
+        .segmentKeys(tx, segId)
+        .thenCompose(sk -> tx.get(sk.metaKey()))
+        .thenCompose(bytes -> {
+          if (bytes == null) return completedFuture(null);
+          try {
+            SegmentMeta sm = SegmentMeta.parseFrom(bytes);
+            long live = sm.getCount();
+            long del = sm.getDeletedCount();
+            double ratio = (live + del) == 0 ? 0.0 : ((double) del) / ((double) (live + del));
+            if (ratio < thr) {
+              if (vacSkipped != null) vacSkipped.add(1);
+              return completedFuture(null);
+            }
+            long cdMs = Math.max(0, config.getVacuumCooldown().toMillis());
+            if (cdMs > 0 && sm.getLastVacuumAtMs() > 0) {
+              long now = config.getInstantSource().instant().toEpochMilli();
+              if (now - sm.getLastVacuumAtMs() < cdMs) {
                 if (vacSkipped != null) vacSkipped.add(1);
                 return completedFuture(null);
               }
-              long cdMs = Math.max(0, config.getVacuumCooldown().toMillis());
-              if (cdMs > 0 && sm.getLastVacuumAtMs() > 0) {
-                long now = config.getInstantSource().instant().toEpochMilli();
-                if (now - sm.getLastVacuumAtMs() < cdMs) {
-                  if (vacSkipped != null) vacSkipped.add(1);
-                  return completedFuture(null);
-                }
-              }
-              MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
-                  .setSegId(segId)
-                  .setMinDeletedRatio(thr)
-                  .build();
-              MaintenanceTask mt =
-                  MaintenanceTask.newBuilder().setVacuum(v).build();
-              String key = "vacuum-if-needed:" + segId;
-              if (vacScheduled != null) vacScheduled.add(1);
-              return maintenanceQueue
-                  .enqueueIfNotExists(tx, key, mt)
-                  .thenApply(x -> null);
-            } catch (InvalidProtocolBufferException e) {
-              throw new RuntimeException(e);
             }
-          }));
-    }
-    return allOf(fs.toArray(CompletableFuture[]::new)).thenApply(x -> null);
+            MaintenanceTask.Vacuum v = MaintenanceTask.Vacuum.newBuilder()
+                .setSegId(segId)
+                .setMinDeletedRatio(thr)
+                .build();
+            MaintenanceTask mt =
+                MaintenanceTask.newBuilder().setVacuum(v).build();
+            String key = "vacuum-if-needed:" + segId;
+            if (vacScheduled != null) vacScheduled.add(1);
+            return maintenanceQueue.enqueueIfNotExists(tx, key, mt).thenApply(x -> null);
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+        });
   }
 
   /**
@@ -764,12 +728,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
               byte[] codes = kv.getValue();
               if (codes == null || codes.length < m) continue;
               codeMap.put(vecId, codes);
-              double ad = 0.0;
-              for (int s = 0; s < m; s++) {
-                int ci = codes[s] & 0xFF;
-                if (ci >= kCent) continue;
-                ad += lut[s][ci];
-              }
+              double ad = pqApproxDistance(lut, codes, m, kCent);
               approxAll.add(new Approx(vecId, ad));
             }
             if (approxAll.isEmpty()) return completedFuture(List.of());
@@ -883,12 +842,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
               if (!visited.add(nb)) continue;
               byte[] codes = codeMap.get(nb);
               if (codes == null || codes.length < m) continue;
-              double ad = 0.0;
-              for (int s = 0; s < m; s++) {
-                int ci = codes[s] & 0xFF;
-                if (ci >= kCent) continue;
-                ad += lut[s][ci];
-              }
+              double ad = pqApproxDistance(lut, codes, m, kCent);
               newly.add(new Approx(nb, ad));
             }
           }
@@ -968,12 +922,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
               if (!visited.add(nb)) continue;
               byte[] codes = codeMap.get(nb);
               if (codes == null || codes.length < m) continue;
-              double ad = 0.0;
-              for (int s = 0; s < m; s++) {
-                int ci = codes[s] & 0xFF;
-                if (ci >= kCent) continue;
-                ad += lut[s][ci];
-              }
+              double ad = pqApproxDistance(lut, codes, m, kCent);
               Approx na = new Approx(nb, ad);
               pq.offer(na);
               chosen.add(na);
@@ -1061,6 +1010,25 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         return out;
       });
     }));
+  }
+
+  /**
+   * Computes the PQ approximate distance by summing per-subspace LUT entries for the given codes.
+   *
+   * @param lut   distance lookup table of shape [M][K] built by {@link #buildLut}
+   * @param codes PQ byte codes of length &ge; M (one code per subspace)
+   * @param m     number of subspaces
+   * @param kCent number of centroids per subspace
+   * @return approximate squared-L2 distance
+   */
+  static double pqApproxDistance(double[][] lut, byte[] codes, int m, int kCent) {
+    double ad = 0.0;
+    for (int s = 0; s < m; s++) {
+      int ci = codes[s] & 0xFF;
+      if (ci >= kCent) continue;
+      ad += lut[s][ci];
+    }
+    return ad;
   }
 
   private static double[][] buildLut(float[][][] centroids, float[] q) {
