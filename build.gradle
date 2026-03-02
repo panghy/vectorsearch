@@ -16,6 +16,7 @@ plugins {
   id 'jacoco'
   id 'com.diffplug.spotless' version '6.25.0'
   id 'com.vanniktech.maven.publish' version '0.33.0'
+  id 'me.champeau.jmh' version '0.7.2'
 }
 
 allprojects {
@@ -78,7 +79,7 @@ dependencies {
   testImplementation 'org.mockito:mockito-core:5.19.0'
   testImplementation 'org.mockito:mockito-subclass:5.19.0'
   testImplementation 'org.mockito:mockito-junit-jupiter:5.19.0'
-  
+
   // SLF4J implementation for tests
   testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.9'
 }
@@ -159,10 +160,10 @@ integrationTest {
 
 jacocoTestReport {
   dependsOn test, integrationTest, generateProto, compileJava, processResources
-  
+
   // Combine execution data from both test and integrationTest
   executionData fileTree(layout.buildDirectory).include("jacoco/*.exec")
-  
+
   reports {
     xml.required = true
     html.required = true
@@ -180,7 +181,7 @@ jacocoTestCoverageVerification {
   dependsOn jacocoTestReport
   // Combine execution data from both test and integrationTest
   executionData fileTree(layout.buildDirectory).include("jacoco/*.exec")
-  
+
   afterEvaluate {
     classDirectories.setFrom(files(classDirectories.files.collect {
       fileTree(dir: it, exclude: [
@@ -205,6 +206,15 @@ jacocoTestCoverageVerification {
 }
 
 check.dependsOn jacocoTestCoverageVerification
+
+// JMH benchmark configuration
+jmh {
+  fork = 1
+  warmupIterations = 3
+  iterations = 5
+  jmhVersion = '1.37'
+}
+
 
 // Maven publishing configuration
 mavenPublishing {
