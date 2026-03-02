@@ -42,6 +42,7 @@ public class VectorIndexSearchBenchmark {
   private DirectorySubspace root;
   private VectorIndex index;
   private Path clusterFilePath;
+  private volatile boolean setupFailed = false;
 
   @Param({"BEST_FIRST", "BEAM"})
   public String mode;
@@ -53,37 +54,42 @@ public class VectorIndexSearchBenchmark {
 
   @Setup(Level.Trial)
   public void setup() throws Exception {
-    startFdbContainer();
-    db = FDB.selectAPIVersion(730).open(clusterFilePath.toString());
-    root = db.runAsync(tr -> DirectoryLayer.getDefault()
-            .createOrOpen(
-                tr,
-                List.of("vs-bench", UUID.randomUUID().toString()),
-                "vectorsearch".getBytes(StandardCharsets.UTF_8)))
-        .get(10, TimeUnit.SECONDS);
-    VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
-        .dimension(8)
-        .pqM(4)
-        .pqK(16)
-        .graphDegree(32)
-        .maxSegmentSize(500)
-        .localWorkerThreads(1)
-        .build();
-    index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
+    try {
+      startFdbContainer();
+      db = FDB.selectAPIVersion(730).open(clusterFilePath.toString());
+      root = db.runAsync(tr -> DirectoryLayer.getDefault()
+              .createOrOpen(
+                  tr,
+                  List.of("vs-bench", UUID.randomUUID().toString()),
+                  "vectorsearch".getBytes(StandardCharsets.UTF_8)))
+          .get(10, TimeUnit.SECONDS);
+      VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
+          .dimension(8)
+          .pqM(4)
+          .pqK(16)
+          .graphDegree(32)
+          .maxSegmentSize(500)
+          .localWorkerThreads(1)
+          .build();
+      index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
 
-    // Insert 1000+ vectors so we get at least 2 segments (500 each).
-    for (int i = 0; i < 1100; i++) {
-      float[] v = new float[8];
-      for (int d = 0; d < 8; d++) {
-        v[d] = (float) Math.sin(0.01 * i + d);
+      // Insert 1000+ vectors so we get at least 2 segments (500 each).
+      for (int i = 0; i < 1100; i++) {
+        float[] v = new float[8];
+        for (int d = 0; d < 8; d++) {
+          v[d] = (float) Math.sin(0.01 * i + d);
+        }
+        index.add(v, null).get(5, TimeUnit.SECONDS);
       }
-      index.add(v, null).get(5, TimeUnit.SECONDS);
+
+      // Wait for background builders to seal segments.
+      index.awaitIndexingComplete().get(120, TimeUnit.SECONDS);
+
+      query = new float[] {1f, 0.5f, -0.5f, 0.2f, -0.1f, 0.3f, 0.0f, 0.8f};
+    } catch (Exception e) {
+      setupFailed = true;
+      throw e;
     }
-
-    // Wait for background builders to seal segments.
-    index.awaitIndexingComplete().get(120, TimeUnit.SECONDS);
-
-    query = new float[] {1f, 0.5f, -0.5f, 0.2f, -0.1f, 0.3f, 0.0f, 0.8f};
   }
 
   @TearDown(Level.Trial)
@@ -116,6 +122,9 @@ public class VectorIndexSearchBenchmark {
 
   @Benchmark
   public List<SearchResult> search() throws Exception {
+    if (setupFailed) {
+      throw new RuntimeException("Setup failed — aborting benchmark");
+    }
     SearchParams.Mode m = SearchParams.Mode.valueOf(mode);
     SearchParams params = SearchParams.of(64, 32, 4, m);
     return index.query(query, k, params).get(5, TimeUnit.SECONDS);
@@ -130,12 +139,21 @@ public class VectorIndexSearchBenchmark {
     // Start a fresh FDB 7.3 container.
     exec("docker", "run", "-d", "--name", CONTAINER_NAME, "-p", FDB_PORT + ":4500", FDB_IMAGE);
 
-    // Wait for FDB to become ready (up to 30 seconds).
-    waitForFdbReady(30);
+    // Initialize the database — required for FDB 7.3 containers.
+    // Wait a few seconds for fdbmonitor to start the fdbserver process.
+    Thread.sleep(3000);
+    exec("docker", "exec", CONTAINER_NAME, "fdbcli", "--exec", "configure new single memory");
 
-    // Write a cluster file pointing at the container.
+    // Wait for FDB to become ready (up to 60 seconds).
+    waitForFdbReady(60);
+
+    // Copy the cluster file from the container and rewrite the internal IP to 127.0.0.1.
     clusterFilePath = Files.createTempFile("fdb-bench-", ".cluster");
-    Files.writeString(clusterFilePath, "docker:docker@127.0.0.1:" + FDB_PORT, StandardCharsets.UTF_8);
+    exec("docker", "cp", CONTAINER_NAME + ":/var/fdb/fdb.cluster", clusterFilePath.toString());
+    String clusterContent = Files.readString(clusterFilePath, StandardCharsets.UTF_8);
+    // Replace the container-internal IP (e.g. 172.x.x.x) with 127.0.0.1 for host access.
+    clusterContent = clusterContent.replaceAll("@[0-9.]+:", "@127.0.0.1:");
+    Files.writeString(clusterFilePath, clusterContent, StandardCharsets.UTF_8);
   }
 
   private void stopFdbContainer() {
