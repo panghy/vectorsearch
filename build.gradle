@@ -213,6 +213,9 @@ jmh {
   warmupIterations = 3
   iterations = 5
   jmhVersion = '1.37'
+  if (project.hasProperty('jmhInclude')) {
+    includes = [project.property('jmhInclude')]
+  }
 }
 
 
