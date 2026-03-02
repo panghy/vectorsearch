@@ -35,13 +35,13 @@ import org.openjdk.jmh.annotations.*;
 public class VectorIndexSearchBenchmark {
 
   private static final String CONTAINER_NAME = "vs-bench-fdb";
-  private static final String FDB_IMAGE = "foundationdb/foundationdb:7.3.27";
-  private static final int FDB_PORT = 4500;
+  private static final String FDB_IMAGE = "foundationdb/foundationdb:7.3.69";
 
   private Database db;
   private DirectorySubspace root;
   private VectorIndex index;
   private Path clusterFilePath;
+  private int hostPort;
   private volatile boolean setupFailed = false;
 
   @Param({"BEST_FIRST", "BEAM"})
@@ -136,8 +136,13 @@ public class VectorIndexSearchBenchmark {
     // Stop any leftover container from a previous run.
     exec("docker", "rm", "-f", CONTAINER_NAME);
 
+    // Find a free port to avoid "port already allocated" errors.
+    try (java.net.ServerSocket ss = new java.net.ServerSocket(0)) {
+      hostPort = ss.getLocalPort();
+    }
+
     // Start a fresh FDB 7.3 container.
-    exec("docker", "run", "-d", "--name", CONTAINER_NAME, "-p", FDB_PORT + ":4500", FDB_IMAGE);
+    exec("docker", "run", "-d", "--name", CONTAINER_NAME, "-p", hostPort + ":4500", FDB_IMAGE);
 
     // Initialize the database — required for FDB 7.3 containers.
     // Wait a few seconds for fdbmonitor to start the fdbserver process.
@@ -151,8 +156,8 @@ public class VectorIndexSearchBenchmark {
     clusterFilePath = Files.createTempFile("fdb-bench-", ".cluster");
     exec("docker", "cp", CONTAINER_NAME + ":/var/fdb/fdb.cluster", clusterFilePath.toString());
     String clusterContent = Files.readString(clusterFilePath, StandardCharsets.UTF_8);
-    // Replace the container-internal IP (e.g. 172.x.x.x) with 127.0.0.1 for host access.
-    clusterContent = clusterContent.replaceAll("@[0-9.]+:", "@127.0.0.1:");
+    // Replace the container-internal IP and port with 127.0.0.1:{hostPort} for host access.
+    clusterContent = clusterContent.replaceAll("@[0-9.]+:[0-9]+", "@127.0.0.1:" + hostPort);
     Files.writeString(clusterFilePath, clusterContent, StandardCharsets.UTF_8);
   }
 
