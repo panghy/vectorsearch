@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch.pq;
 
+import io.github.panghy.vectorsearch.util.Distances;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -90,11 +91,6 @@ public final class PqTrainer {
   }
 
   private static double l2(float[] a, float[] b) {
-    double s = 0.0;
-    for (int i = 0; i < a.length; i++) {
-      double d = (double) a[i] - b[i];
-      s += d * d;
-    }
-    return s;
+    return Distances.l2Squared(a, b);
   }
 }

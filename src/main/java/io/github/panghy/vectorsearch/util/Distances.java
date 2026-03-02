@@ -64,6 +64,63 @@ public final class Distances {
   }
 
   /**
+   * Computes squared Euclidean (L2²) distance between two vectors. Avoids the sqrt, making it
+   * suitable for comparison-only use cases (e.g., nearest-neighbor search, k-means assignment).
+   *
+   * @param a vector A (must be same length as B)
+   * @param b vector B
+   * @return sum of squared differences (non-negative)
+   */
+  public static double l2Squared(float[] a, float[] b) {
+    int i = 0;
+    int upperBound = SPECIES.loopBound(a.length);
+    FloatVector sumVec = FloatVector.zero(SPECIES);
+    for (; i < upperBound; i += SPECIES.length()) {
+      FloatVector va = FloatVector.fromArray(SPECIES, a, i);
+      FloatVector vb = FloatVector.fromArray(SPECIES, b, i);
+      FloatVector diff = va.sub(vb);
+      sumVec = diff.fma(diff, sumVec);
+    }
+    double sum = sumVec.reduceLanes(VectorOperators.ADD);
+    // Scalar tail
+    for (; i < a.length; i++) {
+      double d = (double) a[i] - b[i];
+      sum += d * d;
+    }
+    return sum;
+  }
+
+  /**
+   * Computes squared Euclidean (L2²) distance between sub-vectors at given offsets. This avoids
+   * array copies when working with sub-spaces (e.g., PQ encoding, LUT building).
+   *
+   * @param a first array
+   * @param aOffset start offset in {@code a}
+   * @param b second array
+   * @param bOffset start offset in {@code b}
+   * @param length number of elements to compare
+   * @return sum of squared differences (non-negative)
+   */
+  public static double l2Squared(float[] a, int aOffset, float[] b, int bOffset, int length) {
+    int i = 0;
+    int upperBound = SPECIES.loopBound(length);
+    FloatVector sumVec = FloatVector.zero(SPECIES);
+    for (; i < upperBound; i += SPECIES.length()) {
+      FloatVector va = FloatVector.fromArray(SPECIES, a, aOffset + i);
+      FloatVector vb = FloatVector.fromArray(SPECIES, b, bOffset + i);
+      FloatVector diff = va.sub(vb);
+      sumVec = diff.fma(diff, sumVec);
+    }
+    double sum = sumVec.reduceLanes(VectorOperators.ADD);
+    // Scalar tail
+    for (; i < length; i++) {
+      double d = (double) a[aOffset + i] - b[bOffset + i];
+      sum += d * d;
+    }
+    return sum;
+  }
+
+  /**
    * Computes dot product between two vectors.
    *
    * @param a vector A
