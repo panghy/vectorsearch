@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
+import java.util.TreeMap;
 import org.junit.jupiter.api.Test;
 
 class GraphBuilderTest {
@@ -144,8 +145,8 @@ class GraphBuilderTest {
     int start = GraphBuilder.findMedoid(vectors);
     boolean[] visited = new boolean[n];
     // Use a sorted candidate list
-    java.util.TreeMap<Double, Integer> candidates = new java.util.TreeMap<>();
-    java.util.TreeMap<Double, Integer> results = new java.util.TreeMap<>();
+    TreeMap<Double, Integer> candidates = new TreeMap<>();
+    TreeMap<Double, Integer> results = new TreeMap<>();
 
     double startDist = l2(vectors[start], query);
     candidates.put(startDist + start * 1e-12, start); // tie-break with id

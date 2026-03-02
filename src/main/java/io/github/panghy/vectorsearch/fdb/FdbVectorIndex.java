@@ -33,6 +33,9 @@ import io.github.panghy.vectorsearch.util.Distances;
 import io.github.panghy.vectorsearch.util.FloatPacker;
 import io.github.panghy.vectorsearch.util.Metrics;
 import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.metrics.DoubleHistogram;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.Tracer;
@@ -66,17 +69,17 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   private MaintenanceWorkerPool maintenancePool;
   private SegmentBuildWorkerPool workerPool;
 
-  private final io.opentelemetry.api.metrics.Meter meter;
-  private final io.opentelemetry.api.metrics.LongCounter vacScheduled;
-  private final io.opentelemetry.api.metrics.LongCounter vacSkipped;
+  private final Meter meter;
+  private final LongCounter vacScheduled;
+  private final LongCounter vacSkipped;
 
   // Per-segment query breakdown histograms
-  private final io.opentelemetry.api.metrics.DoubleHistogram pqScanMs;
-  private final io.opentelemetry.api.metrics.DoubleHistogram graphTraversalMs;
-  private final io.opentelemetry.api.metrics.DoubleHistogram rerankMs;
+  private final DoubleHistogram pqScanMs;
+  private final DoubleHistogram graphTraversalMs;
+  private final DoubleHistogram rerankMs;
   // Per-query aggregate histograms
-  private final io.opentelemetry.api.metrics.DoubleHistogram segmentsSearched;
-  private final io.opentelemetry.api.metrics.DoubleHistogram resultsReturned;
+  private final DoubleHistogram segmentsSearched;
+  private final DoubleHistogram resultsReturned;
 
   private FdbVectorIndex(VectorIndexConfig config, FdbVectorStore store, FdbDirectories.IndexDirectories indexDirs) {
     this.config = config;
