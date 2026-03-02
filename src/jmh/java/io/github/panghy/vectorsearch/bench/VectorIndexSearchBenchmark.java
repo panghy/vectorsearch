@@ -45,7 +45,7 @@ public class VectorIndexSearchBenchmark {
   private Path clusterFilePath;
   private volatile boolean setupFailed = false;
 
-  @Param({"BEST_FIRST", "BEAM"})
+  @Param({"BEST_FIRST"})
   public String mode;
 
   @Param({"1", "10", "50"})
@@ -202,6 +202,14 @@ public class VectorIndexSearchBenchmark {
         // discard
       }
     }
-    p.waitFor(30, TimeUnit.SECONDS);
+    boolean finished = p.waitFor(30, TimeUnit.SECONDS);
+    if (!finished) {
+      p.destroyForcibly();
+      throw new IllegalStateException("Command timed out after 30 seconds: " + String.join(" ", cmd));
+    }
+    int exitCode = p.exitValue();
+    if (exitCode != 0) {
+      throw new IllegalStateException("Command exited with code " + exitCode + ": " + String.join(" ", cmd));
+    }
   }
 }
