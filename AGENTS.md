@@ -9,6 +9,8 @@ This project uses a terminal-first workflow. Below is a concise guide for contri
 - Clean build: `./gradlew clean build`
 - Run tests: `./gradlew test`
 - Run a single test: `./gradlew test --tests "io.github.panghy.vectorsearch.SomeTest"`
+- Run all JMH benchmarks: `./gradlew jmh`
+- Run a specific benchmark: `./gradlew jmh -PjmhInclude="BenchmarkClassName"`
 
 ### Code Quality
 - Apply code formatting: `./gradlew spotlessApply`
