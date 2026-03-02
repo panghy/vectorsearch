@@ -1,5 +1,7 @@
 package io.github.panghy.vectorsearch.pq;
 
+import io.github.panghy.vectorsearch.util.Distances;
+
 /**
  * Encodes vectors into PQ codes using trained centroids.
  */
@@ -23,11 +25,7 @@ public final class PqEncoder {
       int best = 0;
       double bestDist = Double.POSITIVE_INFINITY;
       for (int ci = 0; ci < k; ci++) {
-        double d = 0.0;
-        for (int dIdx = 0; dIdx < subDim; dIdx++) {
-          double dd = (double) vector[off + dIdx] - centroids[s][ci][dIdx];
-          d += dd * dd;
-        }
+        double d = Distances.l2Squared(vector, off, centroids[s][ci], 0, subDim);
         if (d < bestDist) {
           bestDist = d;
           best = ci;

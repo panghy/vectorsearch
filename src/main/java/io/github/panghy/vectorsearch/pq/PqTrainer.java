@@ -1,5 +1,6 @@
 package io.github.panghy.vectorsearch.pq;
 
+import io.github.panghy.vectorsearch.util.Distances;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -57,7 +58,7 @@ public final class PqTrainer {
           int best = 0;
           double bestDist = Double.POSITIVE_INFINITY;
           for (int ci = 0; ci < k; ci++) {
-            double d = l2(x, centroids[s][ci]);
+            double d = l2Squared(x, centroids[s][ci]);
             if (d < bestDist) {
               bestDist = d;
               best = ci;
@@ -89,12 +90,7 @@ public final class PqTrainer {
     return centroids;
   }
 
-  private static double l2(float[] a, float[] b) {
-    double s = 0.0;
-    for (int i = 0; i < a.length; i++) {
-      double d = (double) a[i] - b[i];
-      s += d * d;
-    }
-    return s;
+  private static double l2Squared(float[] a, float[] b) {
+    return Distances.l2Squared(a, b);
   }
 }

@@ -202,8 +202,8 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   public CompletableFuture<Long> add(float[] embedding, byte[] payload) {
     Database db = config.getDatabase();
     return store.add(embedding, payload)
-        .thenCompose(
-            a -> db.readAsync(tr -> tr.get(indexDirs.gidRevDir().pack(Tuple.from(a[0], a[1])))
+        .thenCompose(a ->
+            db.readAsync(tr -> tr.get(indexDirs.gidRevDir().pack(Tuple.from(a[0], a[1])))
                 .thenApply(b -> Tuple.fromBytes(b).getLong(0))));
   }
 
@@ -709,10 +709,11 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
       double[][] lut = buildLut(centroids, q);
       long pqScanStart = System.nanoTime();
       return config.getDatabase()
-          .readAsync(tr -> indexDirs.segmentKeys(tr, segId).thenCompose(sk -> tr.getRange(
-                  sk.pqCodesDir().range())
-              .asList()
-              .thenApply(kvs -> new SimpleEntry<>(sk, kvs))))
+          .readAsync(tr -> indexDirs
+              .segmentKeys(tr, segId)
+              .thenCompose(sk -> tr.getRange(sk.pqCodesDir().range())
+                  .asList()
+                  .thenApply(kvs -> new SimpleEntry<>(sk, kvs))))
           .thenCompose(entry -> {
             var sk = entry.getKey();
             var codeKvs = entry.getValue();
@@ -1039,12 +1040,7 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
     for (int s = 0; s < m; s++) {
       int off = s * subDim;
       for (int ci = 0; ci < k; ci++) {
-        double d = 0.0;
-        for (int di = 0; di < subDim; di++) {
-          double dd = (double) q[off + di] - centroids[s][ci][di];
-          d += dd * dd;
-        }
-        lut[s][ci] = d;
+        lut[s][ci] = Distances.l2Squared(q, off, centroids[s][ci], 0, subDim);
       }
     }
     return lut;

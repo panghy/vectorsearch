@@ -4,7 +4,7 @@ import java.time.Duration
 
 buildscript {
   dependencies {
-    classpath 'com.palantir.javaformat:gradle-palantir-java-format:2.72.0'
+    classpath 'com.palantir.javaformat:gradle-palantir-java-format:2.89.0'
   }
 }
 
@@ -14,7 +14,7 @@ plugins {
   id 'maven-publish'
   id 'signing'
   id 'jacoco'
-  id 'com.diffplug.spotless' version '6.25.0'
+  id 'com.diffplug.spotless' version '8.2.1'
   id 'com.vanniktech.maven.publish' version '0.33.0'
   id 'me.champeau.jmh' version '0.7.2'
 }
@@ -27,11 +27,16 @@ group = 'io.github.panghy'
 version = '0.1.0-SNAPSHOT'
 
 java {
-  sourceCompatibility = JavaVersion.VERSION_17
-  targetCompatibility = JavaVersion.VERSION_17
+  sourceCompatibility = JavaVersion.VERSION_21
+  targetCompatibility = JavaVersion.VERSION_21
   toolchain {
-    languageVersion = JavaLanguageVersion.of(17)
+    languageVersion = JavaLanguageVersion.of(21)
   }
+}
+
+// Add incubator vector module for SIMD support
+tasks.withType(JavaCompile).configureEach {
+  options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
 }
 
 repositories {
@@ -61,8 +66,8 @@ dependencies {
   implementation 'org.slf4j:slf4j-api:2.0.9'
 
   // Lombok
-  compileOnly 'org.projectlombok:lombok:1.18.28'
-  annotationProcessor 'org.projectlombok:lombok:1.18.28'
+  compileOnly 'org.projectlombok:lombok:1.18.36'
+  annotationProcessor 'org.projectlombok:lombok:1.18.36'
 
   // Testing
   testImplementation 'org.junit.jupiter:junit-jupiter:5.10.1'
@@ -110,12 +115,14 @@ sourceSets {
 
 test {
   useJUnitPlatform()
+  jvmArgs += ['--add-modules', 'jdk.incubator.vector']
   finalizedBy jacocoTestReport
 }
 
 // Integration test task
 tasks.register('integrationTest', Test) {
   useJUnitPlatform()
+  jvmArgs += ['--add-modules', 'jdk.incubator.vector']
   testClassesDirs = sourceSets.integrationTest.output.classesDirs
   classpath = sourceSets.integrationTest.runtimeClasspath
   shouldRunAfter test
@@ -126,6 +133,23 @@ check.dependsOn integrationTest
 
 // Ensure proto compilation happens before Java compilation
 compileJava.dependsOn 'generateProto'
+
+// Enable jdk.incubator.vector for SIMD-accelerated distance computations
+compileJava {
+  options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
+}
+
+compileTestJava {
+  options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
+}
+
+tasks.matching { it.name == 'compileIntegrationTestJava' }.configureEach {
+  options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
+}
+
+tasks.matching { it.name == 'compileJmhJava' }.configureEach {
+  options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
+}
 
 // Handle duplicate proto files in resources
 tasks.processResources {
@@ -213,7 +237,8 @@ jmh {
   warmupIterations = 3
   iterations = 5
   jmhVersion = '1.37'
-  jvmArgs = ['-Dorg.slf4j.simpleLogger.defaultLogLevel=WARN',
+  jvmArgs = ['--add-modules', 'jdk.incubator.vector',
+             '-Dorg.slf4j.simpleLogger.defaultLogLevel=WARN',
              '-Dorg.slf4j.simpleLogger.log.io.github.panghy.vectorsearch=WARN']
   if (project.hasProperty('jmhInclude')) {
     includes = [project.property('jmhInclude')]

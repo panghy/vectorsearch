@@ -70,8 +70,9 @@ public final class MaintenanceService {
    */
   public CompletableFuture<Void> vacuumSegment(int segId, double minDeletedRatio) {
     Database db = config.getDatabase();
-    return db.readAsync(tr -> indexDirs.segmentKeys(tr, segId).thenCompose(sk -> tr.get(sk.metaKey())
-            .thenApply(b -> new SimpleEntry<>(sk, b))))
+    return db.readAsync(tr -> indexDirs
+            .segmentKeys(tr, segId)
+            .thenCompose(sk -> tr.get(sk.metaKey()).thenApply(b -> new SimpleEntry<>(sk, b))))
         .exceptionally(ex -> {
           // If the segment directory does not exist yet, vacuum is a no-op.
           Throwable c = ex instanceof CompletionException ? ex.getCause() : ex;
@@ -97,9 +98,11 @@ public final class MaintenanceService {
             return completedFuture(null);
           }
           // Scan vectors using DirectoryLayer subspace for this segment
-          return db.readAsync(tr -> indexDirs.segmentKeys(tr, segId).thenCompose(sk2 -> tr.getRange(
-                      sk2.vectorsDir().range())
-                  .asList()))
+          return db.readAsync(tr -> indexDirs
+                  .segmentKeys(tr, segId)
+                  .thenCompose(
+                      sk2 -> tr.getRange(sk2.vectorsDir().range())
+                          .asList()))
               .thenCompose(kvs -> deleteTombstones(db, sk, kvs))
               .thenCompose(removed -> updateMetaAfterVacuum(db, sk, sm, removed));
         });
@@ -259,8 +262,9 @@ public final class MaintenanceService {
         return db.readAsync(tr -> {
               CompletableFuture<Void> chain = completedFuture(null);
               for (int sid : segIds) {
-                chain = chain.thenCompose(
-                    vv -> indexDirs.segmentKeys(tr, sid).thenCompose(sk2 -> tr.getRange(
+                chain = chain.thenCompose(vv -> indexDirs
+                    .segmentKeys(tr, sid)
+                    .thenCompose(sk2 -> tr.getRange(
                             sk2.vectorsDir().range())
                         .asList()
                         .thenCompose(kvs -> {
@@ -271,22 +275,19 @@ public final class MaintenanceService {
                                 .getLong(0);
                             inner = inner.thenCompose(zz -> tr.get(kv.getKey())
                                 .thenCombine(
-                                    tr.get(
-                                        indexDirs
-                                            .gidRevDir()
-                                            .pack(Tuple.from(sid, vecId))),
+                                    tr.get(indexDirs
+                                        .gidRevDir()
+                                        .pack(Tuple.from(sid, vecId))),
                                     (vbytes, gbytes) -> {
                                       try {
                                         VectorRecord rec =
                                             VectorRecord.parseFrom(vbytes);
                                         if (rec.getDeleted()) return null;
-                                        vectors.add(
-                                            FloatPacker.bytesToFloats(
-                                                rec.getEmbedding()
-                                                    .toByteArray()));
-                                        payloads.add(
-                                            rec.getPayload()
-                                                .toByteArray());
+                                        vectors.add(FloatPacker.bytesToFloats(
+                                            rec.getEmbedding()
+                                                .toByteArray()));
+                                        payloads.add(rec.getPayload()
+                                            .toByteArray());
                                         long gid = (gbytes == null)
                                             ? -1L
                                             : Tuple.fromBytes(gbytes)

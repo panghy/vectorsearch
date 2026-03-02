@@ -142,8 +142,9 @@ public class SegmentBuildService {
 
   private CompletableFuture<Void> ensureCodebookExists(int segId) {
     Database db = config.getDatabase();
-    return db.runAsync(tr -> indexDirs.segmentKeys(tr, segId).thenCompose(sk -> tr.get(sk.pqCodebookKey())
-        .thenApply(cb -> {
+    return db.runAsync(tr -> indexDirs
+        .segmentKeys(tr, segId)
+        .thenCompose(sk -> tr.get(sk.pqCodebookKey()).thenApply(cb -> {
           if (cb == null) {
             int m = config.getPqM();
             int k = config.getPqK();

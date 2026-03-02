@@ -1,9 +1,19 @@
 package io.github.panghy.vectorsearch.util;
 
+import jdk.incubator.vector.FloatVector;
+import jdk.incubator.vector.VectorOperators;
+import jdk.incubator.vector.VectorSpecies;
+
 /**
- * Basic distance/similarity utilities for vector comparisons.
+ * SIMD-accelerated distance/similarity utilities for vector comparisons.
+ *
+ * <p>Uses {@link FloatVector} from {@code jdk.incubator.vector} for bulk operations with scalar
+ * tail handling for remaining elements that don't fill a full SIMD lane.
  */
 public final class Distances {
+
+  private static final VectorSpecies<Float> SPECIES = FloatVector.SPECIES_PREFERRED;
+
   private Distances() {}
 
   /**
@@ -36,9 +46,48 @@ public final class Distances {
    * @see #l2(float[], float[])
    */
   public static double l2Squared(float[] a, float[] b) {
-    double sum = 0.0;
-    for (int i = 0; i < a.length; i++) {
+    int i = 0;
+    int upperBound = SPECIES.loopBound(a.length);
+    FloatVector sumVec = FloatVector.zero(SPECIES);
+    for (; i < upperBound; i += SPECIES.length()) {
+      FloatVector va = FloatVector.fromArray(SPECIES, a, i);
+      FloatVector vb = FloatVector.fromArray(SPECIES, b, i);
+      FloatVector diff = va.sub(vb);
+      sumVec = diff.fma(diff, sumVec);
+    }
+    double sum = sumVec.reduceLanes(VectorOperators.ADD);
+    for (; i < a.length; i++) {
       double d = (double) a[i] - b[i];
+      sum += d * d;
+    }
+    return sum;
+  }
+
+  /**
+   * Computes squared Euclidean (L2²) distance between sub-vectors at given offsets. This avoids
+   * array copies when working with sub-spaces (e.g., PQ encoding, LUT building).
+   *
+   * @param a first array
+   * @param aOffset start offset in {@code a}
+   * @param b second array
+   * @param bOffset start offset in {@code b}
+   * @param length number of elements to compare
+   * @return sum of squared differences (non-negative)
+   */
+  public static double l2Squared(float[] a, int aOffset, float[] b, int bOffset, int length) {
+    int i = 0;
+    int upperBound = SPECIES.loopBound(length);
+    FloatVector sumVec = FloatVector.zero(SPECIES);
+    for (; i < upperBound; i += SPECIES.length()) {
+      FloatVector va = FloatVector.fromArray(SPECIES, a, aOffset + i);
+      FloatVector vb = FloatVector.fromArray(SPECIES, b, bOffset + i);
+      FloatVector diff = va.sub(vb);
+      sumVec = diff.fma(diff, sumVec);
+    }
+    double sum = sumVec.reduceLanes(VectorOperators.ADD);
+    // Scalar tail
+    for (; i < length; i++) {
+      double d = (double) a[aOffset + i] - b[bOffset + i];
       sum += d * d;
     }
     return sum;
@@ -52,8 +101,19 @@ public final class Distances {
    * @return dot product value
    */
   public static double dot(float[] a, float[] b) {
-    double s = 0.0;
-    for (int i = 0; i < a.length; i++) s += (double) a[i] * b[i];
+    int i = 0;
+    int upperBound = SPECIES.loopBound(a.length);
+    FloatVector sumVec = FloatVector.zero(SPECIES);
+    for (; i < upperBound; i += SPECIES.length()) {
+      FloatVector va = FloatVector.fromArray(SPECIES, a, i);
+      FloatVector vb = FloatVector.fromArray(SPECIES, b, i);
+      sumVec = va.fma(vb, sumVec);
+    }
+    double s = sumVec.reduceLanes(VectorOperators.ADD);
+    // Scalar tail
+    for (; i < a.length; i++) {
+      s += (double) a[i] * b[i];
+    }
     return s;
   }
 
@@ -64,8 +124,18 @@ public final class Distances {
    * @return sqrt(sum(x^2))
    */
   public static double norm(float[] a) {
-    double s = 0.0;
-    for (float v : a) s += (double) v * v;
+    int i = 0;
+    int upperBound = SPECIES.loopBound(a.length);
+    FloatVector sumVec = FloatVector.zero(SPECIES);
+    for (; i < upperBound; i += SPECIES.length()) {
+      FloatVector va = FloatVector.fromArray(SPECIES, a, i);
+      sumVec = va.fma(va, sumVec);
+    }
+    double s = sumVec.reduceLanes(VectorOperators.ADD);
+    // Scalar tail
+    for (; i < a.length; i++) {
+      s += (double) a[i] * a[i];
+    }
     return Math.sqrt(s);
   }
 
