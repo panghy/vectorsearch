@@ -183,7 +183,7 @@ public class VectorIndexSearchBenchmark {
           output = br.lines().reduce("", (a, b) -> a + "\n" + b);
         }
         int exit = p.waitFor();
-        if (exit == 0 && output.contains("healthy")) {
+        if (exit == 0 && (output.contains("healthy") || output.contains("available"))) {
           return;
         }
       } catch (Exception ignored) {
