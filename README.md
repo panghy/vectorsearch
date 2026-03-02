@@ -98,6 +98,41 @@ Enablement:
 - Coverage report: `./gradlew jacocoTestReport`
 - Coverage gates: `./gradlew jacocoTestCoverageVerification`
 
+## Benchmarks
+
+JMH microbenchmarks live under `src/jmh/`. Two benchmark suites are available:
+
+### Search Latency (`VectorIndexSearchBenchmark`)
+
+End-to-end kNN query latency against a real FDB instance. Requires Docker.
+
+The benchmark automatically starts/stops an FDB 7.3 Docker container (`foundationdb/foundationdb:7.3.69`), inserts 1100 vectors (dim=8, maxSegmentSize=500), waits for segment sealing, then measures query latency across search modes (BEST_FIRST, BEAM) and k values (1, 10, 50).
+
+```bash
+# Run search benchmarks (Docker must be available)
+./gradlew jmh -PjmhInclude="VectorIndexSearchBenchmark"
+```
+
+### Distance & PQ Microbenchmarks (`DistanceAndPqBenchmark`)
+
+Pure-CPU benchmarks for hot-path operations. No FDB or Docker required.
+
+- L2 distance (dim=128, 768)
+- Cosine similarity (dim=128, 768)
+- PQ encode (M=16, K=256, dim=128)
+- PQ lookup-table distance (simulated inner loop)
+
+```bash
+# Run CPU-only benchmarks
+./gradlew jmh -PjmhInclude="DistanceAndPqBenchmark"
+```
+
+### Running All Benchmarks
+
+```bash
+./gradlew jmh
+```
+
 ## Configuration (high-level)
 
 VectorIndexConfig includes:
