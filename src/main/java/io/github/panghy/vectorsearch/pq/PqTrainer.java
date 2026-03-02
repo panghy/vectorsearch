@@ -58,7 +58,7 @@ public final class PqTrainer {
           int best = 0;
           double bestDist = Double.POSITIVE_INFINITY;
           for (int ci = 0; ci < k; ci++) {
-            double d = l2(x, centroids[s][ci]);
+            double d = l2Squared(x, centroids[s][ci]);
             if (d < bestDist) {
               bestDist = d;
               best = ci;
@@ -90,7 +90,7 @@ public final class PqTrainer {
     return centroids;
   }
 
-  private static double l2(float[] a, float[] b) {
+  private static double l2Squared(float[] a, float[] b) {
     return Distances.l2Squared(a, b);
   }
 }
