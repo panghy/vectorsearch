@@ -54,6 +54,14 @@ public final class VectorIndexConfig {
   private final boolean prefetchCodebooksSync;
   private final boolean autoFindCompactionCandidates;
 
+  // Compaction planner knobs
+  private final int compactionMinSegments;
+  private final int compactionMaxSegments;
+  private final double compactionMinFragmentation;
+  private final double compactionAgeBiasWeight;
+  private final double compactionSizeBiasWeight;
+  private final double compactionFragBiasWeight;
+
   // Build batching/size control
   private final long buildTxnLimitBytes;
   private final double buildTxnSoftLimitRatio;
@@ -114,6 +122,23 @@ public final class VectorIndexConfig {
     this.prefetchCodebooksEnabled = b.prefetchCodebooksEnabled;
     this.prefetchCodebooksSync = b.prefetchCodebooksSync;
     this.autoFindCompactionCandidates = b.autoFindCompactionCandidates;
+
+    if (b.compactionMinSegments < 2) throw new IllegalArgumentException("compactionMinSegments must be >= 2");
+    this.compactionMinSegments = b.compactionMinSegments;
+    if (b.compactionMaxSegments < b.compactionMinSegments)
+      throw new IllegalArgumentException("compactionMaxSegments must be >= compactionMinSegments");
+    this.compactionMaxSegments = b.compactionMaxSegments;
+    if (!(b.compactionMinFragmentation >= 0.0 && b.compactionMinFragmentation <= 1.0))
+      throw new IllegalArgumentException("compactionMinFragmentation must be in [0,1]");
+    this.compactionMinFragmentation = b.compactionMinFragmentation;
+    if (b.compactionAgeBiasWeight < 0.0) throw new IllegalArgumentException("compactionAgeBiasWeight must be >= 0");
+    this.compactionAgeBiasWeight = b.compactionAgeBiasWeight;
+    if (b.compactionSizeBiasWeight < 0.0)
+      throw new IllegalArgumentException("compactionSizeBiasWeight must be >= 0");
+    this.compactionSizeBiasWeight = b.compactionSizeBiasWeight;
+    if (b.compactionFragBiasWeight < 0.0)
+      throw new IllegalArgumentException("compactionFragBiasWeight must be >= 0");
+    this.compactionFragBiasWeight = b.compactionFragBiasWeight;
 
     if (b.buildTxnLimitBytes <= 0) throw new IllegalArgumentException("buildTxnLimitBytes must be positive");
     if (!(b.buildTxnSoftLimitRatio > 0.0 && b.buildTxnSoftLimitRatio < 1.0))
@@ -307,6 +332,36 @@ public final class VectorIndexConfig {
     return autoFindCompactionCandidates;
   }
 
+  /** Minimum number of segments required to trigger compaction (default 2). */
+  public int getCompactionMinSegments() {
+    return compactionMinSegments;
+  }
+
+  /** Maximum number of segments to merge at once (default 8). */
+  public int getCompactionMaxSegments() {
+    return compactionMaxSegments;
+  }
+
+  /** Minimum average deleted ratio across candidates to proceed with compaction (default 0.1). */
+  public double getCompactionMinFragmentation() {
+    return compactionMinFragmentation;
+  }
+
+  /** Weight for age score in composite compaction ranking (default 0.3). */
+  public double getCompactionAgeBiasWeight() {
+    return compactionAgeBiasWeight;
+  }
+
+  /** Weight for size score (smaller = higher) in composite compaction ranking (default 0.5). */
+  public double getCompactionSizeBiasWeight() {
+    return compactionSizeBiasWeight;
+  }
+
+  /** Weight for fragmentation score in composite compaction ranking (default 0.2). */
+  public double getCompactionFragBiasWeight() {
+    return compactionFragBiasWeight;
+  }
+
   /**
    * Upper bound for FDB transaction size (bytes) used by segment build batching.
    */
@@ -366,6 +421,12 @@ public final class VectorIndexConfig {
     private boolean prefetchCodebooksEnabled = true;
     private boolean prefetchCodebooksSync = false;
     private boolean autoFindCompactionCandidates = true;
+    private int compactionMinSegments = 2;
+    private int compactionMaxSegments = 8;
+    private double compactionMinFragmentation = 0.1;
+    private double compactionAgeBiasWeight = 0.3;
+    private double compactionSizeBiasWeight = 0.5;
+    private double compactionFragBiasWeight = 0.2;
     private long buildTxnLimitBytes = 10L * 1024 * 1024; // 10 MB
     private double buildTxnSoftLimitRatio = 0.9; // leave 10% headroom
     private int buildSizeCheckEvery = 32;
@@ -564,6 +625,42 @@ public final class VectorIndexConfig {
     /** Enables/disables auto-enqueue of find-compaction-candidates after vacuum. */
     public Builder autoFindCompactionCandidates(boolean enabled) {
       this.autoFindCompactionCandidates = enabled;
+      return this;
+    }
+
+    /** Sets minimum segments required to trigger compaction (default 2, must be >= 2). */
+    public Builder compactionMinSegments(int min) {
+      this.compactionMinSegments = min;
+      return this;
+    }
+
+    /** Sets maximum segments to merge at once (default 8). */
+    public Builder compactionMaxSegments(int max) {
+      this.compactionMaxSegments = max;
+      return this;
+    }
+
+    /** Sets minimum average deleted ratio across candidates to proceed (default 0.1). */
+    public Builder compactionMinFragmentation(double ratio) {
+      this.compactionMinFragmentation = ratio;
+      return this;
+    }
+
+    /** Sets weight for age score in composite ranking (default 0.3). */
+    public Builder compactionAgeBiasWeight(double weight) {
+      this.compactionAgeBiasWeight = weight;
+      return this;
+    }
+
+    /** Sets weight for size score in composite ranking (default 0.5). */
+    public Builder compactionSizeBiasWeight(double weight) {
+      this.compactionSizeBiasWeight = weight;
+      return this;
+    }
+
+    /** Sets weight for fragmentation score in composite ranking (default 0.2). */
+    public Builder compactionFragBiasWeight(double weight) {
+      this.compactionFragBiasWeight = weight;
       return this;
     }
 

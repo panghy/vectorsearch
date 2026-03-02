@@ -95,7 +95,12 @@ public class CompactionWorkerIntegrationTest {
         .build();
     var mq = TaskQueues.createTaskQueue(tqc).get(5, TimeUnit.SECONDS);
     MaintenanceWorker worker = new MaintenanceWorker(
-        VectorIndexConfig.builder(db, root).dimension(4).build(), dirs, mq);
+        VectorIndexConfig.builder(db, root)
+            .dimension(4)
+            .compactionMinFragmentation(0.0)
+            .build(),
+        dirs,
+        mq);
     // First run: probably no task yet; manually queue find-candidates for anchor 0
     mq.enqueue(
             "find-candidates:0",
