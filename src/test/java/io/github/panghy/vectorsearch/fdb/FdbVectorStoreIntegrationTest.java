@@ -526,4 +526,84 @@ class FdbVectorStoreIntegrationTest {
         .hasRootCauseInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("maxSegmentSize mismatch");
   }
+
+  @Test
+  void add_wrongDimension_throwsIllegalArgumentException() throws Exception {
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, appRoot)
+        .dimension(4)
+        .maxSegmentSize(10)
+        .defaultTtl(Duration.ofMinutes(5))
+        .build();
+
+    var dirs = FdbDirectories.openIndex(appRoot, db).get(5, TimeUnit.SECONDS);
+    var tqCfg = TaskQueueConfig.builder(
+            db,
+            dirs.tasksDir(),
+            new ProtoSerializers.StringSerializer(),
+            new ProtoSerializers.BuildTaskSerializer())
+        .build();
+    var queue = TaskQueues.createTaskQueue(tqCfg).get(5, TimeUnit.SECONDS);
+    FdbVectorStore store = new FdbVectorStore(cfg, dirs, queue);
+    store.createOrOpenIndex().get(5, TimeUnit.SECONDS);
+
+    // Single vector with wrong dimension — exception is thrown synchronously before the future
+    Assertions.assertThatThrownBy(() -> store.add(new float[] {1, 2, 3}, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("dimension 3")
+        .hasMessageContaining("dimension 4");
+  }
+
+  @Test
+  void addBatch_oneWrongDimension_throwsIllegalArgumentException() throws Exception {
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, appRoot)
+        .dimension(4)
+        .maxSegmentSize(10)
+        .defaultTtl(Duration.ofMinutes(5))
+        .build();
+
+    var dirs = FdbDirectories.openIndex(appRoot, db).get(5, TimeUnit.SECONDS);
+    var tqCfg = TaskQueueConfig.builder(
+            db,
+            dirs.tasksDir(),
+            new ProtoSerializers.StringSerializer(),
+            new ProtoSerializers.BuildTaskSerializer())
+        .build();
+    var queue = TaskQueues.createTaskQueue(tqCfg).get(5, TimeUnit.SECONDS);
+    FdbVectorStore store = new FdbVectorStore(cfg, dirs, queue);
+    store.createOrOpenIndex().get(5, TimeUnit.SECONDS);
+
+    // Batch where second embedding has wrong dimension — thrown synchronously
+    float[][] embeddings = new float[][] {{1, 2, 3, 4}, {5, 6}};
+    Assertions.assertThatThrownBy(() -> store.addBatch(embeddings, new byte[][] {null, null}))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("index 1")
+        .hasMessageContaining("dimension 2");
+  }
+
+  @Test
+  void addBatch_nullEmbedding_throwsIllegalArgumentException() throws Exception {
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, appRoot)
+        .dimension(4)
+        .maxSegmentSize(10)
+        .defaultTtl(Duration.ofMinutes(5))
+        .build();
+
+    var dirs = FdbDirectories.openIndex(appRoot, db).get(5, TimeUnit.SECONDS);
+    var tqCfg = TaskQueueConfig.builder(
+            db,
+            dirs.tasksDir(),
+            new ProtoSerializers.StringSerializer(),
+            new ProtoSerializers.BuildTaskSerializer())
+        .build();
+    var queue = TaskQueues.createTaskQueue(tqCfg).get(5, TimeUnit.SECONDS);
+    FdbVectorStore store = new FdbVectorStore(cfg, dirs, queue);
+    store.createOrOpenIndex().get(5, TimeUnit.SECONDS);
+
+    // Batch with a null embedding entry — thrown synchronously
+    float[][] embeddings = new float[][] {{1, 2, 3, 4}, null};
+    Assertions.assertThatThrownBy(() -> store.addBatch(embeddings, new byte[][] {null, null}))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("index 1")
+        .hasMessageContaining("null");
+  }
 }

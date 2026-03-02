@@ -745,11 +745,17 @@ public final class FdbVectorStore {
    * Validates that every embedding in the array has the expected dimension.
    *
    * @param embeddings vectors to validate
-   * @throws IllegalArgumentException if any embedding has the wrong length
+   * @throws IllegalArgumentException if any embedding is null or has the wrong length
    */
   private void validateEmbeddingDimensions(float[][] embeddings) {
+    if (embeddings == null) {
+      throw new IllegalArgumentException("embeddings must not be null");
+    }
     int expected = config.getDimension();
     for (int i = 0; i < embeddings.length; i++) {
+      if (embeddings[i] == null) {
+        throw new IllegalArgumentException("Embedding at index " + i + " is null");
+      }
       if (embeddings[i].length != expected) {
         throw new IllegalArgumentException("Embedding at index " + i + " has dimension " + embeddings[i].length
             + " but the index is configured for dimension " + expected);
