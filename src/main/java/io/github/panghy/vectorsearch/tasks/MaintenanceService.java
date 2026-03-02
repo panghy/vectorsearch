@@ -399,13 +399,25 @@ public final class MaintenanceService {
   }
 
   /**
-   * Finds a small set of candidate segments to compact together with the anchor.
-   * Heuristic: choose SEALED segments with the smallest counts first until their
-   * combined live counts reach at least ~80% of maxSegmentSize or up to 4 segments.
+   * Finds a set of candidate segments to compact together with the anchor using a weighted
+   * composite score that considers segment age, size, and fragmentation (deleted ratio).
+   *
+   * <p>Scoring: {@code ageBiasWeight * ageScore + sizeBiasWeight * sizeScore + fragBiasWeight * fragScore}
+   * where ageScore is normalized age (older = higher, linear 0-1), sizeScore is normalized inverse
+   * count (smaller = higher), and fragScore is {@code deletedCount / (count + deletedCount)}.</p>
+   *
+   * <p>Candidates are picked by descending composite score until the combined live count reaches
+   * ~80% of maxSegmentSize or the configurable max segments limit is reached.</p>
    */
   public CompletableFuture<List<Integer>> findCompactionCandidates(int anchorSegId) {
     Database db = config.getDatabase();
     int maxSize = config.getMaxSegmentSize();
+    int maxSegs = config.getCompactionMaxSegments();
+    int minSegs = config.getCompactionMinSegments();
+    double minFrag = config.getCompactionMinFragmentation();
+    double ageW = config.getCompactionAgeBiasWeight();
+    double sizeW = config.getCompactionSizeBiasWeight();
+    double fragW = config.getCompactionFragBiasWeight();
     Subspace reg = indexDirs.segmentsIndexSubspace();
     return db.readAsync(tr -> tr.getRange(reg.range()).asList()).thenCompose(kvs -> {
       List<Integer> ids = new ArrayList<>(kvs.size());
@@ -424,35 +436,75 @@ public final class MaintenanceService {
           try {
             var sm = SegmentMeta.parseFrom(b);
             if (sm.getState() == SegmentMeta.State.SEALED) {
-              sealed.add(new SealedSegment(ids.get(i), sm.getCount(), sm.getCreatedAtMs()));
+              sealed.add(new SealedSegment(
+                  ids.get(i), sm.getCount(), sm.getDeletedCount(), sm.getCreatedAtMs()));
             }
           } catch (InvalidProtocolBufferException e) {
             throw new RuntimeException(e);
           }
         }
-        sealed.sort((a, b2) -> {
-          int c = Long.compare(a.count(), b2.count());
-          if (c != 0) return c;
-          return Long.compare(a.createdAtMs(), b2.createdAtMs()); // older first
-        });
+        if (sealed.size() < minSegs) return List.<Integer>of();
+
+        // Compute normalization bounds for age and size scores
+        long minCreated = Long.MAX_VALUE, maxCreated = Long.MIN_VALUE;
+        long minCount = Long.MAX_VALUE, maxCount = Long.MIN_VALUE;
+        for (SealedSegment s : sealed) {
+          if (s.createdAtMs() < minCreated) minCreated = s.createdAtMs();
+          if (s.createdAtMs() > maxCreated) maxCreated = s.createdAtMs();
+          if (s.count() < minCount) minCount = s.count();
+          if (s.count() > maxCount) maxCount = s.count();
+        }
+        long ageRange = maxCreated - minCreated;
+        long countRange = maxCount - minCount;
+
+        // Score each segment
+        record Scored(SealedSegment seg, double score) {}
+        List<Scored> scored = new ArrayList<>(sealed.size());
+        for (SealedSegment s : sealed) {
+          // ageScore: older = higher (lower createdAtMs = older)
+          double ageScore = ageRange == 0 ? 0.5 : (double) (maxCreated - s.createdAtMs()) / ageRange;
+          // sizeScore: smaller count = higher
+          double sizeScore = countRange == 0 ? 0.5 : (double) (maxCount - s.count()) / countRange;
+          // fragScore: deletedCount / (count + deletedCount)
+          long total = s.count() + s.deletedCount();
+          double fragScore = total == 0 ? 0.0 : (double) s.deletedCount() / total;
+          double composite = ageW * ageScore + sizeW * sizeScore + fragW * fragScore;
+          scored.add(new Scored(s, composite));
+        }
+        // Sort by descending composite score
+        scored.sort((a2, b2) -> Double.compare(b2.score(), a2.score()));
+
         int budget = (int) Math.max(1, Math.round(0.8 * maxSize));
-        int sum = 0;
+        long sum = 0;
         List<Integer> pick = new ArrayList<>();
         // Ensure anchor is present (if sealed)
-        for (SealedSegment s : sealed)
-          if (s.segId() == anchorSegId) {
+        for (Scored sc : scored)
+          if (sc.seg().segId() == anchorSegId) {
             pick.add(anchorSegId);
-            sum += (int) s.count();
+            sum += sc.seg().count();
             break;
           }
-        for (SealedSegment s : sealed) {
-          if (pick.contains(s.segId())) continue;
-          if (pick.size() >= 4) break;
-          pick.add(s.segId());
-          sum += (int) s.count();
+        for (Scored sc : scored) {
+          if (pick.contains(sc.seg().segId())) continue;
+          if (pick.size() >= maxSegs) break;
+          pick.add(sc.seg().segId());
+          sum += sc.seg().count();
           if (sum >= budget) break;
         }
-        if (pick.size() <= 1) return List.of();
+        if (pick.size() < minSegs) return List.<Integer>of();
+
+        // Check minimum fragmentation threshold across picked candidates
+        if (minFrag > 0.0) {
+          double totalLive = 0, totalDel = 0;
+          for (SealedSegment s : sealed) {
+            if (pick.contains(s.segId())) {
+              totalLive += s.count();
+              totalDel += s.deletedCount();
+            }
+          }
+          double avgFrag = (totalLive + totalDel) == 0 ? 0.0 : totalDel / (totalLive + totalDel);
+          if (avgFrag < minFrag) return List.<Integer>of();
+        }
         return pick;
       });
     });
@@ -497,5 +549,5 @@ public final class MaintenanceService {
   }
 
   // Improves readability over raw long[] tuples in candidate planning
-  private static record SealedSegment(int segId, long count, long createdAtMs) {}
+  static record SealedSegment(int segId, long count, long deletedCount, long createdAtMs) {}
 }

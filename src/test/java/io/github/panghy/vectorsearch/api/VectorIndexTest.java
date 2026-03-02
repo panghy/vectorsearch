@@ -615,4 +615,51 @@ class VectorIndexTest {
     List<SearchResult> res = index.query(new float[] {1f, 0f, 0f}, 5).get(5, TimeUnit.SECONDS);
     assertThat(res).isEmpty();
   }
+
+  /**
+   * Verifies that per-query latency breakdown histograms and aggregate metrics are recorded
+   * after querying a sealed segment. Checks for pq_scan_ms, graph_traversal_ms, rerank_ms,
+   * segments_searched, and results_returned metric names.
+   */
+  @Test
+  void query_records_latency_breakdown_metrics() throws Exception {
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
+        .dimension(4)
+        .pqM(2)
+        .pqK(2)
+        .graphDegree(2)
+        .maxSegmentSize(5)
+        .localWorkerThreads(0)
+        .prefetchCodebooksSync(true)
+        .build();
+    VectorIndex index = VectorIndex.createOrOpen(cfg).get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+    // Insert enough vectors to fill a segment and seal it
+    for (int i = 0; i < 5; i++) {
+      index.add(new float[] {i, i + 1, i + 2, i + 3}, null).get(5, TimeUnit.SECONDS);
+    }
+    new SegmentBuildService(cfg, dirs).build(0).get(30, TimeUnit.SECONDS);
+    // Query to trigger sealed segment search
+    index.query(new float[] {1f, 2f, 3f, 4f}, 3).get(5, TimeUnit.SECONDS);
+
+    var allMetrics = reader.collectAllMetrics();
+    // Per-segment breakdown histograms
+    assertThat(allMetrics.stream().anyMatch(m -> m.getName().equals("vectorsearch.query.pq_scan_ms")))
+        .as("pq_scan_ms metric should be present")
+        .isTrue();
+    assertThat(allMetrics.stream().anyMatch(m -> m.getName().equals("vectorsearch.query.graph_traversal_ms")))
+        .as("graph_traversal_ms metric should be present")
+        .isTrue();
+    assertThat(allMetrics.stream().anyMatch(m -> m.getName().equals("vectorsearch.query.rerank_ms")))
+        .as("rerank_ms metric should be present")
+        .isTrue();
+    // Per-query aggregate histograms
+    assertThat(allMetrics.stream().anyMatch(m -> m.getName().equals("vectorsearch.query.segments_searched")))
+        .as("segments_searched metric should be present")
+        .isTrue();
+    assertThat(allMetrics.stream().anyMatch(m -> m.getName().equals("vectorsearch.query.results_returned")))
+        .as("results_returned metric should be present")
+        .isTrue();
+    index.close();
+  }
 }

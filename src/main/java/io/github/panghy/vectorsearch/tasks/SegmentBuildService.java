@@ -1,7 +1,7 @@
 package io.github.panghy.vectorsearch.tasks;
 
 import static io.github.panghy.vectorsearch.graph.GraphBuilder.buildL2Neighbors;
-import static io.github.panghy.vectorsearch.graph.GraphBuilder.buildPrunedNeighbors;
+import static io.github.panghy.vectorsearch.graph.GraphBuilder.buildVamanaGraph;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
@@ -205,7 +205,7 @@ public class SegmentBuildService {
     double alpha = config.getGraphAlpha();
     final int[][] neighbors = (alpha <= 1.0)
         ? buildL2Neighbors(vectors.toArray(new float[0][]), degree)
-        : buildPrunedNeighbors(vectors.toArray(new float[0][]), degree, lBuild, alpha);
+        : buildVamanaGraph(vectors.toArray(new float[0][]), degree, lBuild, alpha);
     final float[][][] cCentroids = centroids;
     final List<float[]> vVectors = vectors;
 

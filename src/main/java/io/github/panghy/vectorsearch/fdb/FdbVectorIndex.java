@@ -33,6 +33,9 @@ import io.github.panghy.vectorsearch.util.Distances;
 import io.github.panghy.vectorsearch.util.FloatPacker;
 import io.github.panghy.vectorsearch.util.Metrics;
 import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.metrics.DoubleHistogram;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.Tracer;
@@ -66,9 +69,17 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   private MaintenanceWorkerPool maintenancePool;
   private SegmentBuildWorkerPool workerPool;
 
-  private final io.opentelemetry.api.metrics.Meter meter;
-  private final io.opentelemetry.api.metrics.LongCounter vacScheduled;
-  private final io.opentelemetry.api.metrics.LongCounter vacSkipped;
+  private final Meter meter;
+  private final LongCounter vacScheduled;
+  private final LongCounter vacSkipped;
+
+  // Per-segment query breakdown histograms
+  private final DoubleHistogram pqScanMs;
+  private final DoubleHistogram graphTraversalMs;
+  private final DoubleHistogram rerankMs;
+  // Per-query aggregate histograms
+  private final DoubleHistogram segmentsSearched;
+  private final DoubleHistogram resultsReturned;
 
   private FdbVectorIndex(VectorIndexConfig config, FdbVectorStore store, FdbDirectories.IndexDirectories indexDirs) {
     this.config = config;
@@ -82,6 +93,24 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
         .build();
     this.vacSkipped =
         meter.counterBuilder("vectorsearch.maintenance.vacuum.skipped").build();
+    this.pqScanMs = meter.histogramBuilder("vectorsearch.query.pq_scan_ms")
+        .setUnit("ms")
+        .setDescription("Time spent on PQ distance scanning per sealed segment")
+        .build();
+    this.graphTraversalMs = meter.histogramBuilder("vectorsearch.query.graph_traversal_ms")
+        .setUnit("ms")
+        .setDescription("Time in graph expansion (BEAM or BEST_FIRST) per sealed segment")
+        .build();
+    this.rerankMs = meter.histogramBuilder("vectorsearch.query.rerank_ms")
+        .setUnit("ms")
+        .setDescription("Time in exact rerank (fetch + score) per sealed segment")
+        .build();
+    this.segmentsSearched = meter.histogramBuilder("vectorsearch.query.segments_searched")
+        .setDescription("Number of segments searched per query")
+        .build();
+    this.resultsReturned = meter.histogramBuilder("vectorsearch.query.results_returned")
+        .setDescription("Number of results returned per query")
+        .build();
   }
 
   // Creates or opens the index asynchronously and returns a ready VectorIndex.
@@ -393,8 +422,16 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                   .build();
               Metrics.QUERY_COUNT.add(1, attrs);
               Metrics.QUERY_DURATION_MS.record((double) durMs, attrs);
+              Attributes baseAttrs = Attributes.builder()
+                  .put("metric", config.getMetric().name())
+                  .put("dim", config.getDimension())
+                  .build();
+              segmentsSearched.record((double) segIds.size(), baseAttrs);
+              resultsReturned.record((double) merged.size(), baseAttrs);
               span.setAttribute("k", k);
               span.setAttribute("dimension", config.getDimension());
+              span.setAttribute("segments", segIds.size());
+              span.setAttribute("results", merged.size());
               span.end();
               return merged;
             });
@@ -696,12 +733,17 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
    */
   private CompletableFuture<List<SearchResult>> searchSealedSegment(
       Database db, FdbDirectories.IndexDirectories dirs, int segId, float[] q, int k, SearchParams params) {
+    Attributes segAttrs = Attributes.builder()
+        .put("metric", config.getMetric().name())
+        .put("dim", config.getDimension())
+        .build();
     return caches.getCodebookCacheAsync().get(segId).thenCompose(centroids -> {
       if (centroids == null) {
         LOG.warn("Missing PQ codebook for sealed segment segId={}", segId);
         return completedFuture(List.of());
       }
       double[][] lut = buildLut(centroids, q);
+      long pqScanStart = System.nanoTime();
       return config.getDatabase()
           .readAsync(tr -> indexDirs.segmentKeys(tr, segId).thenCompose(sk -> tr.getRange(
                   sk.pqCodesDir().range())
@@ -733,6 +775,8 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
             if (approxAll.isEmpty()) return completedFuture(List.of());
 
             approxAll.sort(Comparator.comparingDouble(a -> a.approx));
+            long pqScanDur = (System.nanoTime() - pqScanStart) / 1_000_000;
+            pqScanMs.record((double) pqScanDur, segAttrs);
             int nCodes = approxAll.size();
             int baseEf = Math.max(params.efSearch(), k * Math.max(1, params.perSegmentLimitMultiplier()));
             int scale = (int) Math.max(1, Math.round(Math.sqrt(Math.max(1, nCodes) / 1000.0)));
@@ -774,10 +818,13 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                 seeds.add(approxAll.get(idx));
               }
             }
+            long graphStart = System.nanoTime();
             CompletableFuture<List<Approx>> expF = (params.mode() == SearchParams.Mode.BEST_FIRST)
                 ? diskannBestFirstExpand(segId, seeds, codeMap, lut, eff)
                 : diskannExpand(segId, seeds, codeMap, lut, eff);
             return expF.thenCompose(expanded -> {
+              long graphMs = (System.nanoTime() - graphStart) / 1_000_000;
+              graphTraversalMs.record((double) graphMs, segAttrs);
               expanded.sort(Comparator.comparingDouble(a -> a.approx));
               int topN = Math.min(expanded.size(), Math.max(eff.efSearch(), k));
               List<Approx> cand = expanded.subList(0, topN);
@@ -785,7 +832,13 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                   (config.getMetric() == VectorIndexConfig.Metric.COSINE && params.normalizeOnRead())
                       ? Distances.norm(q)
                       : 0.0;
-              return fetchExactAndScore(db, dirs, segId, q, qNorm, params.normalizeOnRead(), cand, k);
+              long rerankStart = System.nanoTime();
+              return fetchExactAndScore(db, dirs, segId, q, qNorm, params.normalizeOnRead(), cand, k)
+                  .thenApply(results -> {
+                    long rerankDur = (System.nanoTime() - rerankStart) / 1_000_000;
+                    rerankMs.record((double) rerankDur, segAttrs);
+                    return results;
+                  });
             });
           });
     });

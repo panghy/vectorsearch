@@ -80,7 +80,7 @@ class SegmentBuildServiceGraphPruningTest {
 
     new SegmentBuildService(cfg, dirs).build(0).get(10, TimeUnit.SECONDS);
 
-    // Read adjacency for vecId 0; with pruning, should keep only neighbor 1
+    // Read adjacency for vecId 0; with Vamana pruning, should have node 1 as nearest neighbor
     byte[] adj0 = db.readAsync(tr -> dirs.segmentKeys(tr, 0)
             .thenCompose(sk -> tr.get(sk.graphDir().pack(Tuple.from(0)))))
         .get(5, TimeUnit.SECONDS);
@@ -92,8 +92,10 @@ class SegmentBuildServiceGraphPruningTest {
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
-    assertThat(n0.length).isEqualTo(1);
-    assertThat(n0[0]).isEqualTo(1);
+    // Vamana graph with alpha=1.1 and degree=2: node 0 should have at most 2 neighbors
+    // and must include node 1 (nearest neighbor)
+    assertThat(n0.length).isBetween(1, 2);
+    assertThat(n0).contains(1);
   }
 
   @Test
