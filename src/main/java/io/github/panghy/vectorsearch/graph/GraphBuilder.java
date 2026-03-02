@@ -11,7 +11,11 @@ import java.util.PriorityQueue;
 import java.util.Set;
 
 /**
- * Builds k-nearest neighbor adjacency graphs for vector sets using L2 distance.
+ * Builds k-nearest neighbor adjacency graphs for vector sets using squared L2 distance.
+ *
+ * <p>All distance comparisons use squared L2 (sum of squared differences) rather than true
+ * Euclidean distance. This preserves distance ordering while avoiding the {@code Math.sqrt()}
+ * overhead in hot loops.
  *
  * <p>Provides three construction strategies:
  * <ul>
@@ -25,7 +29,10 @@ public final class GraphBuilder {
   private GraphBuilder() {}
 
   /**
-   * Computes per-vector neighbor lists.
+   * Computes per-vector neighbor lists using squared L2 distance for ranking.
+   *
+   * <p>Squared L2 (sum of squared differences) is used instead of true Euclidean distance.
+   * Since sqrt is monotonic, the neighbor ordering is identical but computation is faster.
    *
    * @param vectors array of vectors [n][d]
    * @param degree  desired out-degree (neighbors per vector)
@@ -49,12 +56,16 @@ public final class GraphBuilder {
   }
 
   /**
-   * Builds neighbors with simple Vamana-style pruning.
+   * Builds neighbors with simple Vamana-style pruning using squared L2 distance.
    *
    * <p>Algorithm:
-   * 1) For each node i, compute distances to all j != i and take the top L_build by distance.
+   * 1) For each node i, compute squared L2 distances to all j != i and take the top L_build.
    * 2) Greedily add candidates in order, pruning a candidate u if there exists a kept neighbor p
-   *    such that dist(u, p) <= alpha * dist(u, i). Set alpha <= 1 to disable pruning.
+   *    such that {@code dist²(u, p) <= alpha * dist²(u, i)}. Set alpha &lt;= 1 to disable pruning.
+   *
+   * <p>Note: because distances are squared, the {@code alpha} parameter operates on squared values.
+   * This preserves the pruning semantics (relative distance ratios) since
+   * {@code d²(a,b) <= alpha * d²(a,c)} iff {@code d(a,b) <= sqrt(alpha) * d(a,c)}.
    */
   public static int[][] buildPrunedNeighbors(float[][] vectors, int degree, int lBuild, double alpha) {
     int n = vectors.length;
@@ -99,6 +110,9 @@ public final class GraphBuilder {
   /**
    * Builds a high-quality graph using the Vamana/DiskANN incremental insertion algorithm.
    *
+   * <p>All distance comparisons use squared L2 internally, avoiding sqrt overhead while preserving
+   * neighbor ordering.
+   *
    * <p>Algorithm overview:
    * <ol>
    *   <li>Compute the medoid (vector closest to the centroid) as the entry point</li>
@@ -110,7 +124,9 @@ public final class GraphBuilder {
    * @param vectors array of vectors [n][d]
    * @param degree  target out-degree (R) per node
    * @param lBuild  search list size during construction (L_build); larger = better quality, slower
-   * @param alpha   pruning parameter (>1.0); higher keeps more diverse neighbors
+   * @param alpha   pruning parameter (&gt;1.0); higher keeps more diverse neighbors. Note that
+   *                because distances are squared, the effective Euclidean pruning threshold is
+   *                {@code sqrt(alpha)}.
    * @return neighbors[n][] where each entry contains up to {@code degree} neighbor indices
    */
   public static int[][] buildVamanaGraph(float[][] vectors, int degree, int lBuild, double alpha) {
@@ -211,8 +227,10 @@ public final class GraphBuilder {
 
   /**
    * Greedy search on the partial graph to find the L nearest neighbors of the query.
+   * Uses squared L2 distance for all comparisons.
    *
-   * @return list of [nodeId] pairs sorted by distance to query (closest first), up to lBuild entries
+   * @return list of [nodeId] pairs sorted by squared L2 distance to query (closest first), up to
+   *     lBuild entries
    */
   private static List<int[]> greedySearch(
       float[][] vectors, List<Integer>[] adj, boolean[] inserted, int startNode, float[] query, int lBuild) {
@@ -269,17 +287,20 @@ public final class GraphBuilder {
   }
 
   /**
-   * Robust pruning (RobustPrune from DiskANN paper).
+   * Robust pruning (RobustPrune from DiskANN paper) using squared L2 distance.
    *
-   * <p>From candidates sorted by distance to node, greedily select neighbors:
+   * <p>From candidates sorted by squared L2 distance to node, greedily select neighbors:
    * keep candidate p if no already-selected neighbor n satisfies
-   * {@code dist(p, n) * alpha < dist(p, node)}.
+   * {@code dist²(p, n) <= alpha * dist²(p, node)}.
+   *
+   * <p>Because all distances are squared, the {@code alpha} parameter operates on squared values.
+   * The pruning semantics are preserved since the ratio relationship is maintained.
    *
    * @param vectors  all vectors
    * @param node     the node being pruned
-   * @param candidates list of [candidateId] sorted by distance to node (closest first)
+   * @param candidates list of [candidateId] sorted by squared L2 distance to node (closest first)
    * @param degree   max neighbors to keep
-   * @param alpha    pruning threshold (>1.0)
+   * @param alpha    pruning threshold (&gt;1.0); operates on squared distances
    * @return selected neighbor indices
    */
   private static List<Integer> robustPrune(
