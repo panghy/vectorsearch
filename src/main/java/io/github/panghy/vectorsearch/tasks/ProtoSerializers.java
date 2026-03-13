@@ -3,10 +3,15 @@ package io.github.panghy.vectorsearch.tasks;
 import com.google.protobuf.ByteString;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.vectorsearch.proto.BuildTask;
+import io.github.panghy.vectorsearch.proto.GlobalBuildTask;
+import io.github.panghy.vectorsearch.proto.GlobalMaintenanceTask;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import java.nio.charset.StandardCharsets;
 
-/** Utility TaskQueue serializers for {@link BuildTask} and String keys. */
+/**
+ * Utility TaskQueue serializers for {@link BuildTask}, {@link MaintenanceTask},
+ * {@link GlobalBuildTask}, {@link GlobalMaintenanceTask}, and String keys.
+ */
 public final class ProtoSerializers {
   private ProtoSerializers() {}
 
@@ -65,6 +70,49 @@ public final class ProtoSerializers {
         return bytes == null ? MaintenanceTask.getDefaultInstance() : MaintenanceTask.parseFrom(bytes);
       } catch (com.google.protobuf.InvalidProtocolBufferException e) {
         throw new IllegalArgumentException("Failed to parse MaintenanceTask", e);
+      }
+    }
+  }
+
+  /** Protobuf serializer for {@link GlobalBuildTask} payloads. */
+  public static final class GlobalBuildTaskSerializer implements TaskQueueConfig.TaskSerializer<GlobalBuildTask> {
+    /** Serializes a {@link GlobalBuildTask} into a {@link ByteString}. */
+    @Override
+    public ByteString serialize(GlobalBuildTask value) {
+      if (value == null) return ByteString.EMPTY;
+      return value.toByteString();
+    }
+
+    /** Deserializes a {@link GlobalBuildTask} from binary form. */
+    @Override
+    public GlobalBuildTask deserialize(ByteString bytes) {
+      try {
+        return bytes == null ? GlobalBuildTask.getDefaultInstance() : GlobalBuildTask.parseFrom(bytes);
+      } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+        throw new IllegalArgumentException("Failed to parse GlobalBuildTask", e);
+      }
+    }
+  }
+
+  /** Protobuf serializer for {@link GlobalMaintenanceTask} payloads. */
+  public static final class GlobalMaintenanceTaskSerializer
+      implements TaskQueueConfig.TaskSerializer<GlobalMaintenanceTask> {
+    /** Serializes a {@link GlobalMaintenanceTask} into a {@link ByteString}. */
+    @Override
+    public ByteString serialize(GlobalMaintenanceTask value) {
+      if (value == null) return ByteString.EMPTY;
+      return value.toByteString();
+    }
+
+    /** Deserializes a {@link GlobalMaintenanceTask} from binary form. */
+    @Override
+    public GlobalMaintenanceTask deserialize(ByteString bytes) {
+      try {
+        return bytes == null
+            ? GlobalMaintenanceTask.getDefaultInstance()
+            : GlobalMaintenanceTask.parseFrom(bytes);
+      } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+        throw new IllegalArgumentException("Failed to parse GlobalMaintenanceTask", e);
       }
     }
   }

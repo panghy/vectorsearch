@@ -193,3 +193,26 @@ message MaintenanceTask {
     int32 anchor_seg_id = 1;
   }
 }
+
+
+// -----------------------------------------------------------------------------
+// Global task wrappers
+// -----------------------------------------------------------------------------
+// These messages wrap per-index tasks with the index directory path so that
+// global (cross-index) workers can route tasks to the correct index.
+
+// Wraps a BuildTask with the index directory path for global task queues.
+message GlobalBuildTask {
+  // Path components of the index directory (e.g. ["vectorsearch", "my-index"]).
+  repeated string index_path = 1;
+  // The original per-index build task payload.
+  BuildTask task = 2;
+}
+
+// Wraps a MaintenanceTask with the index directory path for global task queues.
+message GlobalMaintenanceTask {
+  // Path components of the index directory (e.g. ["vectorsearch", "my-index"]).
+  repeated string index_path = 1;
+  // The original per-index maintenance task payload.
+  MaintenanceTask task = 2;
+}
