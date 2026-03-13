@@ -65,6 +65,15 @@ public final class GlobalBuildQueueAdapter implements TaskQueue<String, BuildTas
   }
 
   @Override
+  public CompletableFuture<TaskKeyMetadata> enqueueIfNotExists(Transaction tx, String key, BuildTask task) {
+    GlobalBuildTask wrapped = GlobalBuildTask.newBuilder()
+        .addAllIndexPath(indexPath)
+        .setTask(task)
+        .build();
+    return globalQueue.enqueueIfNotExists(tx, key, wrapped);
+  }
+
+  @Override
   public CompletableFuture<TaskKeyMetadata> enqueueIfNotExists(
       Transaction tx, String key, BuildTask task, Duration ttl, Duration throttle, boolean updatePayload) {
     GlobalBuildTask wrapped = GlobalBuildTask.newBuilder()
