@@ -67,6 +67,9 @@ public final class VectorIndexConfig {
   private final double buildTxnSoftLimitRatio;
   private final int buildSizeCheckEvery;
 
+  // Optional global task queue config
+  private final GlobalTaskQueueConfig globalTaskQueueConfig;
+
   private VectorIndexConfig(Builder b) {
     this.database = Objects.requireNonNull(b.database, "database must not be null");
     this.indexDir = Objects.requireNonNull(b.indexDir, "indexDir must not be null");
@@ -147,6 +150,8 @@ public final class VectorIndexConfig {
     this.buildTxnLimitBytes = b.buildTxnLimitBytes;
     this.buildTxnSoftLimitRatio = b.buildTxnSoftLimitRatio;
     this.buildSizeCheckEvery = b.buildSizeCheckEvery;
+
+    this.globalTaskQueueConfig = b.globalTaskQueueConfig; // nullable
   }
 
   private static Duration requirePositive(Duration d, String name) {
@@ -384,6 +389,21 @@ public final class VectorIndexConfig {
   }
 
   /**
+   * Returns the optional global task queue configuration, or {@code null} if not set.
+   */
+  public GlobalTaskQueueConfig getGlobalTaskQueueConfig() {
+    return globalTaskQueueConfig;
+  }
+
+  /**
+   * Returns {@code true} if a global task queue configuration has been set,
+   * indicating that local queues/workers should be skipped.
+   */
+  public boolean isGlobalTaskQueueEnabled() {
+    return globalTaskQueueConfig != null;
+  }
+
+  /**
    * Creates a new builder for {@link VectorIndexConfig}.
    */
   public static Builder builder(Database database, DirectorySubspace indexDir) {
@@ -430,6 +450,7 @@ public final class VectorIndexConfig {
     private long buildTxnLimitBytes = 10L * 1024 * 1024; // 10 MB
     private double buildTxnSoftLimitRatio = 0.9; // leave 10% headroom
     private int buildSizeCheckEvery = 32;
+    private GlobalTaskQueueConfig globalTaskQueueConfig;
 
     private Builder(Database database, DirectorySubspace indexDir) {
       this.database = database;
@@ -685,6 +706,18 @@ public final class VectorIndexConfig {
      */
     public Builder buildSizeCheckEvery(int n) {
       this.buildSizeCheckEvery = n;
+      return this;
+    }
+
+    /**
+     * Sets the optional global task queue configuration. When set, the index will enqueue
+     * tasks into the shared global queues and skip creating local queues/workers.
+     *
+     * @param config the global task queue config (may be {@code null} to disable)
+     * @return this builder
+     */
+    public Builder globalTaskQueueConfig(GlobalTaskQueueConfig config) {
+      this.globalTaskQueueConfig = config;
       return this;
     }
 
