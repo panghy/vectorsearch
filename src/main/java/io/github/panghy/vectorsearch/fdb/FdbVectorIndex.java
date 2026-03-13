@@ -19,11 +19,14 @@ import io.github.panghy.vectorsearch.api.SearchParams;
 import io.github.panghy.vectorsearch.api.SearchResult;
 import io.github.panghy.vectorsearch.api.VectorIndex;
 import io.github.panghy.vectorsearch.cache.SegmentCaches;
+import io.github.panghy.vectorsearch.config.GlobalTaskQueueConfig;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
 import io.github.panghy.vectorsearch.proto.BuildTask;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
 import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import io.github.panghy.vectorsearch.proto.VectorRecord;
+import io.github.panghy.vectorsearch.tasks.GlobalBuildQueueAdapter;
+import io.github.panghy.vectorsearch.tasks.GlobalMaintenanceQueueAdapter;
 import io.github.panghy.vectorsearch.tasks.MaintenanceWorkerPool;
 import io.github.panghy.vectorsearch.tasks.ProtoSerializers;
 import io.github.panghy.vectorsearch.tasks.ProtoSerializers.BuildTaskSerializer;
@@ -116,6 +119,9 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
   // Creates or opens the index asynchronously and returns a ready VectorIndex.
   public static CompletableFuture<FdbVectorIndex> createOrOpen(VectorIndexConfig config) {
     Database db = config.getDatabase();
+    if (config.isGlobalTaskQueueEnabled()) {
+      return createOrOpenWithGlobalQueues(config, db);
+    }
     return FdbDirectories.openIndex(config.getIndexDir(), db)
         .thenCompose(dirs -> createBuildQueue(config, dirs).thenCompose(buildQ -> {
           FdbVectorStore store = new FdbVectorStore(config, dirs, buildQ);
@@ -141,6 +147,32 @@ public class FdbVectorIndex implements VectorIndex, AutoCloseable {
                 return ix;
               });
         }));
+  }
+
+  /**
+   * Creates or opens the index using global (cross-index) task queues. No local queues or
+   * workers are created; enqueue calls are routed through adapter queues that prepend the
+   * index directory path and delegate to the shared global queues.
+   */
+  private static CompletableFuture<FdbVectorIndex> createOrOpenWithGlobalQueues(
+      VectorIndexConfig config, Database db) {
+    GlobalTaskQueueConfig globalCfg = config.getGlobalTaskQueueConfig();
+    List<String> indexPath = config.getIndexDir().getPath();
+    TaskQueue<String, BuildTask> buildAdapter = new GlobalBuildQueueAdapter(globalCfg.getBuildQueue(), indexPath);
+    TaskQueue<String, MaintenanceTask> maintAdapter =
+        new GlobalMaintenanceQueueAdapter(globalCfg.getMaintenanceQueue(), indexPath);
+    return FdbDirectories.openIndex(config.getIndexDir(), db).thenCompose(dirs -> {
+      FdbVectorStore store = new FdbVectorStore(config, dirs, buildAdapter);
+      CompletableFuture<Void> init =
+          store.createOrOpenIndex().thenCompose(v -> ensureCurrentSubspaces(config, dirs));
+      return init.thenApply(v -> {
+        FdbVectorIndex ix = new FdbVectorIndex(config, store, dirs);
+        ix.buildQueue = buildAdapter;
+        ix.maintenanceQueue = maintAdapter;
+        LOG.info("Opened index with global task queues (indexPath={}).", indexPath);
+        return ix;
+      });
+    });
   }
 
   private static CompletableFuture<Void> ensureCurrentSubspaces(
