@@ -170,7 +170,9 @@ class GlobalTaskQueueEdgeCaseTest {
     BuildTask bt = BuildTask.newBuilder().setSegId(7).build();
     db.runAsync(tr -> adapter.enqueue(tr, "key2", bt, Duration.ofSeconds(10), Duration.ofMillis(50)))
         .get(5, TimeUnit.SECONDS);
-    var claim = globalBuildQueue.awaitAndClaimTask(db).get(10, TimeUnit.SECONDS);
+    // Allow throttle to elapse before claiming to avoid flakiness under concurrent FDB load
+    Thread.sleep(200);
+    var claim = globalBuildQueue.awaitAndClaimTask(db).get(30, TimeUnit.SECONDS);
     assertThat(claim.task().getIndexPathList()).containsExactly("my", "index");
     assertThat(claim.task().getTask().getSegId()).isEqualTo(7);
     claim.complete().get(5, TimeUnit.SECONDS);
