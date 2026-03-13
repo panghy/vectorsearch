@@ -61,6 +61,15 @@ public final class GlobalMaintenanceQueueAdapter implements TaskQueue<String, Ma
   }
 
   @Override
+  public CompletableFuture<TaskKeyMetadata> enqueueIfNotExists(Transaction tx, String key, MaintenanceTask task) {
+    GlobalMaintenanceTask wrapped = GlobalMaintenanceTask.newBuilder()
+        .addAllIndexPath(indexPath)
+        .setTask(task)
+        .build();
+    return globalQueue.enqueueIfNotExists(tx, key, wrapped);
+  }
+
+  @Override
   public CompletableFuture<TaskKeyMetadata> enqueueIfNotExists(
       Transaction tx, String key, MaintenanceTask task, Duration ttl, Duration throttle, boolean updatePayload) {
     GlobalMaintenanceTask wrapped = GlobalMaintenanceTask.newBuilder()
