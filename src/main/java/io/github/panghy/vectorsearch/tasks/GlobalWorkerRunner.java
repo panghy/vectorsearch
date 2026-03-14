@@ -306,7 +306,7 @@ public final class GlobalWorkerRunner implements AutoCloseable {
   private CompletableFuture<Void> enqueueCompactOnGlobalQueue(List<Integer> segIds, List<String> indexPath) {
     List<Integer> sorted = new ArrayList<>(segIds);
     sorted.sort(Integer::compareTo);
-    String key = "compact:" + sorted;
+    String key = String.join("/", indexPath) + ":compact:" + sorted;
     MaintenanceTask.Compact c =
         MaintenanceTask.Compact.newBuilder().addAllSegIds(sorted).build();
     MaintenanceTask mt = MaintenanceTask.newBuilder().setCompact(c).build();

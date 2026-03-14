@@ -161,6 +161,7 @@ class GlobalTaskQueueEdgeCaseTest {
     // Claim from global queue and verify wrapping
     var claim = globalBuildQueue.awaitAndClaimTask(db).get(10, TimeUnit.SECONDS);
     GlobalBuildTask gbt = claim.task();
+    assertThat(claim.taskKey()).isEqualTo("idx/path:key1");
     assertThat(gbt.getIndexPathList()).containsExactly("idx", "path");
     assertThat(gbt.getTask().getSegId()).isEqualTo(42);
     claim.complete().get(5, TimeUnit.SECONDS);
@@ -173,9 +174,8 @@ class GlobalTaskQueueEdgeCaseTest {
     BuildTask bt = BuildTask.newBuilder().setSegId(7).build();
     db.runAsync(tr -> adapter.enqueue(tr, "key2", bt, Duration.ofSeconds(10), Duration.ofMillis(50)))
         .get(5, TimeUnit.SECONDS);
-    // Allow throttle to elapse before claiming to avoid flakiness under concurrent FDB load
-    Thread.sleep(200);
     var claim = globalBuildQueue.awaitAndClaimTask(db).get(30, TimeUnit.SECONDS);
+    assertThat(claim.taskKey()).isEqualTo("my/index:key2");
     assertThat(claim.task().getIndexPathList()).containsExactly("my", "index");
     assertThat(claim.task().getTask().getSegId()).isEqualTo(7);
     claim.complete().get(5, TimeUnit.SECONDS);
@@ -191,6 +191,7 @@ class GlobalTaskQueueEdgeCaseTest {
         .build();
     db.runAsync(tr -> adapter.enqueueIfNotExists(tr, "mkey", mt)).get(5, TimeUnit.SECONDS);
     var claim = globalMaintQueue.awaitAndClaimTask(db).get(10, TimeUnit.SECONDS);
+    assertThat(claim.taskKey()).isEqualTo("m/idx:mkey");
     assertThat(claim.task().getIndexPathList()).containsExactly("m", "idx");
     assertThat(claim.task().getTask().getVacuum().getSegId()).isEqualTo(3);
     claim.complete().get(5, TimeUnit.SECONDS);

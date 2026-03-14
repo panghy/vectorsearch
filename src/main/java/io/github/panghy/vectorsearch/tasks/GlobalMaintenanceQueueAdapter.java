@@ -28,6 +28,7 @@ public final class GlobalMaintenanceQueueAdapter implements TaskQueue<String, Ma
 
   private final TaskQueue<String, GlobalMaintenanceTask> globalQueue;
   private final List<String> indexPath;
+  private final String keyPrefix;
 
   /**
    * Creates a new adapter.
@@ -38,6 +39,7 @@ public final class GlobalMaintenanceQueueAdapter implements TaskQueue<String, Ma
   public GlobalMaintenanceQueueAdapter(TaskQueue<String, GlobalMaintenanceTask> globalQueue, List<String> indexPath) {
     this.globalQueue = requireNonNull(globalQueue, "globalQueue");
     this.indexPath = List.copyOf(requireNonNull(indexPath, "indexPath"));
+    this.keyPrefix = String.join("/", this.indexPath) + ":";
   }
 
   @Override
@@ -57,7 +59,7 @@ public final class GlobalMaintenanceQueueAdapter implements TaskQueue<String, Ma
         .addAllIndexPath(indexPath)
         .setTask(task)
         .build();
-    return globalQueue.enqueue(tx, key, wrapped, ttl, throttle);
+    return globalQueue.enqueue(tx, keyPrefix + key, wrapped, ttl, throttle);
   }
 
   @Override
@@ -66,7 +68,7 @@ public final class GlobalMaintenanceQueueAdapter implements TaskQueue<String, Ma
         .addAllIndexPath(indexPath)
         .setTask(task)
         .build();
-    return globalQueue.enqueueIfNotExists(tx, key, wrapped);
+    return globalQueue.enqueueIfNotExists(tx, keyPrefix + key, wrapped);
   }
 
   @Override
@@ -76,7 +78,7 @@ public final class GlobalMaintenanceQueueAdapter implements TaskQueue<String, Ma
         .addAllIndexPath(indexPath)
         .setTask(task)
         .build();
-    return globalQueue.enqueueIfNotExists(tx, key, wrapped, ttl, throttle, updatePayload);
+    return globalQueue.enqueueIfNotExists(tx, keyPrefix + key, wrapped, ttl, throttle, updatePayload);
   }
 
   @Override
