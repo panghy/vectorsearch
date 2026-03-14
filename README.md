@@ -162,9 +162,7 @@ Background compactions are planned from small SEALED segments and throttled by `
 - Programmatic vacuum:
   - Use `MaintenanceService.vacuumSegment(segId, minDeletedRatio)` to run a targeted vacuum now.
   - Or enqueue and process via the maintenance queue using `MaintenanceWorker`.
-  - Example:`var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
-var svc = new MaintenanceService(cfg, dirs);
-svc.vacuumSegment(0 /* segId */, 0.0 /* minDeletedRatio */).get(10, TimeUnit.SECONDS);`
+  - Example:`var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS); var svc = new MaintenanceService(cfg, dirs); svc.vacuumSegment(0 /* segId */, 0.0 /* minDeletedRatio */).get(10, TimeUnit.SECONDS);`
 - Background processing:
   - Set `localMaintenanceWorkerThreads > 0` to auto‑start a maintenance worker pool, or use `new MaintenanceWorker(cfg, dirs, queue).runOnce()` against the `tasks/maint` queue.
 
