@@ -286,6 +286,83 @@ class GlobalTaskQueueEdgeCaseTest {
     assertThat(result).isTrue();
   }
 
+  // ---- Test 11b: Build task with empty index_path fails claim ----
+  @Test
+  void workerRunner_buildTask_emptyIndexPath_failsClaim() throws Exception {
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+    // Enqueue a build task with no index_path
+    GlobalBuildTask task = GlobalBuildTask.newBuilder()
+        .setTask(BuildTask.newBuilder().setSegId(0).build())
+        .build();
+    globalBuildQueue.enqueueIfNotExists("empty-path-build", task).get(5, TimeUnit.SECONDS);
+    // runOnceBuild should claim and fail it (not crash)
+    Boolean result = runner.runOnceBuild().get(5, TimeUnit.SECONDS);
+    assertThat(result).isTrue();
+  }
+
+  // ---- Test 11c: Build task with missing inner task payload fails claim ----
+  @Test
+  void workerRunner_buildTask_missingPayload_failsClaim() throws Exception {
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+    // Enqueue a GlobalBuildTask with no inner BuildTask set
+    GlobalBuildTask task = GlobalBuildTask.newBuilder()
+        .addIndexPath("some")
+        .addIndexPath("path")
+        .build();
+    globalBuildQueue.enqueueIfNotExists("no-payload-build", task).get(5, TimeUnit.SECONDS);
+    Boolean result = runner.runOnceBuild().get(5, TimeUnit.SECONDS);
+    assertThat(result).isTrue();
+  }
+
+  // ---- Test 11d: Maintenance task with empty index_path fails claim ----
+  @Test
+  void workerRunner_maintTask_emptyIndexPath_failsClaim() throws Exception {
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+    // Enqueue a maintenance task with no index_path
+    GlobalMaintenanceTask task = GlobalMaintenanceTask.newBuilder()
+        .setTask(MaintenanceTask.newBuilder()
+            .setVacuum(
+                MaintenanceTask.Vacuum.newBuilder().setSegId(0).build())
+            .build())
+        .build();
+    globalMaintQueue.enqueueIfNotExists("empty-path-maint", task).get(5, TimeUnit.SECONDS);
+    Boolean result = runner.runOnceMaint().get(5, TimeUnit.SECONDS);
+    assertThat(result).isTrue();
+  }
+
+  // ---- Test 11e: Maintenance task with missing inner task payload fails claim ----
+  @Test
+  void workerRunner_maintTask_missingPayload_failsClaim() throws Exception {
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+    // Enqueue a GlobalMaintenanceTask with no inner MaintenanceTask set
+    GlobalMaintenanceTask task = GlobalMaintenanceTask.newBuilder()
+        .addIndexPath("some")
+        .addIndexPath("path")
+        .build();
+    globalMaintQueue.enqueueIfNotExists("no-payload-maint", task).get(5, TimeUnit.SECONDS);
+    Boolean result = runner.runOnceMaint().get(5, TimeUnit.SECONDS);
+    assertThat(result).isTrue();
+  }
+
+  // ---- Test 11f: Build task with blank index_path element fails claim ----
+  @Test
+  void workerRunner_buildTask_blankIndexPathElement_failsClaim() throws Exception {
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+    GlobalBuildTask task = GlobalBuildTask.newBuilder()
+        .addIndexPath("valid")
+        .addIndexPath("")
+        .setTask(BuildTask.newBuilder().setSegId(0).build())
+        .build();
+    globalBuildQueue.enqueueIfNotExists("blank-element-build", task).get(5, TimeUnit.SECONDS);
+    Boolean result = runner.runOnceBuild().get(5, TimeUnit.SECONDS);
+    assertThat(result).isTrue();
+  }
+
   // ---- Test 12: GlobalTaskQueueConfig rejects null buildQueue ----
   @Test
   void globalTaskQueueConfig_nullBuildQueue_throwsNullPointerException() {

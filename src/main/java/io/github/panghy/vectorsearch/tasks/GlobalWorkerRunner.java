@@ -161,12 +161,22 @@ public final class GlobalWorkerRunner implements AutoCloseable {
   CompletableFuture<Boolean> runOnceBuild() {
     return buildQueue.awaitAndClaimTask().thenCompose(claim -> {
       GlobalBuildTask gbt = claim.task();
+      // Validate wrapper: must have a task payload
+      if (!gbt.hasTask()) {
+        LOG.debug("Build task missing inner BuildTask payload; failing claim");
+        return claim.fail().thenApply(v -> true);
+      }
       BuildTask bt = gbt.getTask();
       // Sentinel: seg_id < 0 means shutdown signal
       if (bt.getSegId() < 0) {
         return claim.complete().thenApply(v -> true);
       }
+      // Validate index_path: must be non-empty with no blank elements
       List<String> indexPath = gbt.getIndexPathList();
+      if (!isValidIndexPath(indexPath)) {
+        LOG.debug("Build task has invalid index_path={}; failing claim", indexPath);
+        return claim.fail().thenApply(v -> true);
+      }
       return resolveIndexDirs(indexPath)
           .thenCompose(dirs -> buildConfigForIndex(dirs, indexPath).thenCompose(cfg -> {
             SegmentBuildService svc = new SegmentBuildService(cfg, dirs);
@@ -186,12 +196,22 @@ public final class GlobalWorkerRunner implements AutoCloseable {
   CompletableFuture<Boolean> runOnceMaint() {
     return maintenanceQueue.awaitAndClaimTask().thenCompose(claim -> {
       GlobalMaintenanceTask gmt = claim.task();
+      // Validate wrapper: must have a task payload
+      if (!gmt.hasTask()) {
+        LOG.debug("Maintenance task missing inner MaintenanceTask payload; failing claim");
+        return claim.fail().thenApply(v -> true);
+      }
       MaintenanceTask mt = gmt.getTask();
       // Sentinel: vacuum with seg_id < 0 means shutdown signal
       if (mt.hasVacuum() && mt.getVacuum().getSegId() < 0) {
         return claim.complete().thenApply(v -> true);
       }
+      // Validate index_path: must be non-empty with no blank elements
       List<String> indexPath = gmt.getIndexPathList();
+      if (!isValidIndexPath(indexPath)) {
+        LOG.debug("Maintenance task has invalid index_path={}; failing claim", indexPath);
+        return claim.fail().thenApply(v -> true);
+      }
       return resolveIndexDirs(indexPath)
           .thenCompose(dirs -> buildConfigForIndex(dirs, indexPath)
               .thenCompose(cfg -> processMaintenanceTask(mt, cfg, dirs, indexPath)))
@@ -296,6 +316,17 @@ public final class GlobalWorkerRunner implements AutoCloseable {
         .build();
     return db.runAsync(tr -> maintenanceQueue.enqueueIfNotExists(tr, key, gmt))
         .thenApply(x -> null);
+  }
+
+  /**
+   * Returns {@code true} if the index path is non-empty and contains no blank elements.
+   */
+  private static boolean isValidIndexPath(List<String> indexPath) {
+    if (indexPath == null || indexPath.isEmpty()) return false;
+    for (String element : indexPath) {
+      if (element == null || element.isBlank()) return false;
+    }
+    return true;
   }
 
   /**
