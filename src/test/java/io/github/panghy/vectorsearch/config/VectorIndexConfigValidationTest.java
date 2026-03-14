@@ -246,6 +246,88 @@ class VectorIndexConfigValidationTest {
     org.assertj.core.api.Assertions.assertThat(cfg.getDefaultTtl()).isEqualTo(Duration.ofMinutes(5));
   }
 
+  // ---- VectorIndexConfig null Duration checks ----
+
+  @Test
+  void vectorIndexConfig_rejectsNullVacuumCooldown() {
+    assertThatThrownBy(() -> VectorIndexConfig.builder(db, root)
+            .dimension(4)
+            .vacuumCooldown(null)
+            .build())
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("vacuumCooldown");
+  }
+
+  @Test
+  void vectorIndexConfig_rejectsNullDefaultThrottle() {
+    assertThatThrownBy(() -> VectorIndexConfig.builder(db, root)
+            .dimension(4)
+            .defaultThrottle(null)
+            .build())
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("defaultThrottle");
+  }
+
+  // ---- WorkerConfig data-format fallback default validation tests ----
+
+  @Test
+  void workerConfig_rejectsInvalidDefaultMaxSegmentSize() {
+    assertThatThrownBy(() -> WorkerConfig.builder().defaultMaxSegmentSize(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultMaxSegmentSize");
+    assertThatThrownBy(
+            () -> WorkerConfig.builder().defaultMaxSegmentSize(-1).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidDefaultPqM() {
+    assertThatThrownBy(() -> WorkerConfig.builder().defaultPqM(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultPqM");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidDefaultPqK() {
+    assertThatThrownBy(() -> WorkerConfig.builder().defaultPqK(1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultPqK");
+    assertThatThrownBy(() -> WorkerConfig.builder().defaultPqK(0).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidDefaultGraphDegree() {
+    assertThatThrownBy(() -> WorkerConfig.builder().defaultGraphDegree(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultGraphDegree");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidDefaultOversample() {
+    assertThatThrownBy(() -> WorkerConfig.builder().defaultOversample(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultOversample");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidDefaultGraphBuildBreadth() {
+    // defaultGraphBuildBreadth must be >= defaultGraphDegree
+    assertThatThrownBy(() -> WorkerConfig.builder()
+            .defaultGraphDegree(64)
+            .defaultGraphBuildBreadth(32)
+            .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultGraphBuildBreadth");
+  }
+
+  @Test
+  void workerConfig_rejectsNegativeDefaultGraphAlpha() {
+    assertThatThrownBy(() -> WorkerConfig.builder().defaultGraphAlpha(-0.1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultGraphAlpha");
+  }
+
   @Test
   void vectorIndexConfig_rejectsInvalidPrebuiltWorkerConfig() {
     // When a pre-built WorkerConfig with invalid values is supplied to VectorIndexConfig,

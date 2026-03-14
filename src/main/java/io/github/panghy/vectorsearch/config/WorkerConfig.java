@@ -109,6 +109,16 @@ public final class WorkerConfig {
     this.instantSource = b.instantSource;
     this.metricAttributes = Map.copyOf(b.metricAttributes);
 
+    // Validate data-format fallback defaults (same constraints as VectorIndexConfig data params)
+    if (b.defaultMaxSegmentSize <= 0) throw new IllegalArgumentException("defaultMaxSegmentSize must be positive");
+    if (b.defaultPqM <= 0) throw new IllegalArgumentException("defaultPqM must be positive");
+    if (b.defaultPqK <= 1) throw new IllegalArgumentException("defaultPqK must be > 1");
+    if (b.defaultGraphDegree <= 0) throw new IllegalArgumentException("defaultGraphDegree must be positive");
+    if (b.defaultOversample <= 0) throw new IllegalArgumentException("defaultOversample must be positive");
+    if (b.defaultGraphBuildBreadth < b.defaultGraphDegree)
+      throw new IllegalArgumentException("defaultGraphBuildBreadth must be >= defaultGraphDegree");
+    if (b.defaultGraphAlpha < 0.0) throw new IllegalArgumentException("defaultGraphAlpha must be >= 0");
+
     this.defaultMaxSegmentSize = b.defaultMaxSegmentSize;
     this.defaultPqM = b.defaultPqM;
     this.defaultPqK = b.defaultPqK;
