@@ -14,7 +14,9 @@ import io.github.panghy.taskqueue.TaskQueues;
 import io.github.panghy.vectorsearch.api.VectorIndex;
 import io.github.panghy.vectorsearch.config.GlobalTaskQueueConfig;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
+import io.github.panghy.vectorsearch.config.WorkerConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories;
+import io.github.panghy.vectorsearch.fdb.FdbDirectories.IndexDirectories;
 import io.github.panghy.vectorsearch.proto.BuildTask;
 import io.github.panghy.vectorsearch.proto.GlobalBuildTask;
 import io.github.panghy.vectorsearch.proto.GlobalMaintenanceTask;
@@ -221,13 +223,8 @@ class GlobalTaskQueueEdgeCaseTest {
   // ---- Test 7: start(0,0) is no-op ----
   @Test
   void workerRunner_startZeroZero_isNoOp() {
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .build();
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
     runner.start(0, 0);
     assertThat(runner.isRunning()).isFalse();
   }
@@ -235,13 +232,8 @@ class GlobalTaskQueueEdgeCaseTest {
   // ---- Test 8: double start is idempotent ----
   @Test
   void workerRunner_doubleStart_isIdempotent() {
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .build();
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
     runner.start(1, 0);
     assertThat(runner.isRunning()).isTrue();
     // Second start should be no-op
@@ -252,13 +244,8 @@ class GlobalTaskQueueEdgeCaseTest {
   // ---- Test 9: close sets isRunning to false ----
   @Test
   void workerRunner_close_setsIsRunningFalse() {
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .build();
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
     runner.start(1, 1);
     assertThat(runner.isRunning()).isTrue();
     runner.close();
@@ -269,13 +256,8 @@ class GlobalTaskQueueEdgeCaseTest {
   // ---- Test 10: Build sentinel is claimed and completed ----
   @Test
   void workerRunner_buildSentinel_claimedAndCompleted() throws Exception {
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .build();
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
     // Enqueue a build sentinel
     GlobalBuildTask sentinel = GlobalBuildTask.newBuilder()
         .setTask(BuildTask.newBuilder().setSegId(-1).build())
@@ -289,13 +271,8 @@ class GlobalTaskQueueEdgeCaseTest {
   // ---- Test 11: Maintenance sentinel is claimed and completed ----
   @Test
   void workerRunner_maintSentinel_claimedAndCompleted() throws Exception {
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .build();
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
     // Enqueue a maintenance sentinel
     GlobalMaintenanceTask sentinel = GlobalMaintenanceTask.newBuilder()
         .setTask(MaintenanceTask.newBuilder()
@@ -443,16 +420,11 @@ class GlobalTaskQueueEdgeCaseTest {
     assertThat(meta.getGraphDegree()).isEqualTo(64);
 
     // Create a template with different data params — worker should use IndexMeta's params
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .maxSegmentSize(2)
+    WorkerConfig workerCfg = WorkerConfig.builder()
         .estimatedWorkerCount(1)
         .defaultTtl(Duration.ofSeconds(30))
         .build();
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
     // Process the build task — should succeed using IndexMeta's dimension=16
     runner.runOnceBuild().get(30, TimeUnit.SECONDS);
   }
@@ -478,13 +450,8 @@ class GlobalTaskQueueEdgeCaseTest {
           .build();
       globalBuildQueue.enqueueIfNotExists("missing-meta-task", task).get(5, TimeUnit.SECONDS);
 
-      VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-          .dimension(4)
-          .pqM(2)
-          .pqK(8)
-          .graphDegree(4)
-          .build();
-      runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+      WorkerConfig workerCfg = WorkerConfig.builder().build();
+      runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
 
       // runOnceBuild should fail the task (not crash the runner)
       // The task will be claimed, fail due to missing IndexMeta, and be marked failed
@@ -496,5 +463,91 @@ class GlobalTaskQueueEdgeCaseTest {
         return null;
       });
     }
+  }
+
+  // ---- Test: buildConfigForIndex applies ALL operational fields from WorkerConfig ----
+  @Test
+  void buildConfigForIndex_appliesAllOperationalFieldsFromWorkerConfig() throws Exception {
+    // Create an index with specific data-format params
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
+        .dimension(4)
+        .pqM(2)
+        .pqK(8)
+        .graphDegree(4)
+        .maxSegmentSize(2)
+        .globalTaskQueueConfig(globalConfig)
+        .build();
+    index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
+
+    // Insert vectors to trigger rotation and create a build task
+    index.add(new float[] {1, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    index.add(new float[] {0, 1, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    index.add(new float[] {0, 0, 1, 0}, null).get(5, TimeUnit.SECONDS);
+
+    // Create a WorkerConfig with non-default operational settings
+    WorkerConfig workerCfg = WorkerConfig.builder()
+        .estimatedWorkerCount(3)
+        .defaultTtl(Duration.ofMinutes(10))
+        .defaultThrottle(Duration.ofSeconds(5))
+        .maxConcurrentCompactions(4)
+        .buildTxnLimitBytes(5_000_000L)
+        .buildTxnSoftLimitRatio(0.8)
+        .buildSizeCheckEvery(16)
+        .vacuumCooldown(Duration.ofSeconds(30))
+        .vacuumMinDeletedRatio(0.5)
+        .autoFindCompactionCandidates(false)
+        .compactionMinSegments(3)
+        .compactionMaxSegments(6)
+        .compactionMinFragmentation(0.2)
+        .compactionAgeBiasWeight(0.4)
+        .compactionSizeBiasWeight(0.4)
+        .compactionFragBiasWeight(0.2)
+        .codebookBatchLoadSize(5_000)
+        .adjacencyBatchLoadSize(3_000)
+        .prefetchCodebooksEnabled(false)
+        .prefetchCodebooksSync(true)
+        .metricAttribute("env", "test")
+        .build();
+
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+
+    // Resolve index dirs and call buildConfigForIndex directly
+    IndexDirectories dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+    VectorIndexConfig reconstructed =
+        runner.buildConfigForIndex(dirs, root.getPath()).get(5, TimeUnit.SECONDS);
+
+    // Assert ALL operational fields match the WorkerConfig
+    assertThat(reconstructed.getEstimatedWorkerCount()).isEqualTo(3);
+    assertThat(reconstructed.getDefaultTtl()).isEqualTo(Duration.ofMinutes(10));
+    assertThat(reconstructed.getDefaultThrottle()).isEqualTo(Duration.ofSeconds(5));
+    assertThat(reconstructed.getMaxConcurrentCompactions()).isEqualTo(4);
+    assertThat(reconstructed.getBuildTxnLimitBytes()).isEqualTo(5_000_000L);
+    assertThat(reconstructed.getBuildTxnSoftLimitRatio()).isEqualTo(0.8);
+    assertThat(reconstructed.getBuildSizeCheckEvery()).isEqualTo(16);
+    assertThat(reconstructed.getVacuumCooldown()).isEqualTo(Duration.ofSeconds(30));
+    assertThat(reconstructed.getVacuumMinDeletedRatio()).isEqualTo(0.5);
+    assertThat(reconstructed.isAutoFindCompactionCandidates()).isFalse();
+    assertThat(reconstructed.getCompactionMinSegments()).isEqualTo(3);
+    assertThat(reconstructed.getCompactionMaxSegments()).isEqualTo(6);
+    assertThat(reconstructed.getCompactionMinFragmentation()).isEqualTo(0.2);
+    assertThat(reconstructed.getCompactionAgeBiasWeight()).isEqualTo(0.4);
+    assertThat(reconstructed.getCompactionSizeBiasWeight()).isEqualTo(0.4);
+    assertThat(reconstructed.getCompactionFragBiasWeight()).isEqualTo(0.2);
+    assertThat(reconstructed.getCodebookBatchLoadSize()).isEqualTo(5_000);
+    assertThat(reconstructed.getAdjacencyBatchLoadSize()).isEqualTo(3_000);
+    assertThat(reconstructed.isPrefetchCodebooksEnabled()).isFalse();
+    assertThat(reconstructed.isPrefetchCodebooksSync()).isTrue();
+    assertThat(reconstructed.getMetricAttributes()).containsEntry("env", "test");
+
+    // Assert local workers are disabled
+    assertThat(reconstructed.getLocalWorkerThreads()).isZero();
+    assertThat(reconstructed.getLocalMaintenanceWorkerThreads()).isZero();
+
+    // Assert data-format fields match the persisted IndexMeta (from the index we created)
+    assertThat(reconstructed.getDimension()).isEqualTo(4);
+    assertThat(reconstructed.getPqM()).isEqualTo(2);
+    assertThat(reconstructed.getPqK()).isEqualTo(8);
+    assertThat(reconstructed.getGraphDegree()).isEqualTo(4);
+    assertThat(reconstructed.getMaxSegmentSize()).isEqualTo(2);
   }
 }

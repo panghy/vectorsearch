@@ -36,36 +36,11 @@ public final class VectorIndexConfig {
   private final int graphBuildBreadth;
   private final double graphAlpha;
 
-  private final int estimatedWorkerCount;
   private final int localWorkerThreads;
   private final int localMaintenanceWorkerThreads;
-  private final int maxConcurrentCompactions;
-  private final Duration vacuumCooldown;
-  private final double vacuumMinDeletedRatio;
-  private final Duration defaultTtl;
-  private final Duration defaultThrottle;
-  private final InstantSource instantSource;
 
-  // Batch sizes for async cache bulk loads
-  private final int codebookBatchLoadSize;
-  private final int adjacencyBatchLoadSize;
-  private final Map<String, String> metricAttributes;
-  private final boolean prefetchCodebooksEnabled;
-  private final boolean prefetchCodebooksSync;
-  private final boolean autoFindCompactionCandidates;
-
-  // Compaction planner knobs
-  private final int compactionMinSegments;
-  private final int compactionMaxSegments;
-  private final double compactionMinFragmentation;
-  private final double compactionAgeBiasWeight;
-  private final double compactionSizeBiasWeight;
-  private final double compactionFragBiasWeight;
-
-  // Build batching/size control
-  private final long buildTxnLimitBytes;
-  private final double buildTxnSoftLimitRatio;
-  private final int buildSizeCheckEvery;
+  // All operational settings are delegated to WorkerConfig
+  private final WorkerConfig workerConfig;
 
   // Optional global task queue config
   private final GlobalTaskQueueConfig globalTaskQueueConfig;
@@ -94,62 +69,80 @@ public final class VectorIndexConfig {
     if (b.oversample <= 0) throw new IllegalArgumentException("oversample must be positive");
     this.oversample = b.oversample;
 
-    if (b.estimatedWorkerCount <= 0) throw new IllegalArgumentException("estimatedWorkerCount must be positive");
-    this.estimatedWorkerCount = b.estimatedWorkerCount;
     if (b.localWorkerThreads < 0) throw new IllegalArgumentException("localWorkerThreads must be >= 0");
     this.localWorkerThreads = b.localWorkerThreads;
     if (b.localMaintenanceWorkerThreads < 0)
       throw new IllegalArgumentException("localMaintenanceWorkerThreads must be >= 0");
     this.localMaintenanceWorkerThreads = b.localMaintenanceWorkerThreads;
-    if (b.maxConcurrentCompactions < 0) throw new IllegalArgumentException("maxConcurrentCompactions must be >= 0");
-    this.maxConcurrentCompactions = b.maxConcurrentCompactions;
-    if (b.vacuumCooldown.isNegative()) throw new IllegalArgumentException("vacuumCooldown must be >= 0");
-    this.vacuumCooldown = b.vacuumCooldown;
-    if (!(b.vacuumMinDeletedRatio >= 0.0 && b.vacuumMinDeletedRatio <= 1.0))
-      throw new IllegalArgumentException("vacuumMinDeletedRatio must be in [0,1]");
-    this.vacuumMinDeletedRatio = b.vacuumMinDeletedRatio;
 
-    this.defaultTtl = requirePositive(b.defaultTtl, "defaultTtl");
-    if (b.defaultThrottle.isNegative()) {
-      throw new IllegalArgumentException("defaultThrottle must not be negative");
+    // Build or use the provided WorkerConfig for all operational settings
+    if (b.workerConfig != null) {
+      this.workerConfig = b.workerConfig;
+    } else {
+      // Validate operational fields before building WorkerConfig
+      if (b.estimatedWorkerCount <= 0)
+        throw new IllegalArgumentException("estimatedWorkerCount must be positive");
+      if (b.maxConcurrentCompactions < 0)
+        throw new IllegalArgumentException("maxConcurrentCompactions must be >= 0");
+      if (b.vacuumCooldown.isNegative()) throw new IllegalArgumentException("vacuumCooldown must be >= 0");
+      if (!(b.vacuumMinDeletedRatio >= 0.0 && b.vacuumMinDeletedRatio <= 1.0))
+        throw new IllegalArgumentException("vacuumMinDeletedRatio must be in [0,1]");
+      requirePositive(b.defaultTtl, "defaultTtl");
+      if (b.defaultThrottle.isNegative())
+        throw new IllegalArgumentException("defaultThrottle must not be negative");
+      Objects.requireNonNull(b.instantSource, "instantSource must not be null");
+      if (b.codebookBatchLoadSize <= 0)
+        throw new IllegalArgumentException("codebookBatchLoadSize must be positive");
+      if (b.adjacencyBatchLoadSize <= 0)
+        throw new IllegalArgumentException("adjacencyBatchLoadSize must be positive");
+      if (b.compactionMinSegments < 2) throw new IllegalArgumentException("compactionMinSegments must be >= 2");
+      if (b.compactionMaxSegments < b.compactionMinSegments)
+        throw new IllegalArgumentException("compactionMaxSegments must be >= compactionMinSegments");
+      if (!(b.compactionMinFragmentation >= 0.0 && b.compactionMinFragmentation <= 1.0))
+        throw new IllegalArgumentException("compactionMinFragmentation must be in [0,1]");
+      if (b.compactionAgeBiasWeight < 0.0)
+        throw new IllegalArgumentException("compactionAgeBiasWeight must be >= 0");
+      if (b.compactionSizeBiasWeight < 0.0)
+        throw new IllegalArgumentException("compactionSizeBiasWeight must be >= 0");
+      if (b.compactionFragBiasWeight < 0.0)
+        throw new IllegalArgumentException("compactionFragBiasWeight must be >= 0");
+      if (b.buildTxnLimitBytes <= 0) throw new IllegalArgumentException("buildTxnLimitBytes must be positive");
+      if (!(b.buildTxnSoftLimitRatio > 0.0 && b.buildTxnSoftLimitRatio < 1.0))
+        throw new IllegalArgumentException("buildTxnSoftLimitRatio must be in (0,1)");
+      if (b.buildSizeCheckEvery <= 0) throw new IllegalArgumentException("buildSizeCheckEvery must be positive");
+
+      this.workerConfig = WorkerConfig.builder()
+          .estimatedWorkerCount(b.estimatedWorkerCount)
+          .defaultTtl(b.defaultTtl)
+          .defaultThrottle(b.defaultThrottle)
+          .maxConcurrentCompactions(b.maxConcurrentCompactions)
+          .buildTxnLimitBytes(b.buildTxnLimitBytes)
+          .buildTxnSoftLimitRatio(b.buildTxnSoftLimitRatio)
+          .buildSizeCheckEvery(b.buildSizeCheckEvery)
+          .vacuumCooldown(b.vacuumCooldown)
+          .vacuumMinDeletedRatio(b.vacuumMinDeletedRatio)
+          .autoFindCompactionCandidates(b.autoFindCompactionCandidates)
+          .compactionMinSegments(b.compactionMinSegments)
+          .compactionMaxSegments(b.compactionMaxSegments)
+          .compactionMinFragmentation(b.compactionMinFragmentation)
+          .compactionAgeBiasWeight(b.compactionAgeBiasWeight)
+          .compactionSizeBiasWeight(b.compactionSizeBiasWeight)
+          .compactionFragBiasWeight(b.compactionFragBiasWeight)
+          .codebookBatchLoadSize(b.codebookBatchLoadSize)
+          .adjacencyBatchLoadSize(b.adjacencyBatchLoadSize)
+          .prefetchCodebooksEnabled(b.prefetchCodebooksEnabled)
+          .prefetchCodebooksSync(b.prefetchCodebooksSync)
+          .instantSource(b.instantSource)
+          .metricAttributes(b.metricAttributes)
+          .defaultMaxSegmentSize(b.maxSegmentSize)
+          .defaultPqM(b.pqM)
+          .defaultPqK(b.pqK)
+          .defaultGraphDegree(b.graphDegree)
+          .defaultOversample(b.oversample)
+          .defaultGraphBuildBreadth(b.graphBuildBreadth)
+          .defaultGraphAlpha(b.graphAlpha)
+          .build();
     }
-    this.defaultThrottle = b.defaultThrottle;
-    this.instantSource = Objects.requireNonNull(b.instantSource, "instantSource must not be null");
-
-    if (b.codebookBatchLoadSize <= 0) throw new IllegalArgumentException("codebookBatchLoadSize must be positive");
-    if (b.adjacencyBatchLoadSize <= 0)
-      throw new IllegalArgumentException("adjacencyBatchLoadSize must be positive");
-    this.codebookBatchLoadSize = b.codebookBatchLoadSize;
-    this.adjacencyBatchLoadSize = b.adjacencyBatchLoadSize;
-    this.metricAttributes = Map.copyOf(b.metricAttributes);
-    this.prefetchCodebooksEnabled = b.prefetchCodebooksEnabled;
-    this.prefetchCodebooksSync = b.prefetchCodebooksSync;
-    this.autoFindCompactionCandidates = b.autoFindCompactionCandidates;
-
-    if (b.compactionMinSegments < 2) throw new IllegalArgumentException("compactionMinSegments must be >= 2");
-    this.compactionMinSegments = b.compactionMinSegments;
-    if (b.compactionMaxSegments < b.compactionMinSegments)
-      throw new IllegalArgumentException("compactionMaxSegments must be >= compactionMinSegments");
-    this.compactionMaxSegments = b.compactionMaxSegments;
-    if (!(b.compactionMinFragmentation >= 0.0 && b.compactionMinFragmentation <= 1.0))
-      throw new IllegalArgumentException("compactionMinFragmentation must be in [0,1]");
-    this.compactionMinFragmentation = b.compactionMinFragmentation;
-    if (b.compactionAgeBiasWeight < 0.0) throw new IllegalArgumentException("compactionAgeBiasWeight must be >= 0");
-    this.compactionAgeBiasWeight = b.compactionAgeBiasWeight;
-    if (b.compactionSizeBiasWeight < 0.0)
-      throw new IllegalArgumentException("compactionSizeBiasWeight must be >= 0");
-    this.compactionSizeBiasWeight = b.compactionSizeBiasWeight;
-    if (b.compactionFragBiasWeight < 0.0)
-      throw new IllegalArgumentException("compactionFragBiasWeight must be >= 0");
-    this.compactionFragBiasWeight = b.compactionFragBiasWeight;
-
-    if (b.buildTxnLimitBytes <= 0) throw new IllegalArgumentException("buildTxnLimitBytes must be positive");
-    if (!(b.buildTxnSoftLimitRatio > 0.0 && b.buildTxnSoftLimitRatio < 1.0))
-      throw new IllegalArgumentException("buildTxnSoftLimitRatio must be in (0,1)");
-    if (b.buildSizeCheckEvery <= 0) throw new IllegalArgumentException("buildSizeCheckEvery must be positive");
-    this.buildTxnLimitBytes = b.buildTxnLimitBytes;
-    this.buildTxnSoftLimitRatio = b.buildTxnSoftLimitRatio;
-    this.buildSizeCheckEvery = b.buildSizeCheckEvery;
 
     this.globalTaskQueueConfig = b.globalTaskQueueConfig; // nullable
   }
@@ -234,158 +227,132 @@ public final class VectorIndexConfig {
   }
 
   /**
-   * Returns the estimated number of background workers.
+   * Returns the {@link WorkerConfig} holding all operational settings.
    */
-  public int getEstimatedWorkerCount() {
-    return estimatedWorkerCount;
+  public WorkerConfig getWorkerConfig() {
+    return workerConfig;
   }
 
-  /**
-   * Returns the number of local worker threads to auto-start.
-   */
+  /** Returns the estimated number of background workers. */
+  public int getEstimatedWorkerCount() {
+    return workerConfig.getEstimatedWorkerCount();
+  }
+
+  /** Returns the number of local worker threads to auto-start. */
   public int getLocalWorkerThreads() {
     return localWorkerThreads;
   }
 
-  /**
-   * Returns the number of local maintenance worker threads to auto-start.
-   */
+  /** Returns the number of local maintenance worker threads to auto-start. */
   public int getLocalMaintenanceWorkerThreads() {
     return localMaintenanceWorkerThreads;
   }
 
   /** Maximum number of in-flight compactions per index. */
   public int getMaxConcurrentCompactions() {
-    return maxConcurrentCompactions;
+    return workerConfig.getMaxConcurrentCompactions();
   }
+
   /** Returns the cooldown between repeated vacuum enqueues for the same segment. */
   public Duration getVacuumCooldown() {
-    return vacuumCooldown;
+    return workerConfig.getVacuumCooldown();
   }
 
   /**
    * Minimum deleted ratio [0, 1] that triggers auto-enqueue of a vacuum task after deletes.
-   *
-   * <p>Example: 0.25 means enqueue a threshold-aware vacuum when at least 25% of a segment's
-   * rows are tombstoned. Use 0.0 to enqueue immediately; 1.0 to effectively disable.</p>
    */
   public double getVacuumMinDeletedRatio() {
-    return vacuumMinDeletedRatio;
+    return workerConfig.getVacuumMinDeletedRatio();
   }
 
-  /**
-   * Returns the default claim TTL used by background tasks.
-   */
+  /** Returns the default claim TTL used by background tasks. */
   public Duration getDefaultTtl() {
-    return defaultTtl;
+    return workerConfig.getDefaultTtl();
   }
 
-  /**
-   * Returns the default throttle between tasks for the same key.
-   */
+  /** Returns the default throttle between tasks for the same key. */
   public Duration getDefaultThrottle() {
-    return defaultThrottle;
+    return workerConfig.getDefaultThrottle();
   }
 
-  /**
-   * Returns the time source (injectable for tests).
-   */
+  /** Returns the time source (injectable for tests). */
   public InstantSource getInstantSource() {
-    return instantSource;
+    return workerConfig.getInstantSource();
   }
 
-  /**
-   * Returns batch size for async codebook bulk loads.
-   */
+  /** Returns batch size for async codebook bulk loads. */
   public int getCodebookBatchLoadSize() {
-    return codebookBatchLoadSize;
+    return workerConfig.getCodebookBatchLoadSize();
   }
 
-  /**
-   * Returns batch size for async adjacency bulk loads.
-   */
+  /** Returns batch size for async adjacency bulk loads. */
   public int getAdjacencyBatchLoadSize() {
-    return adjacencyBatchLoadSize;
+    return workerConfig.getAdjacencyBatchLoadSize();
   }
 
-  /**
-   * Additional metric attributes to add to emitted metrics/spans.
-   */
+  /** Additional metric attributes to add to emitted metrics/spans. */
   public Map<String, String> getMetricAttributes() {
-    return metricAttributes;
+    return workerConfig.getMetricAttributes();
   }
 
-  /**
-   * Returns whether query-time codebook prefetch is enabled.
-   */
+  /** Returns whether query-time codebook prefetch is enabled. */
   public boolean isPrefetchCodebooksEnabled() {
-    return prefetchCodebooksEnabled;
+    return workerConfig.isPrefetchCodebooksEnabled();
   }
 
-  /**
-   * When true, query waits for codebook prefetch to complete before searching (test-only).
-   */
+  /** When true, query waits for codebook prefetch to complete before searching (test-only). */
   public boolean isPrefetchCodebooksSync() {
-    return prefetchCodebooksSync;
+    return workerConfig.isPrefetchCodebooksSync();
   }
 
-  /**
-   * When true, a vacuum that leaves a segment below 50% capacity will enqueue a
-   * FindCompactionCandidates task to explore merging small sealed segments.
-   */
+  /** When true, vacuum enqueues FindCompactionCandidates for small sealed segments. */
   public boolean isAutoFindCompactionCandidates() {
-    return autoFindCompactionCandidates;
+    return workerConfig.isAutoFindCompactionCandidates();
   }
 
   /** Minimum number of segments required to trigger compaction (default 2). */
   public int getCompactionMinSegments() {
-    return compactionMinSegments;
+    return workerConfig.getCompactionMinSegments();
   }
 
   /** Maximum number of segments to merge at once (default 8). */
   public int getCompactionMaxSegments() {
-    return compactionMaxSegments;
+    return workerConfig.getCompactionMaxSegments();
   }
 
   /** Minimum average deleted ratio across candidates to proceed with compaction (default 0.1). */
   public double getCompactionMinFragmentation() {
-    return compactionMinFragmentation;
+    return workerConfig.getCompactionMinFragmentation();
   }
 
   /** Weight for age score in composite compaction ranking (default 0.3). */
   public double getCompactionAgeBiasWeight() {
-    return compactionAgeBiasWeight;
+    return workerConfig.getCompactionAgeBiasWeight();
   }
 
   /** Weight for size score (smaller = higher) in composite compaction ranking (default 0.5). */
   public double getCompactionSizeBiasWeight() {
-    return compactionSizeBiasWeight;
+    return workerConfig.getCompactionSizeBiasWeight();
   }
 
   /** Weight for fragmentation score in composite compaction ranking (default 0.2). */
   public double getCompactionFragBiasWeight() {
-    return compactionFragBiasWeight;
+    return workerConfig.getCompactionFragBiasWeight();
   }
 
-  /**
-   * Upper bound for FDB transaction size (bytes) used by segment build batching.
-   */
+  /** Upper bound for FDB transaction size (bytes) used by segment build batching. */
   public long getBuildTxnLimitBytes() {
-    return buildTxnLimitBytes;
+    return workerConfig.getBuildTxnLimitBytes();
   }
 
-  /**
-   * Ratio of limit where we split (e.g., 0.9 => leave 10% headroom).
-   */
+  /** Ratio of limit where we split (e.g., 0.9 => leave 10% headroom). */
   public double getBuildTxnSoftLimitRatio() {
-    return buildTxnSoftLimitRatio;
+    return workerConfig.getBuildTxnSoftLimitRatio();
   }
 
-  /**
-   * Writes between approximate-size checks during build batching.
-   */
+  /** Writes between approximate-size checks during build batching. */
   public int getBuildSizeCheckEvery() {
-    return buildSizeCheckEvery;
+    return workerConfig.getBuildSizeCheckEvery();
   }
 
   /**
@@ -451,10 +418,20 @@ public final class VectorIndexConfig {
     private double buildTxnSoftLimitRatio = 0.9; // leave 10% headroom
     private int buildSizeCheckEvery = 32;
     private GlobalTaskQueueConfig globalTaskQueueConfig;
+    private WorkerConfig workerConfig; // nullable; when set, overrides individual operational fields
 
     private Builder(Database database, DirectorySubspace indexDir) {
       this.database = database;
       this.indexDir = indexDir;
+    }
+
+    /**
+     * Sets a pre-built {@link WorkerConfig} for all operational settings.
+     * When set, individual operational setters on this builder are ignored.
+     */
+    public Builder workerConfig(WorkerConfig workerConfig) {
+      this.workerConfig = workerConfig;
+      return this;
     }
 
     /**

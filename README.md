@@ -210,16 +210,15 @@ VectorIndex index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
 Use `GlobalWorkerRunner` to start shared worker threads that process tasks from the global queues:
 
 ```java
-// Template config for operational settings (data params read from each index's persisted IndexMeta)
-VectorIndexConfig templateConfig = VectorIndexConfig.builder(db, dummyDir)
-    .dimension(1) // overridden per-index from IndexMeta
+// Operational settings for all indices processed by this runner
+WorkerConfig workerConfig = WorkerConfig.builder()
     .buildTxnLimitBytes(5_000_000)
     .maxConcurrentCompactions(2)
     .build();
 
 // Start workers: 4 build threads + 2 maintenance threads
-GlobalWorkerRunner runner = new GlobalWorkerRunner(db, globalCfg, templateConfig, 4, 2);
-runner.start();
+GlobalWorkerRunner runner = new GlobalWorkerRunner(db, workerConfig, globalCfg);
+runner.start(4, 2);
 
 // ... later
 runner.close(); // graceful shutdown

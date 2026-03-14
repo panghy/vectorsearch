@@ -10,6 +10,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.panghy.taskqueue.TaskQueue;
 import io.github.panghy.vectorsearch.config.GlobalTaskQueueConfig;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
+import io.github.panghy.vectorsearch.config.WorkerConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories.IndexDirectories;
 import io.github.panghy.vectorsearch.proto.BuildTask;
@@ -49,7 +50,7 @@ public final class GlobalWorkerRunner implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(GlobalWorkerRunner.class);
 
   private final Database db;
-  private final VectorIndexConfig templateConfig;
+  private final WorkerConfig workerConfig;
   private final TaskQueue<String, GlobalBuildTask> buildQueue;
   private final TaskQueue<String, GlobalMaintenanceTask> maintenanceQueue;
   private final AtomicBoolean running = new AtomicBoolean(false);
@@ -64,13 +65,13 @@ public final class GlobalWorkerRunner implements AutoCloseable {
   /**
    * Creates a new {@code GlobalWorkerRunner}.
    *
-   * @param db             the FoundationDB database handle
-   * @param templateConfig operational template config (data params are overridden per-index)
-   * @param globalConfig   the global task queue configuration holding both queues
+   * @param db           the FoundationDB database handle
+   * @param workerConfig operational settings applied to every index processed by this runner
+   * @param globalConfig the global task queue configuration holding both queues
    */
-  public GlobalWorkerRunner(Database db, VectorIndexConfig templateConfig, GlobalTaskQueueConfig globalConfig) {
+  public GlobalWorkerRunner(Database db, WorkerConfig workerConfig, GlobalTaskQueueConfig globalConfig) {
     this.db = requireNonNull(db, "db");
-    this.templateConfig = requireNonNull(templateConfig, "templateConfig");
+    this.workerConfig = requireNonNull(workerConfig, "workerConfig");
     requireNonNull(globalConfig, "globalConfig");
     this.buildQueue = globalConfig.getBuildQueue();
     this.maintenanceQueue = globalConfig.getMaintenanceQueue();
@@ -228,9 +229,11 @@ public final class GlobalWorkerRunner implements AutoCloseable {
 
   /**
    * Reads persisted {@link IndexMeta} from the index and reconstructs a {@link VectorIndexConfig}
-   * using data params from the meta and operational settings from the template.
+   * using data params from the meta and operational settings from the {@link WorkerConfig}.
+   *
+   * <p>Package-private for testing.</p>
    */
-  private CompletableFuture<VectorIndexConfig> buildConfigForIndex(IndexDirectories dirs, List<String> indexPath) {
+  CompletableFuture<VectorIndexConfig> buildConfigForIndex(IndexDirectories dirs, List<String> indexPath) {
     return db.readAsync(tr -> tr.get(dirs.metaKey())).thenCompose(metaBytes -> {
       if (metaBytes == null) {
         return CompletableFuture.failedFuture(
@@ -246,33 +249,48 @@ public final class GlobalWorkerRunner implements AutoCloseable {
       VectorIndexConfig.Metric metric = (meta.getMetric() == IndexMeta.Metric.METRIC_COSINE)
           ? VectorIndexConfig.Metric.COSINE
           : VectorIndexConfig.Metric.L2;
-      // Build config with data params from IndexMeta + operational settings from template
+      WorkerConfig wc = workerConfig;
+      // Build config with data params from IndexMeta + ALL operational settings from WorkerConfig
       VectorIndexConfig cfg = VectorIndexConfig.builder(db, dirs.indexDir())
           .dimension(meta.getDimension())
           .metric(metric)
           .maxSegmentSize(
-              meta.getMaxSegmentSize() > 0
-                  ? meta.getMaxSegmentSize()
-                  : templateConfig.getMaxSegmentSize())
-          .pqM(meta.getPqM() > 0 ? meta.getPqM() : templateConfig.getPqM())
-          .pqK(meta.getPqK() > 1 ? meta.getPqK() : templateConfig.getPqK())
-          .graphDegree(meta.getGraphDegree() > 0 ? meta.getGraphDegree() : templateConfig.getGraphDegree())
-          .oversample(meta.getOversample() > 0 ? meta.getOversample() : templateConfig.getOversample())
+              meta.getMaxSegmentSize() > 0 ? meta.getMaxSegmentSize() : wc.getDefaultMaxSegmentSize())
+          .pqM(meta.getPqM() > 0 ? meta.getPqM() : wc.getDefaultPqM())
+          .pqK(meta.getPqK() > 1 ? meta.getPqK() : wc.getDefaultPqK())
+          .graphDegree(meta.getGraphDegree() > 0 ? meta.getGraphDegree() : wc.getDefaultGraphDegree())
+          .oversample(meta.getOversample() > 0 ? meta.getOversample() : wc.getDefaultOversample())
           .graphBuildBreadth(
               meta.getGraphBuildBreadth() > 0
                   ? meta.getGraphBuildBreadth()
-                  : templateConfig.getGraphBuildBreadth())
-          .graphAlpha(meta.getGraphAlpha() > 0 ? meta.getGraphAlpha() : templateConfig.getGraphAlpha())
-          // Operational settings from template
+                  : wc.getDefaultGraphBuildBreadth())
+          .graphAlpha(meta.getGraphAlpha() > 0 ? meta.getGraphAlpha() : wc.getDefaultGraphAlpha())
+          // No local workers for global runner
           .localWorkerThreads(0)
           .localMaintenanceWorkerThreads(0)
-          .estimatedWorkerCount(templateConfig.getEstimatedWorkerCount())
-          .defaultTtl(templateConfig.getDefaultTtl())
-          .defaultThrottle(templateConfig.getDefaultThrottle())
-          .maxConcurrentCompactions(templateConfig.getMaxConcurrentCompactions())
-          .buildTxnLimitBytes(templateConfig.getBuildTxnLimitBytes())
-          .buildTxnSoftLimitRatio(templateConfig.getBuildTxnSoftLimitRatio())
-          .buildSizeCheckEvery(templateConfig.getBuildSizeCheckEvery())
+          // ALL operational settings from WorkerConfig
+          .estimatedWorkerCount(wc.getEstimatedWorkerCount())
+          .defaultTtl(wc.getDefaultTtl())
+          .defaultThrottle(wc.getDefaultThrottle())
+          .maxConcurrentCompactions(wc.getMaxConcurrentCompactions())
+          .buildTxnLimitBytes(wc.getBuildTxnLimitBytes())
+          .buildTxnSoftLimitRatio(wc.getBuildTxnSoftLimitRatio())
+          .buildSizeCheckEvery(wc.getBuildSizeCheckEvery())
+          .vacuumCooldown(wc.getVacuumCooldown())
+          .vacuumMinDeletedRatio(wc.getVacuumMinDeletedRatio())
+          .autoFindCompactionCandidates(wc.isAutoFindCompactionCandidates())
+          .compactionMinSegments(wc.getCompactionMinSegments())
+          .compactionMaxSegments(wc.getCompactionMaxSegments())
+          .compactionMinFragmentation(wc.getCompactionMinFragmentation())
+          .compactionAgeBiasWeight(wc.getCompactionAgeBiasWeight())
+          .compactionSizeBiasWeight(wc.getCompactionSizeBiasWeight())
+          .compactionFragBiasWeight(wc.getCompactionFragBiasWeight())
+          .codebookBatchLoadSize(wc.getCodebookBatchLoadSize())
+          .adjacencyBatchLoadSize(wc.getAdjacencyBatchLoadSize())
+          .prefetchCodebooksEnabled(wc.isPrefetchCodebooksEnabled())
+          .prefetchCodebooksSync(wc.isPrefetchCodebooksSync())
+          .instantSource(wc.getInstantSource())
+          .metricAttributes(wc.getMetricAttributes())
           .build();
       return completedFuture(cfg);
     });
