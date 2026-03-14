@@ -1,6 +1,7 @@
 package io.github.panghy.vectorsearch.tasks;
 
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.CompletableFuture.allOf;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.apple.foundationdb.Database;
@@ -18,6 +19,7 @@ import io.github.panghy.vectorsearch.proto.GlobalBuildTask;
 import io.github.panghy.vectorsearch.proto.GlobalMaintenanceTask;
 import io.github.panghy.vectorsearch.proto.IndexMeta;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
+import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -192,7 +194,7 @@ public final class GlobalWorkerRunner implements AutoCloseable {
       List<String> indexPath = gmt.getIndexPathList();
       return resolveIndexDirs(indexPath)
           .thenCompose(dirs -> buildConfigForIndex(dirs, indexPath)
-              .thenCompose(cfg -> processMaintenanceTask(mt, cfg, dirs)))
+              .thenCompose(cfg -> processMaintenanceTask(mt, cfg, dirs, indexPath)))
           .handle((v, ex) -> ex)
           .thenCompose(ex -> (ex == null) ? claim.complete() : claim.fail())
           .thenApply(v -> true);
@@ -200,8 +202,11 @@ public final class GlobalWorkerRunner implements AutoCloseable {
   }
 
   private CompletableFuture<Void> processMaintenanceTask(
-      MaintenanceTask t, VectorIndexConfig cfg, IndexDirectories dirs) {
-    MaintenanceService svc = new MaintenanceService(cfg, dirs);
+      MaintenanceTask t, VectorIndexConfig cfg, IndexDirectories dirs, List<String> indexPath) {
+    // Wrap the global maintenance queue so follow-up tasks (e.g. FindCompactionCandidates
+    // after vacuum) stay on the global queue instead of a local per-index queue.
+    GlobalMaintenanceQueueAdapter adapter = new GlobalMaintenanceQueueAdapter(maintenanceQueue, indexPath);
+    MaintenanceService svc = new MaintenanceService(cfg, dirs, adapter);
     if (t.hasVacuum()) {
       var v = t.getVacuum();
       return svc.vacuumSegment(v.getSegId(), v.getMinDeletedRatio());
@@ -210,10 +215,87 @@ public final class GlobalWorkerRunner implements AutoCloseable {
       return svc.compactSegments(t.getCompact().getSegIdsList());
     }
     if (t.hasFindCandidates()) {
-      return svc.findCompactionCandidates(t.getFindCandidates().getAnchorSegId())
-          .thenApply(v -> null);
+      int anchor = t.getFindCandidates().getAnchorSegId();
+      return handleFindCandidates(svc, anchor, cfg, dirs, indexPath);
     }
     return completedFuture(null);
+  }
+
+  /**
+   * Handles {@code FindCompactionCandidates} with the same logic as
+   * {@link MaintenanceWorker}: checks throttle, marks candidates COMPACTING,
+   * and enqueues a {@code Compact} task on the global maintenance queue.
+   */
+  private CompletableFuture<Void> handleFindCandidates(
+      MaintenanceService svc, int anchor, VectorIndexConfig cfg, IndexDirectories dirs, List<String> indexPath) {
+    if (cfg.getMaxConcurrentCompactions() <= 0) return completedFuture(null);
+    return svc.findCompactionCandidates(anchor).thenCompose(cands -> {
+      if (cands.size() <= 1) return completedFuture(null);
+      return svc.countInFlightCompactions()
+          .thenCompose(inflight -> inflight >= cfg.getMaxConcurrentCompactions()
+              ? completedFuture(null)
+              : markCandidatesCompacting(dirs, cands)
+                  .thenCompose(marked -> marked
+                      ? enqueueCompactOnGlobalQueue(cands, indexPath)
+                      : completedFuture(null)));
+    });
+  }
+
+  /**
+   * Atomically marks all candidate segments as COMPACTING if they are all currently SEALED.
+   */
+  private CompletableFuture<Boolean> markCandidatesCompacting(IndexDirectories dirs, List<Integer> cands) {
+    return db.runAsync(tr -> {
+      List<CompletableFuture<byte[]>> metas = new ArrayList<>();
+      for (int sid : cands) metas.add(dirs.segmentKeys(tr, sid).thenCompose(sk -> tr.get(sk.metaKey())));
+      return allOf(metas.toArray(CompletableFuture[]::new)).thenCompose(v -> {
+        for (var f : metas) {
+          byte[] mb = f.getNow(null);
+          if (mb == null) return completedFuture(false);
+          try {
+            var sm = SegmentMeta.parseFrom(mb);
+            if (sm.getState() != SegmentMeta.State.SEALED) return completedFuture(false);
+          } catch (InvalidProtocolBufferException e) {
+            throw new RuntimeException(e);
+          }
+        }
+        List<CompletableFuture<Void>> sets = new ArrayList<>();
+        for (int sid : cands) {
+          sets.add(dirs.segmentKeys(tr, sid)
+              .thenCompose(sk -> tr.get(sk.metaKey()).thenApply(bytes -> {
+                try {
+                  var sm = SegmentMeta.parseFrom(bytes);
+                  var updated = sm.toBuilder()
+                      .setState(SegmentMeta.State.COMPACTING)
+                      .build();
+                  tr.set(sk.metaKey(), updated.toByteArray());
+                  return null;
+                } catch (InvalidProtocolBufferException e) {
+                  throw new RuntimeException(e);
+                }
+              })));
+        }
+        return allOf(sets.toArray(CompletableFuture[]::new)).thenApply(x -> true);
+      });
+    });
+  }
+
+  /**
+   * Enqueues a {@code Compact} task on the global maintenance queue for the given segments.
+   */
+  private CompletableFuture<Void> enqueueCompactOnGlobalQueue(List<Integer> segIds, List<String> indexPath) {
+    List<Integer> sorted = new ArrayList<>(segIds);
+    sorted.sort(Integer::compareTo);
+    String key = "compact:" + sorted;
+    MaintenanceTask.Compact c =
+        MaintenanceTask.Compact.newBuilder().addAllSegIds(sorted).build();
+    MaintenanceTask mt = MaintenanceTask.newBuilder().setCompact(c).build();
+    GlobalMaintenanceTask gmt = GlobalMaintenanceTask.newBuilder()
+        .addAllIndexPath(indexPath)
+        .setTask(mt)
+        .build();
+    return db.runAsync(tr -> maintenanceQueue.enqueueIfNotExists(tr, key, gmt))
+        .thenApply(x -> null);
   }
 
   /**
@@ -228,8 +310,23 @@ public final class GlobalWorkerRunner implements AutoCloseable {
   }
 
   /**
-   * Reads persisted {@link IndexMeta} from the index and reconstructs a {@link VectorIndexConfig}
-   * using data params from the meta and operational settings from the {@link WorkerConfig}.
+   * Reads persisted {@link IndexMeta} from the index and reconstructs a {@link VectorIndexConfig}.
+   *
+   * <p>The built config combines:
+   * <ul>
+   *   <li><b>Data/algorithmic params</b> from {@code IndexMeta}: dimension, metric,
+   *       maxSegmentSize, pqM, pqK, graphDegree, oversample, graphBuildBreadth, graphAlpha
+   *       (falling back to {@link WorkerConfig} defaults when the meta value is zero/unset).</li>
+   *   <li><b>All operational settings</b> from the runner's {@link WorkerConfig}: worker count,
+   *       TTL, throttle, compaction planner, vacuum, build batching, caches, time source,
+   *       and metric attributes.</li>
+   * </ul>
+   *
+   * <p>Local worker threads are forced to zero because the global runner handles dispatch.
+   * The returned config does <em>not</em> carry a {@link
+   * io.github.panghy.vectorsearch.config.GlobalTaskQueueConfig} — callers that need to
+   * route follow-up tasks to the global queue should supply an explicit queue reference
+   * (e.g. via {@link GlobalMaintenanceQueueAdapter}).</p>
    *
    * <p>Package-private for testing.</p>
    */
@@ -250,7 +347,7 @@ public final class GlobalWorkerRunner implements AutoCloseable {
           ? VectorIndexConfig.Metric.COSINE
           : VectorIndexConfig.Metric.L2;
       WorkerConfig wc = workerConfig;
-      // Build config with data params from IndexMeta + ALL operational settings from WorkerConfig
+      // Build config: data params from IndexMeta + operational settings from WorkerConfig
       VectorIndexConfig cfg = VectorIndexConfig.builder(db, dirs.indexDir())
           .dimension(meta.getDimension())
           .metric(metric)
@@ -268,7 +365,7 @@ public final class GlobalWorkerRunner implements AutoCloseable {
           // No local workers for global runner
           .localWorkerThreads(0)
           .localMaintenanceWorkerThreads(0)
-          // ALL operational settings from WorkerConfig
+          // Operational settings from WorkerConfig (local workers disabled)
           .estimatedWorkerCount(wc.getEstimatedWorkerCount())
           .defaultTtl(wc.getDefaultTtl())
           .defaultThrottle(wc.getDefaultThrottle())
