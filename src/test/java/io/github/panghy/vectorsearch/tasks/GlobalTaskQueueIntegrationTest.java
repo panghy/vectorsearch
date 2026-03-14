@@ -12,6 +12,7 @@ import io.github.panghy.taskqueue.TaskQueues;
 import io.github.panghy.vectorsearch.api.VectorIndex;
 import io.github.panghy.vectorsearch.config.GlobalTaskQueueConfig;
 import io.github.panghy.vectorsearch.config.VectorIndexConfig;
+import io.github.panghy.vectorsearch.config.WorkerConfig;
 import io.github.panghy.vectorsearch.fdb.FdbDirectories;
 import io.github.panghy.vectorsearch.fdb.FdbVectorIndex;
 import io.github.panghy.vectorsearch.proto.GlobalBuildTask;
@@ -134,18 +135,13 @@ class GlobalTaskQueueIntegrationTest {
         .build();
     index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
 
-    // Template config for the worker
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .maxSegmentSize(2)
+    // Worker config for the global runner
+    WorkerConfig workerCfg = WorkerConfig.builder()
         .estimatedWorkerCount(1)
         .defaultTtl(Duration.ofSeconds(30))
         .build();
 
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
     runner.start(1, 0);
 
     // Insert vectors to trigger rotation
@@ -201,16 +197,11 @@ class GlobalTaskQueueIntegrationTest {
     assertThat(gmt.getIndexPathList()).isEqualTo(root.getPath());
 
     // Now start a GlobalWorkerRunner to process it
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .build();
+    WorkerConfig workerCfg = WorkerConfig.builder().build();
     // Fail the claim so the worker can re-claim it
     claim.fail().get(5, TimeUnit.SECONDS);
 
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
     // Process the maintenance task via runOnceMaint
     runner.runOnceMaint().get(30, TimeUnit.SECONDS);
   }
@@ -246,16 +237,11 @@ class GlobalTaskQueueIntegrationTest {
     index2 = VectorIndex.createOrOpen(cfg2).get(10, TimeUnit.SECONDS);
 
     // Create a global worker (not started as a loop — we'll call runOnceBuild directly)
-    VectorIndexConfig templateCfg = VectorIndexConfig.builder(db, root)
-        .dimension(4)
-        .pqM(2)
-        .pqK(8)
-        .graphDegree(4)
-        .maxSegmentSize(2)
+    WorkerConfig workerCfg = WorkerConfig.builder()
         .estimatedWorkerCount(1)
         .defaultTtl(Duration.ofSeconds(30))
         .build();
-    runner = new GlobalWorkerRunner(db, templateCfg, globalConfig);
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
 
     // Trigger rotation on index 1 first, process its build task
     index.add(new float[] {1, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
