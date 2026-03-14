@@ -55,14 +55,45 @@ public final class WorkerConfig {
   private final double defaultGraphAlpha;
 
   private WorkerConfig(Builder b) {
+    // Validate operational invariants (same constraints as VectorIndexConfig)
+    if (b.estimatedWorkerCount <= 0) throw new IllegalArgumentException("estimatedWorkerCount must be positive");
+    if (b.maxConcurrentCompactions < 0) throw new IllegalArgumentException("maxConcurrentCompactions must be >= 0");
+    Objects.requireNonNull(b.defaultTtl, "defaultTtl must not be null");
+    if (b.defaultTtl.isZero() || b.defaultTtl.isNegative())
+      throw new IllegalArgumentException("defaultTtl must be positive");
+    Objects.requireNonNull(b.defaultThrottle, "defaultThrottle must not be null");
+    if (b.defaultThrottle.isNegative()) throw new IllegalArgumentException("defaultThrottle must not be negative");
+    Objects.requireNonNull(b.vacuumCooldown, "vacuumCooldown must not be null");
+    if (b.vacuumCooldown.isNegative()) throw new IllegalArgumentException("vacuumCooldown must be >= 0");
+    if (!(b.vacuumMinDeletedRatio >= 0.0 && b.vacuumMinDeletedRatio <= 1.0))
+      throw new IllegalArgumentException("vacuumMinDeletedRatio must be in [0,1]");
+    Objects.requireNonNull(b.instantSource, "instantSource must not be null");
+    if (b.codebookBatchLoadSize <= 0) throw new IllegalArgumentException("codebookBatchLoadSize must be positive");
+    if (b.adjacencyBatchLoadSize <= 0)
+      throw new IllegalArgumentException("adjacencyBatchLoadSize must be positive");
+    if (b.compactionMinSegments < 2) throw new IllegalArgumentException("compactionMinSegments must be >= 2");
+    if (b.compactionMaxSegments < b.compactionMinSegments)
+      throw new IllegalArgumentException("compactionMaxSegments must be >= compactionMinSegments");
+    if (!(b.compactionMinFragmentation >= 0.0 && b.compactionMinFragmentation <= 1.0))
+      throw new IllegalArgumentException("compactionMinFragmentation must be in [0,1]");
+    if (b.compactionAgeBiasWeight < 0.0) throw new IllegalArgumentException("compactionAgeBiasWeight must be >= 0");
+    if (b.compactionSizeBiasWeight < 0.0)
+      throw new IllegalArgumentException("compactionSizeBiasWeight must be >= 0");
+    if (b.compactionFragBiasWeight < 0.0)
+      throw new IllegalArgumentException("compactionFragBiasWeight must be >= 0");
+    if (b.buildTxnLimitBytes <= 0) throw new IllegalArgumentException("buildTxnLimitBytes must be positive");
+    if (!(b.buildTxnSoftLimitRatio > 0.0 && b.buildTxnSoftLimitRatio < 1.0))
+      throw new IllegalArgumentException("buildTxnSoftLimitRatio must be in (0,1)");
+    if (b.buildSizeCheckEvery <= 0) throw new IllegalArgumentException("buildSizeCheckEvery must be positive");
+
     this.estimatedWorkerCount = b.estimatedWorkerCount;
-    this.defaultTtl = Objects.requireNonNull(b.defaultTtl, "defaultTtl");
-    this.defaultThrottle = Objects.requireNonNull(b.defaultThrottle, "defaultThrottle");
+    this.defaultTtl = b.defaultTtl;
+    this.defaultThrottle = b.defaultThrottle;
     this.maxConcurrentCompactions = b.maxConcurrentCompactions;
     this.buildTxnLimitBytes = b.buildTxnLimitBytes;
     this.buildTxnSoftLimitRatio = b.buildTxnSoftLimitRatio;
     this.buildSizeCheckEvery = b.buildSizeCheckEvery;
-    this.vacuumCooldown = Objects.requireNonNull(b.vacuumCooldown, "vacuumCooldown");
+    this.vacuumCooldown = b.vacuumCooldown;
     this.vacuumMinDeletedRatio = b.vacuumMinDeletedRatio;
     this.autoFindCompactionCandidates = b.autoFindCompactionCandidates;
     this.compactionMinSegments = b.compactionMinSegments;
@@ -75,7 +106,7 @@ public final class WorkerConfig {
     this.adjacencyBatchLoadSize = b.adjacencyBatchLoadSize;
     this.prefetchCodebooksEnabled = b.prefetchCodebooksEnabled;
     this.prefetchCodebooksSync = b.prefetchCodebooksSync;
-    this.instantSource = Objects.requireNonNull(b.instantSource, "instantSource");
+    this.instantSource = b.instantSource;
     this.metricAttributes = Map.copyOf(b.metricAttributes);
 
     this.defaultMaxSegmentSize = b.defaultMaxSegmentSize;
