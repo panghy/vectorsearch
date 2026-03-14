@@ -84,10 +84,12 @@ public final class VectorIndexConfig {
         throw new IllegalArgumentException("estimatedWorkerCount must be positive");
       if (b.maxConcurrentCompactions < 0)
         throw new IllegalArgumentException("maxConcurrentCompactions must be >= 0");
+      Objects.requireNonNull(b.vacuumCooldown, "vacuumCooldown must not be null");
       if (b.vacuumCooldown.isNegative()) throw new IllegalArgumentException("vacuumCooldown must be >= 0");
       if (!(b.vacuumMinDeletedRatio >= 0.0 && b.vacuumMinDeletedRatio <= 1.0))
         throw new IllegalArgumentException("vacuumMinDeletedRatio must be in [0,1]");
       requirePositive(b.defaultTtl, "defaultTtl");
+      Objects.requireNonNull(b.defaultThrottle, "defaultThrottle must not be null");
       if (b.defaultThrottle.isNegative())
         throw new IllegalArgumentException("defaultThrottle must not be negative");
       Objects.requireNonNull(b.instantSource, "instantSource must not be null");
