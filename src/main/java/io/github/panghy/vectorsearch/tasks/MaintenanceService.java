@@ -58,6 +58,23 @@ public final class MaintenanceService {
   }
 
   /**
+   * Creates a {@code MaintenanceService} that routes follow-up maintenance tasks (e.g.
+   * {@code FindCompactionCandidates} after vacuum) to the supplied queue instead of
+   * creating a local per-index queue. Use this constructor in global-queue mode so that
+   * follow-up work stays on the shared global maintenance queue.
+   *
+   * @param cfg   index configuration
+   * @param dirs  index directories
+   * @param queue pre-existing maintenance queue (typically a {@link GlobalMaintenanceQueueAdapter})
+   */
+  public MaintenanceService(
+      VectorIndexConfig cfg, FdbDirectories.IndexDirectories dirs, TaskQueue<String, MaintenanceTask> queue) {
+    this.config = requireNonNull(cfg, "config");
+    this.indexDirs = requireNonNull(dirs, "indexDirs");
+    this.maintQueue = CompletableFuture.completedFuture(requireNonNull(queue, "queue"));
+  }
+
+  /**
    * Vacuum a single segment: remove tombstoned vector records, PQ codes, and adjacency entries.
    *
    * <p>If {@code minDeletedRatio} is greater than zero, the method first checks the

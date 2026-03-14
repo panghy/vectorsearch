@@ -22,6 +22,7 @@ import io.github.panghy.vectorsearch.proto.GlobalBuildTask;
 import io.github.panghy.vectorsearch.proto.GlobalMaintenanceTask;
 import io.github.panghy.vectorsearch.proto.IndexMeta;
 import io.github.panghy.vectorsearch.proto.MaintenanceTask;
+import io.github.panghy.vectorsearch.proto.SegmentMeta;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -549,5 +550,161 @@ class GlobalTaskQueueEdgeCaseTest {
     assertThat(reconstructed.getPqK()).isEqualTo(8);
     assertThat(reconstructed.getGraphDegree()).isEqualTo(4);
     assertThat(reconstructed.getMaxSegmentSize()).isEqualTo(2);
+  }
+
+  // ---- Test: Vacuum follow-up FindCompactionCandidates goes to global queue ----
+  @Test
+  void vacuumFollowUp_findCandidates_enqueuesOnGlobalQueue() throws Exception {
+    // Create index with autoFindCompactionCandidates enabled and small maxSegmentSize
+    // so that after vacuum the segment count < maxSegmentSize/2 triggers follow-up.
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
+        .dimension(4)
+        .pqM(2)
+        .pqK(8)
+        .graphDegree(4)
+        .maxSegmentSize(100) // large enough that count < 50 triggers follow-up
+        .vacuumMinDeletedRatio(0.0)
+        .autoFindCompactionCandidates(true)
+        .globalTaskQueueConfig(globalConfig)
+        .build();
+    index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
+
+    // Insert 2 vectors and seal segment 0
+    long g0 = index.add(new float[] {1, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    index.add(new float[] {0, 1, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+    new SegmentBuildService(cfg, dirs).build(0).get(30, TimeUnit.SECONDS);
+
+    // Delete a vector to create a tombstone
+    index.delete(g0).get(5, TimeUnit.SECONDS);
+
+    // Claim and fail the vacuum task so the runner can re-claim it
+    var vacClaim = globalMaintQueue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(vacClaim.task().getTask().hasVacuum()).isTrue();
+    vacClaim.fail().get(5, TimeUnit.SECONDS);
+
+    // Process the vacuum via GlobalWorkerRunner
+    WorkerConfig workerCfg =
+        WorkerConfig.builder().autoFindCompactionCandidates(true).build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+    runner.runOnceMaint().get(30, TimeUnit.SECONDS);
+
+    // The vacuum follow-up should have enqueued a FindCompactionCandidates on the GLOBAL queue
+    var followUp = globalMaintQueue.awaitAndClaimTask(db).get(10, TimeUnit.SECONDS);
+    GlobalMaintenanceTask gmt = followUp.task();
+    assertThat(gmt.getTask().hasFindCandidates()).isTrue();
+    assertThat(gmt.getIndexPathList()).isEqualTo(root.getPath());
+    followUp.complete().get(5, TimeUnit.SECONDS);
+  }
+
+  // ---- Test: FindCompactionCandidates marks COMPACTING and enqueues Compact on global queue ----
+  @Test
+  void findCandidates_marksCOMPACTING_enqueuesCompactOnGlobalQueue() throws Exception {
+    // Create index with 2 small sealed segments to be compaction candidates
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
+        .dimension(4)
+        .pqM(2)
+        .pqK(8)
+        .graphDegree(4)
+        .maxSegmentSize(2)
+        .maxConcurrentCompactions(2)
+        .compactionMinSegments(2)
+        .compactionMinFragmentation(0.0) // no fragmentation threshold
+        .globalTaskQueueConfig(globalConfig)
+        .build();
+    index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
+
+    // Insert vectors to fill seg 0 and trigger rotation
+    index.add(new float[] {1, 0, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    index.add(new float[] {0, 1, 0, 0}, null).get(5, TimeUnit.SECONDS);
+    index.add(new float[] {0, 0, 1, 0}, null).get(5, TimeUnit.SECONDS);
+
+    // Build seg 0 via runner
+    WorkerConfig workerCfg = WorkerConfig.builder()
+        .maxConcurrentCompactions(2)
+        .compactionMinSegments(2)
+        .compactionMinFragmentation(0.0)
+        .build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+    runner.runOnceBuild().get(30, TimeUnit.SECONDS);
+
+    // Insert more to fill seg 1 and trigger rotation
+    index.add(new float[] {0, 0, 0, 1}, null).get(5, TimeUnit.SECONDS);
+    index.add(new float[] {1, 1, 0, 0}, null).get(5, TimeUnit.SECONDS);
+
+    // Build seg 1
+    runner.runOnceBuild().get(30, TimeUnit.SECONDS);
+
+    // Now enqueue a FindCompactionCandidates task on the global queue
+    MaintenanceTask fcc = MaintenanceTask.newBuilder()
+        .setFindCandidates(MaintenanceTask.FindCompactionCandidates.newBuilder()
+            .setAnchorSegId(0)
+            .build())
+        .build();
+    GlobalMaintenanceTask gmt = GlobalMaintenanceTask.newBuilder()
+        .addAllIndexPath(root.getPath())
+        .setTask(fcc)
+        .build();
+    globalMaintQueue.enqueue("find-candidates:0", gmt).get(5, TimeUnit.SECONDS);
+
+    // Process the FindCompactionCandidates task
+    runner.runOnceMaint().get(30, TimeUnit.SECONDS);
+
+    // Verify segments are marked COMPACTING
+    var dirs = FdbDirectories.openIndex(root, db).get(5, TimeUnit.SECONDS);
+    SegmentMeta seg0 = db.readAsync(tr -> dirs.segmentKeys(tr, 0)
+            .thenCompose(sk -> tr.get(sk.metaKey()))
+            .thenApply(b -> {
+              try {
+                return SegmentMeta.parseFrom(b);
+              } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                throw new RuntimeException(e);
+              }
+            }))
+        .get(5, TimeUnit.SECONDS);
+    assertThat(seg0.getState()).isEqualTo(SegmentMeta.State.COMPACTING);
+
+    // Verify a Compact task was enqueued on the global queue
+    var compactClaim = globalMaintQueue.awaitAndClaimTask(db).get(10, TimeUnit.SECONDS);
+    assertThat(compactClaim.task().getTask().hasCompact()).isTrue();
+    assertThat(compactClaim.task().getIndexPathList()).isEqualTo(root.getPath());
+    compactClaim.complete().get(5, TimeUnit.SECONDS);
+  }
+
+  // ---- Test: FindCompactionCandidates with maxConcurrentCompactions=0 is no-op ----
+  @Test
+  void findCandidates_maxConcurrentCompactionsZero_isNoOp() throws Exception {
+    VectorIndexConfig cfg = VectorIndexConfig.builder(db, root)
+        .dimension(4)
+        .pqM(2)
+        .pqK(8)
+        .graphDegree(4)
+        .maxSegmentSize(2)
+        .maxConcurrentCompactions(0)
+        .globalTaskQueueConfig(globalConfig)
+        .build();
+    index = VectorIndex.createOrOpen(cfg).get(10, TimeUnit.SECONDS);
+
+    // Enqueue a FindCompactionCandidates task
+    MaintenanceTask fcc = MaintenanceTask.newBuilder()
+        .setFindCandidates(MaintenanceTask.FindCompactionCandidates.newBuilder()
+            .setAnchorSegId(0)
+            .build())
+        .build();
+    GlobalMaintenanceTask gmt = GlobalMaintenanceTask.newBuilder()
+        .addAllIndexPath(root.getPath())
+        .setTask(fcc)
+        .build();
+    globalMaintQueue.enqueue("find-candidates:0", gmt).get(5, TimeUnit.SECONDS);
+
+    // Process with maxConcurrentCompactions=0
+    WorkerConfig workerCfg =
+        WorkerConfig.builder().maxConcurrentCompactions(0).build();
+    runner = new GlobalWorkerRunner(db, workerCfg, globalConfig);
+    runner.runOnceMaint().get(30, TimeUnit.SECONDS);
+
+    // No Compact task should be enqueued — queue should be empty
+    boolean empty = db.runAsync(tr -> globalMaintQueue.isEmpty(tr)).get(5, TimeUnit.SECONDS);
+    assertThat(empty).isTrue();
   }
 }
