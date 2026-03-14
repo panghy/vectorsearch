@@ -86,4 +86,190 @@ class VectorIndexConfigValidationTest {
             .build())
         .isInstanceOf(IllegalArgumentException.class);
   }
+
+  // ---- WorkerConfig.Builder validation tests ----
+
+  @Test
+  void workerConfig_rejectsInvalidEstimatedWorkerCount() {
+    assertThatThrownBy(() -> WorkerConfig.builder().estimatedWorkerCount(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("estimatedWorkerCount");
+    assertThatThrownBy(() -> WorkerConfig.builder().estimatedWorkerCount(-1).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidDefaultTtl() {
+    assertThatThrownBy(
+            () -> WorkerConfig.builder().defaultTtl(Duration.ZERO).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultTtl");
+    assertThatThrownBy(() -> WorkerConfig.builder()
+            .defaultTtl(Duration.ofSeconds(-1))
+            .build())
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> WorkerConfig.builder().defaultTtl(null).build())
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void workerConfig_rejectsNegativeDefaultThrottle() {
+    assertThatThrownBy(() -> WorkerConfig.builder()
+            .defaultThrottle(Duration.ofSeconds(-1))
+            .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("defaultThrottle");
+  }
+
+  @Test
+  void workerConfig_rejectsNegativeMaxConcurrentCompactions() {
+    assertThatThrownBy(() ->
+            WorkerConfig.builder().maxConcurrentCompactions(-1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("maxConcurrentCompactions");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidVacuumCooldown() {
+    assertThatThrownBy(() -> WorkerConfig.builder()
+            .vacuumCooldown(Duration.ofSeconds(-1))
+            .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("vacuumCooldown");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidVacuumMinDeletedRatio() {
+    assertThatThrownBy(
+            () -> WorkerConfig.builder().vacuumMinDeletedRatio(-0.1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("vacuumMinDeletedRatio");
+    assertThatThrownBy(
+            () -> WorkerConfig.builder().vacuumMinDeletedRatio(1.1).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidBuildTxnLimitBytes() {
+    assertThatThrownBy(() -> WorkerConfig.builder().buildTxnLimitBytes(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("buildTxnLimitBytes");
+    assertThatThrownBy(() -> WorkerConfig.builder().buildTxnLimitBytes(-1).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidBuildTxnSoftLimitRatio() {
+    assertThatThrownBy(
+            () -> WorkerConfig.builder().buildTxnSoftLimitRatio(0.0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("buildTxnSoftLimitRatio");
+    assertThatThrownBy(
+            () -> WorkerConfig.builder().buildTxnSoftLimitRatio(1.0).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidBuildSizeCheckEvery() {
+    assertThatThrownBy(() -> WorkerConfig.builder().buildSizeCheckEvery(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("buildSizeCheckEvery");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidBatchLoadSizes() {
+    assertThatThrownBy(() -> WorkerConfig.builder().codebookBatchLoadSize(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("codebookBatchLoadSize");
+    assertThatThrownBy(
+            () -> WorkerConfig.builder().adjacencyBatchLoadSize(0).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("adjacencyBatchLoadSize");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidCompactionMinSegments() {
+    assertThatThrownBy(() -> WorkerConfig.builder().compactionMinSegments(1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("compactionMinSegments");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidCompactionMaxSegments() {
+    assertThatThrownBy(() -> WorkerConfig.builder()
+            .compactionMinSegments(4)
+            .compactionMaxSegments(3)
+            .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("compactionMaxSegments");
+  }
+
+  @Test
+  void workerConfig_rejectsInvalidCompactionMinFragmentation() {
+    assertThatThrownBy(() ->
+            WorkerConfig.builder().compactionMinFragmentation(-0.1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("compactionMinFragmentation");
+    assertThatThrownBy(() ->
+            WorkerConfig.builder().compactionMinFragmentation(1.1).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void workerConfig_rejectsNegativeCompactionBiasWeights() {
+    assertThatThrownBy(() ->
+            WorkerConfig.builder().compactionAgeBiasWeight(-0.1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("compactionAgeBiasWeight");
+    assertThatThrownBy(() ->
+            WorkerConfig.builder().compactionSizeBiasWeight(-0.1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("compactionSizeBiasWeight");
+    assertThatThrownBy(() ->
+            WorkerConfig.builder().compactionFragBiasWeight(-0.1).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("compactionFragBiasWeight");
+  }
+
+  @Test
+  void workerConfig_rejectsNullInstantSource() {
+    assertThatThrownBy(() -> WorkerConfig.builder().instantSource(null).build())
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void workerConfig_defaultsAreValid() {
+    // Default builder should produce a valid WorkerConfig without throwing
+    WorkerConfig cfg = WorkerConfig.builder().build();
+    org.assertj.core.api.Assertions.assertThat(cfg.getEstimatedWorkerCount())
+        .isEqualTo(1);
+    org.assertj.core.api.Assertions.assertThat(cfg.getDefaultTtl()).isEqualTo(Duration.ofMinutes(5));
+  }
+
+  @Test
+  void vectorIndexConfig_rejectsInvalidPrebuiltWorkerConfig() {
+    // When a pre-built WorkerConfig with invalid values is supplied to VectorIndexConfig,
+    // the WorkerConfig.Builder.build() should reject it before it reaches VectorIndexConfig
+    assertThatThrownBy(() -> {
+          WorkerConfig bad =
+              WorkerConfig.builder().estimatedWorkerCount(0).build();
+          VectorIndexConfig.builder(db, root)
+              .dimension(4)
+              .workerConfig(bad)
+              .build();
+        })
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("estimatedWorkerCount");
+
+    assertThatThrownBy(() -> {
+          WorkerConfig bad =
+              WorkerConfig.builder().buildTxnSoftLimitRatio(0.0).build();
+          VectorIndexConfig.builder(db, root)
+              .dimension(4)
+              .workerConfig(bad)
+              .build();
+        })
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("buildTxnSoftLimitRatio");
+  }
 }
